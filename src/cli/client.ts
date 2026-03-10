@@ -326,7 +326,6 @@ function handlePtyData(chunk: string): void {
 
 async function handlePtyExit(): Promise<void> {
   claudePty = null;
-  closeJsonlWatcher();
   state.busy = false;
   emitMessagesUpdate();
   scheduleSnapshot();

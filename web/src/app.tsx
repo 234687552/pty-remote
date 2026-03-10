@@ -50,7 +50,7 @@ export function App() {
   const appliedSessionIdRef = useRef<string | null>(null);
 
   const connected = Boolean(socketConnected && cli?.connected);
-  const canSend = connected && !snapshot.busy;
+  const canCompose = connected && !snapshot.busy;
 
   useEffect(() => {
     if (!terminalHostRef.current || terminalInstanceRef.current) {
@@ -332,9 +332,9 @@ export function App() {
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             rows={5}
-            placeholder={connected ? '输入消息，点击发送。' : '等待 CLI 连接...'}
+            placeholder={!connected ? '等待 CLI 连接...' : snapshot.busy ? 'Claude 正在运行...' : '输入消息，点击发送。'}
             className="min-h-32 w-full rounded-2xl border border-zinc-300 bg-zinc-50 px-4 py-3 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500"
-            disabled={!connected}
+            disabled={!canCompose}
           />
 
           <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -342,7 +342,7 @@ export function App() {
             <button
               type="submit"
               className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!canSend}
+              disabled={!canCompose}
             >
               {snapshot.busy ? '处理中...' : '发送'}
             </button>
