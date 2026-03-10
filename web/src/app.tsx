@@ -16,7 +16,14 @@ import type {
   WebCommandEnvelope,
   WebInitPayload
 } from '@shared/protocol.ts';
-import type { ChatMessage, CliDescriptor, RuntimeSnapshot } from '@shared/runtime-types.ts';
+import type {
+  ChatMessage,
+  ChatMessageBlock,
+  CliDescriptor,
+  MessageStatus,
+  RuntimeSnapshot,
+  ToolUseChatMessageBlock
+} from '@shared/runtime-types.ts';
 
 function createEmptySnapshot(): RuntimeSnapshot {
   return {
@@ -80,8 +87,8 @@ function MessageMarkdown({ content }: { content: string }) {
   );
 }
 
-function getToolInputPreview(input: string | undefined, maxChars = 180): string {
-  const normalized = (input || '').replace(/\s+/g, ' ').trim();
+function getToolInputPreview(input: string, maxChars = 180): string {
+  const normalized = input.replace(/\s+/g, ' ').trim();
   if (!normalized) {
     return '(no input)';
   }
@@ -93,127 +100,272 @@ function getToolInputPreview(input: string | undefined, maxChars = 180): string 
   return `${normalized.slice(0, maxChars - 3)}...`;
 }
 
-function getToolBadgeLabel(toolName: string | undefined): string {
+type ToolVariantTone = 'generic' | 'shell' | 'web' | 'mcp';
+
+function getToolVariant(toolName: string | undefined): { badgeLabel: string; tone: ToolVariantTone } {
   const normalized = (toolName || '').trim();
   const lower = normalized.toLowerCase();
 
   if (!normalized) {
-    return 'TL';
-  }
-  if (lower.includes('bash') || lower.includes('shell') || lower.includes('terminal')) {
-    return '>_';
-  }
-  if (lower.startsWith('web')) {
-    return 'WEB';
-  }
-  if (lower.startsWith('mcp__')) {
-    return 'MCP';
+    return { badgeLabel: 'TL', tone: 'generic' };
   }
 
-  return normalized.replace(/[^a-zA-Z0-9]/g, '').slice(0, 3).toUpperCase() || 'TL';
+  if (lower.includes('bash') || lower.includes('shell') || lower.includes('terminal')) {
+    return { badgeLabel: '>_', tone: 'shell' };
+  }
+
+  if (lower.startsWith('web')) {
+    return { badgeLabel: 'WEB', tone: 'web' };
+  }
+
+  if (lower.startsWith('mcp__')) {
+    return { badgeLabel: 'MCP', tone: 'mcp' };
+  }
+
+  return {
+    badgeLabel: normalized.replace(/[^a-zA-Z0-9]/g, '').slice(0, 3).toUpperCase() || 'TL',
+    tone: 'generic'
+  };
 }
 
-function ToolStatusIcon({ status }: { status: ChatMessage['status'] }) {
+function getCompactToolTitle(toolName: string | undefined): string {
+  const normalized = (toolName || '').trim();
+  const lower = normalized.toLowerCase();
+
+  if (!normalized) {
+    return 'Tool';
+  }
+
+  if (lower.includes('bash') || lower.includes('shell') || lower.includes('terminal')) {
+    return 'Shell';
+  }
+
+  if (lower.startsWith('web')) {
+    return normalized.split(/[.:/]/).at(-1) || 'Web';
+  }
+
+  if (lower.startsWith('mcp__')) {
+    return normalized.split('__').at(-1) || 'MCP';
+  }
+
+  return normalized.split(/[.:/]/).at(-1) || normalized;
+}
+
+function getToolToneClasses(tone: ToolVariantTone): {
+  badge: string;
+  surface: string;
+  border: string;
+  title: string;
+  meta: string;
+} {
+  switch (tone) {
+    case 'shell':
+      return {
+        badge: 'bg-slate-900 text-white',
+        surface: 'bg-slate-50',
+        border: 'border-slate-200',
+        title: 'text-slate-950',
+        meta: 'text-slate-600'
+      };
+    case 'web':
+      return {
+        badge: 'bg-sky-600 text-white',
+        surface: 'bg-sky-50',
+        border: 'border-sky-200',
+        title: 'text-sky-950',
+        meta: 'text-sky-700'
+      };
+    case 'mcp':
+      return {
+        badge: 'bg-emerald-600 text-white',
+        surface: 'bg-emerald-50',
+        border: 'border-emerald-200',
+        title: 'text-emerald-950',
+        meta: 'text-emerald-700'
+      };
+    case 'generic':
+    default:
+      return {
+        badge: 'bg-zinc-200 text-zinc-700',
+        surface: 'bg-white',
+        border: 'border-zinc-200',
+        title: 'text-zinc-900',
+        meta: 'text-zinc-500'
+      };
+  }
+}
+
+function ToolStatusIcon({ status }: { status: MessageStatus }) {
   if (status === 'error') {
-    return <span className="text-sm text-red-600">●</span>;
+    return <span className="inline-block h-2 w-2 rounded-full bg-red-600" />;
   }
   if (status === 'complete') {
-    return <span className="text-sm text-emerald-600">◉</span>;
+    return <span className="inline-block h-2 w-2 rounded-full bg-emerald-600" />;
   }
-  return <span className="text-sm text-amber-500">◌</span>;
+  return <span className="inline-block h-2 w-2 rounded-full bg-amber-500 animate-pulse" />;
 }
 
 function ToolDetailSection({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <section className="space-y-2">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{label}</div>
+    <section className="space-y-1.5">
+      <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{label}</div>
       {children}
     </section>
   );
 }
 
+function hasNonTextBlock(message: ChatMessage): boolean {
+  return message.blocks.some((block) => block.type !== 'text');
+}
+
 function MessageShell({ message, children }: { message: ChatMessage; children: React.ReactNode }) {
-  const shellClass =
-    message.type === 'tool-invocation'
-      ? 'rounded-2xl border border-zinc-200 bg-zinc-100/90 p-2.5 text-sm break-words'
-      : [
-          'rounded-2xl border p-3 text-sm break-words',
-          message.role === 'user'
-            ? 'border-zinc-200 bg-zinc-50'
-            : message.status === 'error'
-              ? 'border-red-200 bg-red-50'
-              : 'border-blue-200 bg-blue-50'
-        ].join(' ');
+  if (hasNonTextBlock(message)) {
+    return <>{children}</>;
+  }
+
+  const shellClass = [
+    'rounded-xl border px-3 py-2.5 text-sm break-words',
+    message.role === 'user'
+      ? 'border-zinc-200 bg-zinc-50'
+      : message.status === 'error'
+        ? 'border-red-200 bg-red-50'
+        : 'border-blue-200 bg-blue-50'
+  ].join(' ');
 
   return (
     <article className={shellClass}>
-      {message.type !== 'tool-invocation' ? (
-        <div className="mb-2 flex items-center justify-between gap-2 text-xs uppercase tracking-wide text-zinc-500">
-          <span>{message.role}</span>
-          <span>{message.status}</span>
-        </div>
-      ) : null}
+      <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px] uppercase tracking-wide text-zinc-500">
+        <span>{message.role}</span>
+        <span>{message.status}</span>
+      </div>
       {children}
     </article>
   );
 }
 
-function MarkdownMessageContent({ message }: { message: ChatMessage }) {
-  return <MessageMarkdown content={message.content || (message.status === 'streaming' ? '...' : '')} />;
+interface ToolCallMeta {
+  toolName?: string;
+  useBlockId?: string;
+  resultStatus?: MessageStatus;
 }
 
-function ToolCallMessageContent({ message }: { message: ChatMessage }) {
-  const toolName = message.toolName || 'Tool';
-  const toolInput = message.toolInput || '';
-  const toolResult = message.toolResult || '';
+function createToolCallIndex(messages: ChatMessage[]): Map<string, ToolCallMeta> {
+  const index = new Map<string, ToolCallMeta>();
+
+  for (const message of messages) {
+    for (const block of message.blocks) {
+      if (block.type === 'tool_use' && block.toolCallId) {
+        index.set(block.toolCallId, {
+          ...index.get(block.toolCallId),
+          toolName: block.toolName,
+          useBlockId: block.id
+        });
+      }
+
+      if (block.type === 'tool_result' && block.toolCallId) {
+        index.set(block.toolCallId, {
+          ...index.get(block.toolCallId),
+          resultStatus: block.isError ? 'error' : 'complete'
+        });
+      }
+    }
+  }
+
+  return index;
+}
+
+function TextBlockContent({ block, isStreaming }: { block: Extract<ChatMessageBlock, { type: 'text' }>; isStreaming: boolean }) {
+  const content = isStreaming ? `${block.text}\n\n...` : block.text;
+  return <MessageMarkdown content={content} />;
+}
+
+function resolveToolUseStatus(
+  block: ToolUseChatMessageBlock,
+  toolCallIndex: Map<string, ToolCallMeta>,
+  fallbackStatus: MessageStatus
+): MessageStatus {
+  if (!block.toolCallId) {
+    return fallbackStatus;
+  }
+
+  return toolCallIndex.get(block.toolCallId)?.resultStatus ?? fallbackStatus;
+}
+
+function ToolUseBlockContent({
+  block,
+  status
+}: {
+  block: ToolUseChatMessageBlock;
+  status: MessageStatus;
+}) {
+  const variant = getToolVariant(block.toolName);
+  const compactTitle = getCompactToolTitle(block.toolName);
+  const toneClasses = getToolToneClasses(variant.tone);
+  const summaryPreview = getToolInputPreview(block.input, 112);
 
   return (
-    <details className="group overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm">
-      <summary className="cursor-pointer list-none px-4 py-3 [&::-webkit-details-marker]:hidden">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex min-w-0 items-start gap-3">
-            <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-zinc-200 text-[10px] font-semibold text-zinc-700">
-              {getToolBadgeLabel(toolName)}
+    <details className={`group overflow-hidden rounded-lg border ${toneClasses.border} ${toneClasses.surface} shadow-sm`}>
+      <summary className="cursor-pointer list-none px-3 py-2 [&::-webkit-details-marker]:hidden">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <div
+              className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-[8px] font-semibold ${toneClasses.badge}`}
+            >
+              {variant.badgeLabel}
             </div>
-            <div className="min-w-0">
-              <div className="font-medium text-zinc-900">{toolName}</div>
-              <div className="mt-1 font-mono text-xs text-zinc-500">{getToolInputPreview(toolInput)}</div>
+            <div className="flex min-w-0 items-baseline gap-1.5">
+              <div className={`shrink-0 text-[11px] font-medium ${toneClasses.title}`}>{compactTitle}</div>
+              <div className={`min-w-0 truncate font-mono text-[11px] ${toneClasses.meta}`}>{summaryPreview || '(no input)'}</div>
             </div>
           </div>
-          <div className="flex shrink-0 items-center gap-2 text-xs text-zinc-500">
-            <ToolStatusIcon status={message.status} />
-            <span className="transition-transform group-open:rotate-180">▾</span>
+          <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-zinc-500">
+            <ToolStatusIcon status={status} />
+            <span className="text-[10px] transition-transform group-open:rotate-180">▾</span>
           </div>
         </div>
       </summary>
-      <div className="space-y-4 border-t border-zinc-200 px-4 py-4">
+      <div className={`space-y-3 border-t px-3 py-3 ${toneClasses.border}`}>
         <ToolDetailSection label="Input">
-          <pre className="overflow-auto rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-700">
-            {toolInput || '(no input)'}
+          <pre className="overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
+            {block.input || '(no input)'}
           </pre>
-        </ToolDetailSection>
-        <ToolDetailSection label="Result">
-          {toolResult ? (
-            <MessageMarkdown content={toolResult} />
-          ) : (
-            <div className="rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500">
-              Waiting for tool result.
-            </div>
-          )}
         </ToolDetailSection>
       </div>
     </details>
   );
 }
 
-function MessageContent({ message }: { message: ChatMessage }) {
-  switch (message.type) {
-    case 'tool-invocation':
-      return <ToolCallMessageContent message={message} />;
-    case 'markdown':
-    default:
-      return <MarkdownMessageContent message={message} />;
+function hasRenderableMessageContent(message: ChatMessage): boolean {
+  return message.blocks.some((block) => block.type !== 'tool_result');
+}
+
+function MessageContent({ message, toolCallIndex }: { message: ChatMessage; toolCallIndex: Map<string, ToolCallMeta> }) {
+  if (message.blocks.length === 0) {
+    return <MessageMarkdown content={message.status === 'streaming' ? '...' : ''} />;
   }
+
+  return (
+    <div className="space-y-2">
+      {message.blocks.map((block, index) => {
+        if (block.type === 'text') {
+          const isLastBlock = index === message.blocks.length - 1;
+          return <TextBlockContent key={block.id} block={block} isStreaming={message.status === 'streaming' && isLastBlock} />;
+        }
+
+        if (block.type === 'tool_use') {
+          return (
+            <ToolUseBlockContent
+              key={block.id}
+              block={block}
+              status={resolveToolUseStatus(block, toolCallIndex, message.status)}
+            />
+          );
+        }
+
+        return null;
+      })}
+    </div>
+  );
 }
 
 export function App() {
@@ -233,6 +385,11 @@ export function App() {
 
   const connected = Boolean(socketConnected && cli?.connected);
   const canCompose = connected && !snapshot.busy;
+  const toolCallIndex = useMemo(() => createToolCallIndex(snapshot.messages), [snapshot.messages]);
+  const renderableMessages = useMemo(
+    () => snapshot.messages.filter((message) => hasRenderableMessageContent(message)),
+    [snapshot.messages]
+  );
 
   useEffect(() => {
     if (!terminalHostRef.current || terminalInstanceRef.current) {
@@ -393,7 +550,7 @@ export function App() {
 
   useEffect(() => {
     messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight });
-  }, [snapshot.messages]);
+  }, [renderableMessages]);
 
   const headerText = useMemo(() => {
     if (!socketConnected) {
@@ -478,15 +635,15 @@ export function App() {
             <div className="border-b border-zinc-200 px-4 py-3">
               <h2 className="text-lg font-semibold">Messages</h2>
             </div>
-            <div ref={messagesRef} className="flex-1 space-y-3 overflow-auto px-4 py-4">
-              {snapshot.messages.length === 0 ? (
+            <div ref={messagesRef} className="flex-1 space-y-2 overflow-auto px-4 py-4">
+              {renderableMessages.length === 0 ? (
                 <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
                   等待 Claude jsonl 写入会话内容。
                 </div>
               ) : (
-                snapshot.messages.map((message) => (
+                renderableMessages.map((message) => (
                   <MessageShell key={message.id} message={message}>
-                    <MessageContent message={message} />
+                    <MessageContent message={message} toolCallIndex={toolCallIndex} />
                   </MessageShell>
                 ))
               )}

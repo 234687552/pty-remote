@@ -247,14 +247,9 @@ function messagesEqual(left: ChatMessage[], right: ChatMessage[]): boolean {
     return (
       message.id === next.id &&
       message.role === next.role &&
-      message.type === next.type &&
-      message.content === next.content &&
       message.status === next.status &&
       message.createdAt === next.createdAt &&
-      message.toolCallId === next.toolCallId &&
-      message.toolName === next.toolName &&
-      message.toolInput === next.toolInput &&
-      message.toolResult === next.toolResult
+      JSON.stringify(message.blocks) === JSON.stringify(next.blocks)
     );
   });
 }

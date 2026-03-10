@@ -1,6 +1,12 @@
 import path from 'node:path';
 
-import type { ChatMessage } from '../../shared/runtime-types.ts';
+import type {
+  ChatMessage,
+  ChatMessageBlock,
+  TextChatMessageBlock,
+  ToolResultChatMessageBlock,
+  ToolUseChatMessageBlock
+} from '../../shared/runtime-types.ts';
 
 interface ClaudeTextContentBlock {
   type?: string;
@@ -38,48 +44,82 @@ interface ClaudeJsonlRecord {
 
 type ClaudeMessageContent = string | ClaudeContentBlock[] | undefined;
 
-interface ParsedMessageEntry {
-  id: string;
-  role: 'user' | 'assistant';
-  type: ChatMessage['type'];
-  content: string;
-  status: ChatMessage['status'];
-  createdAt: string;
-  toolCallId?: string;
-  toolName?: string;
-  toolInput?: string;
-  toolResult?: string;
-}
-
 export function resolveClaudeJsonlFilePath(projectRoot: string, sessionId: string, homeDir: string): string {
   const projectSlug = projectRoot.replace(/[\\/]/g, '-');
   return path.join(homeDir, '.claude', 'projects', projectSlug, `${sessionId}.jsonl`);
+}
+
+function isTextContentBlock(block: ClaudeContentBlock): block is ClaudeTextContentBlock {
+  return block.type === 'text' && 'text' in block && typeof block.text === 'string';
+}
+
+function isToolUseContentBlock(block: ClaudeContentBlock): block is ClaudeToolUseContentBlock {
+  return block.type === 'tool_use';
+}
+
+function isToolResultContentBlock(block: ClaudeContentBlock): block is ClaudeToolResultContentBlock {
+  return block.type === 'tool_result';
+}
+
+function hasVisibleBlocks(blocks: ChatMessageBlock[]): boolean {
+  return blocks.some((block) => {
+    switch (block.type) {
+      case 'text':
+        return Boolean(block.text.trim());
+      case 'tool_use':
+        return Boolean(block.toolName || block.input);
+      case 'tool_result':
+        return Boolean(block.content.trim());
+      default:
+        return false;
+    }
+  });
+}
+
+function blocksEqual(left: ChatMessageBlock[], right: ChatMessageBlock[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((block, index) => {
+    const next = right[index];
+    if (!next || block.type !== next.type || block.id !== next.id) {
+      return false;
+    }
+
+    switch (block.type) {
+      case 'text':
+        return next.type === 'text' && block.text === next.text;
+      case 'tool_use':
+        return (
+          next.type === 'tool_use' &&
+          block.toolCallId === next.toolCallId &&
+          block.toolName === next.toolName &&
+          block.input === next.input
+        );
+      case 'tool_result':
+        return (
+          next.type === 'tool_result' &&
+          block.toolCallId === next.toolCallId &&
+          block.content === next.content &&
+          block.isError === next.isError
+        );
+      default:
+        return false;
+    }
+  });
 }
 
 function compactMessages(messages: ChatMessage[]): ChatMessage[] {
   const compacted: ChatMessage[] = [];
 
   for (const message of messages) {
-    const hasVisibleContent =
-      message.type === 'tool-invocation'
-        ? Boolean(message.toolName || message.toolInput || message.toolResult)
-        : Boolean(message.content.trim());
-
-    if (!hasVisibleContent) {
+    if (!hasVisibleBlocks(message.blocks)) {
       continue;
     }
 
     const previous = compacted.at(-1);
-    if (
-      previous &&
-      previous.role === message.role &&
-      previous.type === message.type &&
-      previous.content === message.content &&
-      previous.toolCallId === message.toolCallId &&
-      previous.toolName === message.toolName &&
-      previous.toolInput === message.toolInput &&
-      previous.toolResult === message.toolResult
-    ) {
+    if (previous && previous.role === message.role && blocksEqual(previous.blocks, message.blocks)) {
       compacted[compacted.length - 1] = message;
       continue;
     }
@@ -116,177 +156,123 @@ function extractTextContent(content: ClaudeMessageContent): string {
   }
 
   return content
-    .filter((block) => block && block.type === 'text' && typeof block.text === 'string')
+    .filter(isTextContentBlock)
     .map((block) => block.text?.trimEnd() ?? '')
     .filter(Boolean)
     .join('\n\n')
     .trim();
 }
 
-function resolveToolInvocationMessageId(
-  record: ClaudeJsonlRecord,
-  block: ClaudeToolUseContentBlock | ClaudeToolResultContentBlock,
-  index: number
-): string | null {
-  if ('id' in block && block.id) {
-    return `tool:${block.id}`;
+function resolveRecordMessageId(record: ClaudeJsonlRecord, role: 'user' | 'assistant'): string | null {
+  if (role === 'assistant') {
+    return record.message?.id ?? record.uuid ?? null;
   }
 
-  if ('tool_use_id' in block && block.tool_use_id) {
-    return `tool:${block.tool_use_id}`;
-  }
+  return record.uuid ?? null;
+}
 
-  if (!record.uuid) {
+function createTextBlock(baseId: string, text: string, index = 0): TextChatMessageBlock | null {
+  const normalizedText = text.trimEnd();
+  if (!normalizedText.trim()) {
     return null;
   }
 
-  return `${record.uuid}:tool:${index}`;
+  return {
+    id: `${baseId}:text:${index}`,
+    type: 'text',
+    text: normalizedText
+  };
 }
 
-function flushTextEntry(entries: ParsedMessageEntry[], record: ClaudeJsonlRecord, role: 'user' | 'assistant', textParts: string[]): void {
-  const content = textParts.map((part) => part.trimEnd()).filter(Boolean).join('\n\n').trim();
-  if (!content) {
-    return;
-  }
-
-  const baseId = role === 'assistant' ? record.message?.id ?? record.uuid : record.uuid;
-  if (!baseId) {
-    return;
-  }
-
-  entries.push({
-    id: `${baseId}:text`,
-    role,
-    type: 'markdown',
-    content,
-    status: 'complete',
-    createdAt: record.timestamp ?? new Date().toISOString()
-  });
+function createToolUseBlock(baseId: string, block: ClaudeToolUseContentBlock, index: number): ToolUseChatMessageBlock {
+  return {
+    id: block.id ? `tool:${block.id}:use` : `${baseId}:tool_use:${index}`,
+    type: 'tool_use',
+    toolCallId: block.id,
+    toolName: block.name?.trim() || 'unknown',
+    input: stringifyUnknown(block.input)
+  };
 }
 
-function extractMessageEntries(record: ClaudeJsonlRecord): ParsedMessageEntry[] {
-  const role = record.message?.role;
-  if (role !== 'user' && role !== 'assistant') {
-    return [];
-  }
+function createToolResultBlock(baseId: string, block: ClaudeToolResultContentBlock, index: number): ToolResultChatMessageBlock {
+  return {
+    id: block.tool_use_id ? `tool:${block.tool_use_id}:result:${index}` : `${baseId}:tool_result:${index}`,
+    type: 'tool_result',
+    toolCallId: block.tool_use_id,
+    content: stringifyUnknown(block.content),
+    isError: Boolean(block.is_error)
+  };
+}
 
+function extractMessageBlocks(record: ClaudeJsonlRecord, baseId: string): ChatMessageBlock[] {
   const rawContent = record.message?.content;
+
   if (typeof rawContent === 'string') {
-    const content = rawContent.trim();
-    if (!content) {
-      return [];
-    }
-
-    const baseId = role === 'assistant' ? record.message?.id ?? record.uuid : record.uuid;
-    if (!baseId) {
-      return [];
-    }
-
-    return [
-      {
-        id: `${baseId}:text`,
-        role,
-        type: 'markdown',
-        content,
-        status: 'complete',
-        createdAt: record.timestamp ?? new Date().toISOString()
-      }
-    ];
+    const textBlock = createTextBlock(baseId, rawContent);
+    return textBlock ? [textBlock] : [];
   }
 
   if (!Array.isArray(rawContent)) {
     return [];
   }
 
-  const entries: ParsedMessageEntry[] = [];
-  const textParts: string[] = [];
+  const blocks: ChatMessageBlock[] = [];
 
   for (const [index, block] of rawContent.entries()) {
     if (!block || typeof block !== 'object') {
       continue;
     }
 
-    if (block.type === 'text' && typeof block.text === 'string') {
-      textParts.push(block.text);
+    if (isTextContentBlock(block)) {
+      const textBlock = createTextBlock(baseId, block.text ?? '', index);
+      if (textBlock) {
+        blocks.push(textBlock);
+      }
       continue;
     }
 
-    flushTextEntry(entries, record, role, textParts);
-    textParts.length = 0;
-
-    if (block.type === 'tool_use' && role === 'assistant') {
-      const messageId = resolveToolInvocationMessageId(record, block, index);
-      if (!messageId) {
-        continue;
-      }
-
-      const toolInput = stringifyUnknown(block.input);
-      entries.push({
-        id: messageId,
-        role: 'assistant',
-        type: 'tool-invocation',
-        content: '',
-        status: 'streaming',
-        createdAt: record.timestamp ?? new Date().toISOString(),
-        toolCallId: block.id,
-        toolName: block.name || 'unknown',
-        toolInput
-      });
+    if (isToolUseContentBlock(block)) {
+      blocks.push(createToolUseBlock(baseId, block, index));
       continue;
     }
 
-    if (block.type === 'tool_result') {
-      const messageId = resolveToolInvocationMessageId(record, block, index);
-      if (!messageId) {
-        continue;
-      }
-
-      entries.push({
-        id: messageId,
-        role: 'assistant',
-        type: 'tool-invocation',
-        content: '',
-        status: block.is_error ? 'error' : 'complete',
-        createdAt: record.timestamp ?? new Date().toISOString(),
-        toolCallId: block.tool_use_id,
-        toolResult: stringifyUnknown(block.content)
-      });
+    if (isToolResultContentBlock(block)) {
+      blocks.push(createToolResultBlock(baseId, block, index));
     }
   }
 
-  flushTextEntry(entries, record, role, textParts);
-  return entries;
+  return blocks;
 }
 
-function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessage>, entry: ParsedMessageEntry): void {
-  const existing = messagesById.get(entry.id);
-  const hasVisibleContent =
-    entry.type === 'tool-invocation'
-      ? Boolean(entry.toolName || entry.toolInput || entry.toolResult || existing?.toolName || existing?.toolInput || existing?.toolResult)
-      : Boolean(entry.content || existing?.content);
+function deriveMessageStatus(blocks: ChatMessageBlock[]): ChatMessage['status'] {
+  if (blocks.some((block) => block.type === 'tool_result' && block.isError)) {
+    return 'error';
+  }
 
-  if (!hasVisibleContent && !existing) {
+  return 'complete';
+}
+
+function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessage>, nextMessage: ChatMessage): void {
+  const existing = messagesById.get(nextMessage.id);
+  const blocks = hasVisibleBlocks(nextMessage.blocks) ? nextMessage.blocks : existing?.blocks ?? [];
+
+  if (!hasVisibleBlocks(blocks)) {
     return;
   }
 
-  const nextMessage: ChatMessage = {
-    id: entry.id,
-    role: entry.role,
-    type: entry.type,
-    content: entry.content || existing?.content || '',
-    status: entry.status,
-    createdAt: existing?.createdAt || entry.createdAt || new Date().toISOString(),
-    toolCallId: entry.toolCallId ?? existing?.toolCallId,
-    toolName: entry.toolName ?? existing?.toolName,
-    toolInput: entry.toolInput ?? existing?.toolInput,
-    toolResult: entry.toolResult ?? existing?.toolResult
+  const mergedMessage: ChatMessage = {
+    id: nextMessage.id,
+    role: nextMessage.role,
+    blocks,
+    status: nextMessage.status,
+    createdAt: existing?.createdAt || nextMessage.createdAt
   };
 
   if (!existing) {
-    orderedIds.push(entry.id);
+    orderedIds.push(nextMessage.id);
   }
 
-  messagesById.set(entry.id, nextMessage);
+  messagesById.set(nextMessage.id, mergedMessage);
 }
 
 export function parseClaudeJsonlState(rawText: string): { busy: boolean; messages: ChatMessage[] } {
@@ -316,6 +302,11 @@ export function parseClaudeJsonlState(rawText: string): { busy: boolean; message
       continue;
     }
 
+    const messageId = resolveRecordMessageId(record, role);
+    if (!messageId) {
+      continue;
+    }
+
     if (role === 'user' && !isToolResultUserMessage) {
       busy = true;
     }
@@ -332,14 +323,20 @@ export function parseClaudeJsonlState(rawText: string): { busy: boolean; message
       }
     }
 
-    for (const entry of extractMessageEntries(record)) {
-      upsertMessage(orderedIds, messagesById, entry);
-    }
+    const blocks = extractMessageBlocks(record, messageId);
+    upsertMessage(orderedIds, messagesById, {
+      id: messageId,
+      role,
+      blocks,
+      status: deriveMessageStatus(blocks),
+      createdAt: record.timestamp ?? new Date().toISOString()
+    });
   }
 
   const messages = compactMessages(
     orderedIds.map((messageId) => messagesById.get(messageId)).filter(Boolean) as ChatMessage[]
   );
+
   if (busy) {
     const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant');
     if (lastAssistant) {
