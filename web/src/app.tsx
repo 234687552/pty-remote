@@ -5,6 +5,7 @@ import { Terminal } from 'xterm';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Mermaid as MermaidApi } from 'mermaid';
+import type { PanZoom as PanZoomInstance } from 'panzoom';
 
 import type {
   CliCommandName,
@@ -62,6 +63,7 @@ interface SvgDimensions {
 
 let mermaidRenderSequence = 0;
 let mermaidLoader: Promise<MermaidApi> | null = null;
+let panzoomLoader: Promise<typeof import('panzoom').default> | null = null;
 
 function loadMermaid(): Promise<MermaidApi> {
   if (!mermaidLoader) {
@@ -82,6 +84,19 @@ function loadMermaid(): Promise<MermaidApi> {
   }
 
   return mermaidLoader;
+}
+
+function loadPanzoom(): Promise<typeof import('panzoom').default> {
+  if (!panzoomLoader) {
+    panzoomLoader = import('panzoom')
+      .then(({ default: createPanzoom }) => createPanzoom)
+      .catch((error) => {
+        panzoomLoader = null;
+        throw error;
+      });
+  }
+
+  return panzoomLoader;
 }
 
 function normalizeClassName(className: unknown): string {
@@ -165,21 +180,12 @@ function MermaidDiagram({ definition }: { definition: string }) {
   const inlineContainerRef = useRef<HTMLDivElement | null>(null);
   const expandedContainerRef = useRef<HTMLDivElement | null>(null);
   const expandedViewportRef = useRef<HTMLDivElement | null>(null);
+  const expandedPanzoomRef = useRef<PanZoomInstance | null>(null);
   const bindFunctionsRef = useRef<((element: Element) => void) | null>(null);
-  const dragStateRef = useRef<{
-    pointerId: number;
-    scrollLeft: number;
-    scrollTop: number;
-    startX: number;
-    startY: number;
-  } | null>(null);
   const [svg, setSvg] = useState('');
   const [svgDimensions, setSvgDimensions] = useState<SvgDimensions | null>(null);
   const [error, setError] = useState('');
   const [isExpanded, setIsExpanded] = useState(false);
-  const [isDraggingExpanded, setIsDraggingExpanded] = useState(false);
-
-  const expandedScale = 1.6;
 
   useEffect(() => {
     let cancelled = false;
@@ -240,8 +246,8 @@ function MermaidDiagram({ definition }: { definition: string }) {
 
   useEffect(() => {
     if (!isExpanded) {
-      setIsDraggingExpanded(false);
-      dragStateRef.current = null;
+      expandedPanzoomRef.current?.dispose();
+      expandedPanzoomRef.current = null;
       return;
     }
 
@@ -263,76 +269,75 @@ function MermaidDiagram({ definition }: { definition: string }) {
   }, [isExpanded]);
 
   useEffect(() => {
-    if (!isExpanded || !bindFunctionsRef.current || !expandedContainerRef.current) {
+    if (!isExpanded || !expandedContainerRef.current || !expandedViewportRef.current || !svg) {
       return;
     }
 
+    let cancelled = false;
     const frameId = window.requestAnimationFrame(() => {
-      if (expandedContainerRef.current && bindFunctionsRef.current) {
-        bindFunctionsRef.current(expandedContainerRef.current);
-      }
+      void (async () => {
+        const expandedContainer = expandedContainerRef.current;
+        const expandedViewport = expandedViewportRef.current;
+        if (!expandedContainer || !expandedViewport) {
+          return;
+        }
 
-      const svgElement = expandedContainerRef.current?.querySelector('svg');
-      if (svgElement && svgDimensions) {
-        svgElement.setAttribute('width', String(svgDimensions.width * expandedScale));
-        svgElement.setAttribute('height', String(svgDimensions.height * expandedScale));
-        svgElement.style.width = `${svgDimensions.width * expandedScale}px`;
-        svgElement.style.height = `${svgDimensions.height * expandedScale}px`;
-      }
+        const createPanzoom = await loadPanzoom();
+        if (cancelled) {
+          return;
+        }
+
+        bindFunctionsRef.current?.(expandedContainer);
+
+        const svgElement = expandedContainer.querySelector('svg');
+        if (!(svgElement instanceof SVGElement)) {
+          return;
+        }
+
+        expandedPanzoomRef.current?.dispose();
+
+        const diagramWidth = svgDimensions?.width || svgElement.viewBox.baseVal.width || svgElement.getBoundingClientRect().width || 1;
+        const diagramHeight = svgDimensions?.height || svgElement.viewBox.baseVal.height || svgElement.getBoundingClientRect().height || 1;
+        const fitWidth = Math.max(1, expandedViewport.clientWidth - 48);
+        const fitHeight = Math.max(1, expandedViewport.clientHeight - 48);
+        const fitZoom = Math.min(fitWidth / diagramWidth, fitHeight / diagramHeight, 1);
+        const initialZoom = Number.isFinite(fitZoom) && fitZoom > 0 ? fitZoom : 1;
+        const initialX = (expandedViewport.clientWidth - diagramWidth * initialZoom) / 2;
+        const initialY = (expandedViewport.clientHeight - diagramHeight * initialZoom) / 2;
+        const minZoom = Math.max(0.05, Math.min(0.2, initialZoom * 0.75));
+
+        svgElement.setAttribute('width', String(diagramWidth));
+        svgElement.setAttribute('height', String(diagramHeight));
+        svgElement.style.width = `${diagramWidth}px`;
+        svgElement.style.height = `${diagramHeight}px`;
+        svgElement.style.transformOrigin = '0 0';
+        svgElement.style.touchAction = 'none';
+        svgElement.style.userSelect = 'none';
+
+        expandedPanzoomRef.current = createPanzoom(svgElement, {
+          beforeMouseDown: (mouseEvent) => mouseEvent.button !== 0,
+          bounds: true,
+          boundsPadding: 0.12,
+          disableKeyboardInteraction: true,
+          initialX,
+          initialY,
+          initialZoom,
+          maxZoom: 6,
+          minZoom,
+          pinchSpeed: 1.5,
+          smoothScroll: false,
+          zoomDoubleClickSpeed: 1
+        });
+      })();
     });
 
     return () => {
+      cancelled = true;
       window.cancelAnimationFrame(frameId);
+      expandedPanzoomRef.current?.dispose();
+      expandedPanzoomRef.current = null;
     };
-  }, [expandedScale, isExpanded, svg, svgDimensions]);
-
-  const endExpandedDrag = (pointerId?: number) => {
-    const viewport = expandedViewportRef.current;
-    if (viewport && pointerId !== undefined && viewport.hasPointerCapture(pointerId)) {
-      viewport.releasePointerCapture(pointerId);
-    }
-    dragStateRef.current = null;
-    setIsDraggingExpanded(false);
-  };
-
-  const handleExpandedPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || !expandedViewportRef.current) {
-      return;
-    }
-
-    dragStateRef.current = {
-      pointerId: event.pointerId,
-      scrollLeft: expandedViewportRef.current.scrollLeft,
-      scrollTop: expandedViewportRef.current.scrollTop,
-      startX: event.clientX,
-      startY: event.clientY
-    };
-    expandedViewportRef.current.setPointerCapture(event.pointerId);
-    setIsDraggingExpanded(true);
-  };
-
-  const handleExpandedPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    const dragState = dragStateRef.current;
-    const viewport = expandedViewportRef.current;
-    if (!dragState || !viewport || dragState.pointerId !== event.pointerId) {
-      return;
-    }
-
-    viewport.scrollLeft = dragState.scrollLeft - (event.clientX - dragState.startX);
-    viewport.scrollTop = dragState.scrollTop - (event.clientY - dragState.startY);
-  };
-
-  const handleExpandedPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (dragStateRef.current?.pointerId === event.pointerId) {
-      endExpandedDrag(event.pointerId);
-    }
-  };
-
-  const handleExpandedPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (dragStateRef.current?.pointerId === event.pointerId) {
-      endExpandedDrag(event.pointerId);
-    }
-  };
+  }, [isExpanded, svg, svgDimensions]);
 
   if (error) {
     return (
@@ -399,19 +404,13 @@ function MermaidDiagram({ definition }: { definition: string }) {
             </div>
             <div
               ref={expandedViewportRef}
-              className={`relative flex-1 overflow-auto bg-zinc-100/80 p-6 touch-none ${isDraggingExpanded ? 'cursor-grabbing' : 'cursor-grab'}`}
-              onPointerDown={handleExpandedPointerDown}
-              onPointerMove={handleExpandedPointerMove}
-              onPointerUp={handleExpandedPointerUp}
-              onPointerCancel={handleExpandedPointerCancel}
+              className="relative flex-1 overflow-hidden bg-zinc-100/80 p-6 touch-none"
             >
-              <div className="flex min-h-full min-w-full items-start justify-center">
-                <div
-                  ref={expandedContainerRef}
-                  className="inline-block rounded-xl border border-zinc-200 bg-white shadow-lg [&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
-                  dangerouslySetInnerHTML={{ __html: svg }}
-                />
-              </div>
+              <div
+                ref={expandedContainerRef}
+                className="relative h-full w-full overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg [&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
+                dangerouslySetInnerHTML={{ __html: svg }}
+              />
             </div>
           </div>
         </div>
