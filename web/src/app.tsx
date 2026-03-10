@@ -178,14 +178,21 @@ function getSvgDimensions(svg: string): SvgDimensions | null {
 
 function MermaidDiagram({ definition }: { definition: string }) {
   const inlineContainerRef = useRef<HTMLDivElement | null>(null);
-  const expandedContainerRef = useRef<HTMLDivElement | null>(null);
   const expandedViewportRef = useRef<HTMLDivElement | null>(null);
+  const expandedPanTargetRef = useRef<HTMLDivElement | null>(null);
+  const expandedContentRef = useRef<HTMLDivElement | null>(null);
   const expandedPanzoomRef = useRef<PanZoomInstance | null>(null);
   const bindFunctionsRef = useRef<((element: Element) => void) | null>(null);
   const [svg, setSvg] = useState('');
   const [svgDimensions, setSvgDimensions] = useState<SvgDimensions | null>(null);
   const [error, setError] = useState('');
   const [isExpanded, setIsExpanded] = useState(false);
+  const [isLandscape, setIsLandscape] = useState(false);
+
+  const closeExpandedViewer = () => {
+    setIsExpanded(false);
+    setIsLandscape(false);
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -256,7 +263,7 @@ function MermaidDiagram({ definition }: { definition: string }) {
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setIsExpanded(false);
+        closeExpandedViewer();
       }
     };
 
@@ -269,16 +276,17 @@ function MermaidDiagram({ definition }: { definition: string }) {
   }, [isExpanded]);
 
   useEffect(() => {
-    if (!isExpanded || !expandedContainerRef.current || !expandedViewportRef.current || !svg) {
+    if (!isExpanded || !expandedViewportRef.current || !expandedPanTargetRef.current || !expandedContentRef.current || !svg) {
       return;
     }
 
     let cancelled = false;
     const frameId = window.requestAnimationFrame(() => {
       void (async () => {
-        const expandedContainer = expandedContainerRef.current;
         const expandedViewport = expandedViewportRef.current;
-        if (!expandedContainer || !expandedViewport) {
+        const expandedPanTarget = expandedPanTargetRef.current;
+        const expandedContent = expandedContentRef.current;
+        if (!expandedViewport || !expandedPanTarget || !expandedContent) {
           return;
         }
 
@@ -287,9 +295,9 @@ function MermaidDiagram({ definition }: { definition: string }) {
           return;
         }
 
-        bindFunctionsRef.current?.(expandedContainer);
+        bindFunctionsRef.current?.(expandedContent);
 
-        const svgElement = expandedContainer.querySelector('svg');
+        const svgElement = expandedContent.querySelector('svg');
         if (!(svgElement instanceof SVGElement)) {
           return;
         }
@@ -298,23 +306,25 @@ function MermaidDiagram({ definition }: { definition: string }) {
 
         const diagramWidth = svgDimensions?.width || svgElement.viewBox.baseVal.width || svgElement.getBoundingClientRect().width || 1;
         const diagramHeight = svgDimensions?.height || svgElement.viewBox.baseVal.height || svgElement.getBoundingClientRect().height || 1;
+        const renderedWidth = isLandscape ? diagramHeight : diagramWidth;
+        const renderedHeight = isLandscape ? diagramWidth : diagramHeight;
         const fitWidth = Math.max(1, expandedViewport.clientWidth - 48);
         const fitHeight = Math.max(1, expandedViewport.clientHeight - 48);
-        const fitZoom = Math.min(fitWidth / diagramWidth, fitHeight / diagramHeight, 1);
+        const fitZoom = Math.min(fitWidth / renderedWidth, fitHeight / renderedHeight, 1);
         const initialZoom = Number.isFinite(fitZoom) && fitZoom > 0 ? fitZoom : 1;
-        const initialX = (expandedViewport.clientWidth - diagramWidth * initialZoom) / 2;
-        const initialY = (expandedViewport.clientHeight - diagramHeight * initialZoom) / 2;
+        const initialX = (expandedViewport.clientWidth - renderedWidth * initialZoom) / 2;
+        const initialY = (expandedViewport.clientHeight - renderedHeight * initialZoom) / 2;
         const minZoom = Math.max(0.05, Math.min(0.2, initialZoom * 0.75));
 
+        expandedPanTarget.style.width = `${renderedWidth}px`;
+        expandedPanTarget.style.height = `${renderedHeight}px`;
         svgElement.setAttribute('width', String(diagramWidth));
         svgElement.setAttribute('height', String(diagramHeight));
         svgElement.style.width = `${diagramWidth}px`;
         svgElement.style.height = `${diagramHeight}px`;
-        svgElement.style.transformOrigin = '0 0';
-        svgElement.style.touchAction = 'none';
         svgElement.style.userSelect = 'none';
 
-        expandedPanzoomRef.current = createPanzoom(svgElement, {
+        expandedPanzoomRef.current = createPanzoom(expandedPanTarget, {
           beforeMouseDown: (mouseEvent) => mouseEvent.button !== 0,
           bounds: true,
           boundsPadding: 0.12,
@@ -337,7 +347,7 @@ function MermaidDiagram({ definition }: { definition: string }) {
       expandedPanzoomRef.current?.dispose();
       expandedPanzoomRef.current = null;
     };
-  }, [isExpanded, svg, svgDimensions]);
+  }, [isExpanded, isLandscape, svg, svgDimensions]);
 
   if (error) {
     return (
@@ -386,7 +396,7 @@ function MermaidDiagram({ definition }: { definition: string }) {
           className="fixed inset-0 z-50 bg-zinc-950/72 backdrop-blur-sm"
           onClick={(event) => {
             if (event.target === event.currentTarget) {
-              setIsExpanded(false);
+              closeExpandedViewer();
             }
           }}
         >
@@ -399,12 +409,26 @@ function MermaidDiagram({ definition }: { definition: string }) {
               paddingLeft: 'max(0.75rem, env(safe-area-inset-left))'
             }}
           >
-            <div className="pointer-events-none absolute top-0 right-0 z-10 p-3 sm:p-4">
+            <div className="pointer-events-none absolute top-0 right-0 z-10 flex items-center gap-2 p-3 sm:p-4">
+              <button
+                type="button"
+                aria-label={isLandscape ? 'Restore vertical Mermaid diagram' : 'Rotate Mermaid diagram to landscape'}
+                aria-pressed={isLandscape}
+                className={`pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full border bg-white/96 shadow-lg transition focus:outline-none focus:ring-2 focus:ring-zinc-300/80 ${
+                  isLandscape ? 'border-zinc-900 text-zinc-950' : 'border-zinc-200 text-zinc-700 hover:border-zinc-300 hover:text-zinc-950'
+                }`}
+                onClick={() => setIsLandscape((current) => !current)}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="3" y="5" width="10" height="6" rx="1.5" />
+                  <path d="M5.2 3.2 3.5 5l1.7 1.8M10.8 12.8 12.5 11l-1.7-1.8" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
               <button
                 type="button"
                 aria-label="Close Mermaid diagram"
                 className="pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full border border-zinc-200 bg-white/96 text-zinc-700 shadow-lg transition hover:border-zinc-300 hover:text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-300/80"
-                onClick={() => setIsExpanded(false)}
+                onClick={closeExpandedViewer}
               >
                 <svg viewBox="0 0 16 16" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
                   <path d="M4 4l8 8M12 4 4 12" strokeLinecap="round" />
@@ -416,10 +440,21 @@ function MermaidDiagram({ definition }: { definition: string }) {
               className="relative h-full w-full overflow-hidden rounded-2xl bg-white/96 shadow-2xl ring-1 ring-black/5 touch-none"
             >
               <div
-                ref={expandedContainerRef}
-                className="relative h-full w-full overflow-hidden rounded-2xl bg-white [&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
-                dangerouslySetInnerHTML={{ __html: svg }}
-              />
+                ref={expandedPanTargetRef}
+                className="absolute top-0 left-0"
+              >
+                <div
+                  ref={expandedContentRef}
+                  className="absolute top-1/2 left-1/2 [&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
+                  style={{
+                    height: svgDimensions?.height ? `${svgDimensions.height}px` : undefined,
+                    transform: isLandscape ? 'translate(-50%, -50%) rotate(90deg)' : 'translate(-50%, -50%)',
+                    transformOrigin: 'center center',
+                    width: svgDimensions?.width ? `${svgDimensions.width}px` : undefined
+                  }}
+                  dangerouslySetInnerHTML={{ __html: svg }}
+                />
+              </div>
             </div>
           </div>
         </div>
@@ -531,94 +566,38 @@ function getToolInputPreview(input: string, maxChars = 180): string {
 }
 
 type ToolVariantTone = 'generic' | 'shell' | 'web' | 'mcp';
-type ToolIconKind = 'generic' | 'network' | 'command' | 'tool';
 
-function getToolVariant(toolName: string | undefined): { iconKind: ToolIconKind; tone: ToolVariantTone } {
+function getToolVariant(toolName: string | undefined): { tone: ToolVariantTone } {
   const normalized = (toolName || '').trim();
   const lower = normalized.toLowerCase();
 
   if (!normalized) {
-    return { iconKind: 'generic', tone: 'generic' };
+    return { tone: 'generic' };
   }
 
   if (lower.includes('bash') || lower.includes('shell') || lower.includes('terminal')) {
-    return { iconKind: 'command', tone: 'shell' };
+    return { tone: 'shell' };
   }
 
   if (lower.includes('websearch') || lower.includes('fetch') || lower.startsWith('web')) {
-    return { iconKind: 'network', tone: 'web' };
+    return { tone: 'web' };
   }
 
   if (lower.startsWith('mcp__')) {
-    return { iconKind: 'tool', tone: 'mcp' };
+    return { tone: 'mcp' };
   }
 
-  return {
-    iconKind: 'generic',
-    tone: 'generic'
-  };
-}
-
-function ToolBadgeIcon({ kind }: { kind: ToolIconKind }) {
-  switch (kind) {
-    case 'network':
-      return (
-        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="1.4">
-          <path d="M3 6.2a7.6 7.6 0 0 1 10 0" strokeLinecap="round" />
-          <path d="M5.3 8.6a4.6 4.6 0 0 1 5.4 0" strokeLinecap="round" />
-          <path d="M7.2 11a1.7 1.7 0 0 1 1.6 0" strokeLinecap="round" />
-          <circle cx="8" cy="12.9" r="0.9" fill="currentColor" stroke="none" />
-        </svg>
-      );
-    case 'command':
-      return (
-        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="1.4">
-          <path d="m3.5 4.5 3 3-3 3" strokeLinecap="round" strokeLinejoin="round" />
-          <path d="M8.5 10.5h4" strokeLinecap="round" />
-        </svg>
-      );
-    case 'tool':
-      return (
-        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="1.4">
-          <path
-            d="M9.8 2.7a3 3 0 0 0 3.4 3.5l-2 2-1.8-1.8-4.8 4.8a1.2 1.2 0 1 0 1.7 1.7l4.8-4.8 1.8 1.8 2-2a3 3 0 0 0-3.5-3.4Z"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
-      );
-    case 'generic':
-    default:
-      return (
-        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="1.4">
-          <rect x="3" y="3" width="10" height="10" rx="2" />
-          <path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" strokeLinecap="round" />
-        </svg>
-      );
-  }
+  return { tone: 'generic' };
 }
 
 function getCompactToolTitle(toolName: string | undefined): string {
   const normalized = (toolName || '').trim();
-  const lower = normalized.toLowerCase();
 
   if (!normalized) {
     return 'Tool';
   }
 
-  if (lower.includes('bash') || lower.includes('shell') || lower.includes('terminal')) {
-    return 'Shell';
-  }
-
-  if (lower.startsWith('web')) {
-    return normalized.split(/[.:/]/).at(-1) || 'Web';
-  }
-
-  if (lower.startsWith('mcp__')) {
-    return normalized.split('__').at(-1) || 'MCP';
-  }
-
-  return normalized.split(/[.:/]/).at(-1) || normalized;
+  return normalized;
 }
 
 function getToolToneClasses(_tone: ToolVariantTone): {
@@ -671,14 +650,12 @@ function MessageShell({ message, children }: { message: ChatMessage; children: R
   }
 
   const wrapperClass = message.role === 'user' ? 'flex justify-end' : 'flex justify-start';
-  const shellClass = [
-    'w-fit max-w-[85%] px-3.5 py-2.5 text-sm break-words',
+  const shellClass =
     message.role === 'user'
-      ? 'rounded-2xl bg-zinc-900 text-white shadow-sm'
+      ? 'w-fit max-w-[85%] rounded-2xl bg-zinc-900 px-3.5 py-2.5 text-sm break-words text-white shadow-sm'
       : message.status === 'error'
-        ? 'rounded-2xl border border-red-200 bg-red-50 text-zinc-900 shadow-sm'
-        : 'text-zinc-900'
-  ].join(' ');
+        ? 'w-fit max-w-[85%] rounded-2xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm break-words text-zinc-900 shadow-sm'
+        : 'w-full py-2.5 text-sm break-words text-zinc-900';
 
   return (
     <div className={wrapperClass}>
@@ -756,61 +733,137 @@ function ToolUseBlockContent({
   status: MessageStatus;
   resultBlock?: ToolResultChatMessageBlock;
 }) {
+  const [isExpanded, setIsExpanded] = useState(false);
   const variant = getToolVariant(block.toolName);
   const compactTitle = getCompactToolTitle(block.toolName);
   const toneClasses = getToolToneClasses(variant.tone);
   const summaryPreview = getToolInputPreview(block.input, 112);
+  const closeExpandedViewer = () => {
+    setIsExpanded(false);
+  };
+
+  useEffect(() => {
+    if (!isExpanded) {
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        closeExpandedViewer();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isExpanded]);
 
   return (
-    <div className="flex justify-start">
-      <details className={`group w-full overflow-hidden rounded-lg border ${toneClasses.border} ${toneClasses.surface} shadow-sm`}>
-        <summary className="cursor-pointer list-none px-3 py-2 [&::-webkit-details-marker]:hidden">
+    <>
+      <div className="flex justify-start">
+        <button
+          type="button"
+          className={`w-full overflow-hidden rounded-lg border px-3 py-2 text-left shadow-sm transition hover:border-zinc-300 ${toneClasses.border} ${toneClasses.surface}`}
+          onClick={() => setIsExpanded(true)}
+        >
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-1 items-center gap-2">
               <div className="flex h-5 w-5 shrink-0 items-center justify-center">
                 <ToolStatusIcon status={status} />
-              </div>
-              <div
-                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-[8px] font-semibold ${toneClasses.badge}`}
-              >
-                <ToolBadgeIcon kind={variant.iconKind} />
               </div>
               <div className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden">
                 <div className={`shrink-0 text-[11px] font-medium ${toneClasses.title}`}>{compactTitle}</div>
                 <div className={`min-w-0 flex-1 truncate font-mono text-[11px] ${toneClasses.meta}`}>{summaryPreview || '(no input)'}</div>
               </div>
             </div>
-            <span className="shrink-0 text-[15px] font-semibold leading-none text-zinc-700 transition-transform group-open:rotate-180">
-              ▾
+            <span className="shrink-0 text-zinc-700">
+              <svg viewBox="0 0 16 16" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7">
+                <path d="m4.5 6.5 3.5 3 3.5-3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
             </span>
           </div>
-        </summary>
-        <div className={`space-y-3 border-t px-3 py-3 ${toneClasses.border}`}>
-          <ToolDetailSection label="Input">
-            <pre className="overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
-              {block.input || '(no input)'}
-            </pre>
-          </ToolDetailSection>
-          <ToolDetailSection label="Output">
-            {resultBlock ? (
-              resultBlock.content ? (
-                <pre className="overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
-                  {resultBlock.content}
-                </pre>
-              ) : (
-                <div className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-500">
-                  Empty output.
+        </button>
+      </div>
+
+      {isExpanded ? (
+        <div
+          className="fixed inset-0 z-50 bg-zinc-950/72 backdrop-blur-sm"
+          onClick={closeExpandedViewer}
+        >
+          <div
+            className="flex h-full w-full items-end px-3 pb-3 sm:items-center sm:px-6 sm:pb-6"
+            style={{
+              paddingTop: 'max(0.75rem, env(safe-area-inset-top))',
+              paddingRight: 'max(0.75rem, env(safe-area-inset-right))',
+              paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
+              paddingLeft: 'max(0.75rem, env(safe-area-inset-left))'
+            }}
+          >
+            <div
+              className="relative w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5 sm:mx-auto"
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+            >
+              <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3 sm:px-5">
+                <div className="flex min-w-0 items-center gap-2.5">
+                  <div className="flex h-5 w-5 shrink-0 items-center justify-center">
+                    <ToolStatusIcon status={status} />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-semibold text-zinc-950">{compactTitle}</div>
+                    {block.toolName && block.toolName !== compactTitle ? (
+                      <div className="truncate font-mono text-[11px] text-zinc-500">{block.toolName}</div>
+                    ) : null}
+                  </div>
                 </div>
-              )
-            ) : (
-              <div className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-500">
-                {status === 'streaming' ? 'Waiting for output.' : 'No output.'}
+                <button
+                  type="button"
+                  aria-label="Close tool details"
+                  className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-zinc-200 bg-white text-zinc-700 transition hover:border-zinc-300 hover:text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-300/80"
+                  onClick={closeExpandedViewer}
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <path d="M4 4l8 8M12 4 4 12" strokeLinecap="round" />
+                  </svg>
+                </button>
               </div>
-            )}
-          </ToolDetailSection>
+
+              <div className="max-h-[min(75vh,40rem)] space-y-4 overflow-y-auto px-4 py-4 sm:px-5">
+                <ToolDetailSection label="Input">
+                  <pre className="overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
+                    {block.input || '(no input)'}
+                  </pre>
+                </ToolDetailSection>
+                <ToolDetailSection label="Output">
+                  {resultBlock ? (
+                    resultBlock.content ? (
+                      <pre className="overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
+                        {resultBlock.content}
+                      </pre>
+                    ) : (
+                      <div className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-500">
+                        Empty output.
+                      </div>
+                    )
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-500">
+                      {status === 'streaming' ? 'Waiting for output.' : 'No output.'}
+                    </div>
+                  )}
+                </ToolDetailSection>
+              </div>
+            </div>
+          </div>
         </div>
-      </details>
-    </div>
+      ) : null}
+    </>
   );
 }
 
