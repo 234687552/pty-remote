@@ -9,6 +9,8 @@ export interface ClaudePtySession {
   replayBytes: number;
 }
 
+export type ClaudePtyLifecycle = 'not_ready' | 'idle' | 'running';
+
 interface StartClaudePtySessionOptions {
   claudeBin: string;
   cols: number;
@@ -99,12 +101,48 @@ export function appendRecentOutput(session: ClaudePtySession, chunk: string, max
 }
 
 function tailOutput(text: string, maxChars = 8_000): string {
-  return text.slice(-maxChars);
+  return normalizeOutput(text).slice(-maxChars);
+}
+
+function normalizeOutput(text: string): string {
+  return text
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '')
+    .replace(/\r/g, '\n');
+}
+
+const RUNNING_LINE_PATTERN = /(^|\n)\s*[*·✶✻]\s+[^\n]*?\b[\p{L}-]*ing(?:\.{3}|…)?\s*$/gimu;
+const PROMPT_LINE_PATTERN = /(^|\n)\s*>\s*[^\n]*$/gm;
+const PROMPT_HINT_PATTERN = /Try\s+"|--\s*INSERT\s*--|Thinking on|shift\+tab to cycle|\/ide\b/gi;
+
+function findLastMatchIndex(pattern: RegExp, text: string): number {
+  let lastIndex = -1;
+
+  for (const match of text.matchAll(pattern)) {
+    lastIndex = match.index ?? lastIndex;
+  }
+
+  return lastIndex;
+}
+
+export function getClaudePtyLifecycle(output: string): ClaudePtyLifecycle {
+  const tail = tailOutput(output);
+  const lastRunningIndex = findLastMatchIndex(RUNNING_LINE_PATTERN, tail);
+  const lastPromptIndex = findLastMatchIndex(PROMPT_LINE_PATTERN, tail);
+  const lastHintIndex = findLastMatchIndex(PROMPT_HINT_PATTERN, tail);
+
+  if (lastRunningIndex > Math.max(lastPromptIndex, lastHintIndex)) {
+    return 'running';
+  }
+
+  if (lastPromptIndex >= 0 && lastHintIndex >= 0 && Math.max(lastPromptIndex, lastHintIndex) > lastRunningIndex) {
+    return 'idle';
+  }
+
+  return 'not_ready';
 }
 
 export function looksReadyForInput(output: string): boolean {
-  const tail = tailOutput(output);
-  return tail.includes('Claude is waiting for your input') || /(^|\n)\s*>\s*$/.test(tail);
+  return getClaudePtyLifecycle(output) === 'idle';
 }
 
 export function looksLikeBypassPrompt(output: string): boolean {

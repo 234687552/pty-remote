@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { promises as fs } from 'node:fs';
+import { promises as fs, watch as watchFs, type FSWatcher } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,7 @@ import {
   appendRecentOutput,
   appendReplayChunk,
   type ClaudePtySession,
+  getClaudePtyLifecycle,
   looksLikeBypassPrompt,
   looksReadyForInput,
   startClaudePtySession,
@@ -37,7 +38,6 @@ const CLI_LABEL = (process.env.HAPI_TMUX_CLI_LABEL ?? path.basename(ROOT_DIR) ??
 const PTY_BACKEND_NAME = 'node-pty';
 const TERMINAL_REPLAY_MAX_BYTES = 1024 * 1024;
 const RECENT_OUTPUT_MAX_CHARS = 12_000;
-const JOB_JSONL_POLL_MS = 350;
 const CLAUDE_READY_TIMEOUT_MS = 20_000;
 const PROMPT_SUBMIT_DELAY_MS = 120;
 const JSONL_REFRESH_DEBOUNCE_MS = 120;
@@ -47,16 +47,13 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN ?? (process.platform === 'darwin' ? '/
 const TERMINAL_COLS = 120;
 const TERMINAL_ROWS = 32;
 
-interface ActiveJob {
-  pollTimer: NodeJS.Timeout | null;
-}
-
 let state: RuntimeSnapshot = createFreshState();
 let claudePty: ClaudePtySession | null = null;
-let activeJob: ActiveJob | null = null;
 let socketClient: Socket | null = null;
 let snapshotTimer: NodeJS.Timeout | null = null;
 let jsonlRefreshTimer: NodeJS.Timeout | null = null;
+let jsonlWatcher: FSWatcher | null = null;
+let watchedJsonlSessionId: string | null = null;
 let replaySnapshotTimer: NodeJS.Timeout | null = null;
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | null = null;
@@ -74,6 +71,7 @@ function createFreshState(): RuntimeSnapshot {
     busy: false,
     sessionId: null,
     terminalReplay: '',
+    rawJsonl: '',
     messages: [],
     lastError: null
   };
@@ -101,6 +99,7 @@ function emitMessagesUpdate(): void {
   socketClient.emit('cli:messages-update', {
     busy: state.busy,
     sessionId: state.sessionId,
+    rawJsonl: state.rawJsonl,
     messages: cloneValue(state.messages),
     lastError: state.lastError
   } satisfies MessagesUpdatePayload);
@@ -146,12 +145,81 @@ function setLastError(nextError: string | null): void {
   scheduleSnapshot();
 }
 
-function clearActiveJobPollTimer(): void {
-  if (!activeJob?.pollTimer) {
+function closeJsonlWatcher(): void {
+  if (!jsonlWatcher) {
     return;
   }
-  clearInterval(activeJob.pollTimer);
-  activeJob.pollTimer = null;
+
+  jsonlWatcher.close();
+  jsonlWatcher = null;
+  watchedJsonlSessionId = null;
+}
+
+function resolveSessionJsonlFilePath(sessionId: string): string {
+  return resolveClaudeJsonlFilePath(ROOT_DIR, sessionId, os.homedir());
+}
+
+function ensureJsonlWatcher(sessionId: string | null): void {
+  if (!sessionId) {
+    closeJsonlWatcher();
+    return;
+  }
+
+  if (jsonlWatcher && watchedJsonlSessionId === sessionId) {
+    return;
+  }
+
+  closeJsonlWatcher();
+
+  const filePath = resolveSessionJsonlFilePath(sessionId);
+  const dirPath = path.dirname(filePath);
+  const fileName = path.basename(filePath);
+
+  try {
+    jsonlWatcher = watchFs(dirPath, { persistent: false }, (_eventType, changedFileName) => {
+      if (state.sessionId !== sessionId) {
+        return;
+      }
+      if (typeof changedFileName === 'string' && changedFileName.length > 0 && changedFileName !== fileName) {
+        return;
+      }
+      scheduleJsonlRefresh(0);
+    });
+    watchedJsonlSessionId = sessionId;
+    jsonlWatcher.on('error', (error) => {
+      if (state.sessionId !== sessionId) {
+        return;
+      }
+      closeJsonlWatcher();
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        return;
+      }
+      setLastError(error instanceof Error ? error.message : 'Failed to watch Claude jsonl');
+    });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') {
+      return;
+    }
+    setLastError(error instanceof Error ? error.message : 'Failed to watch Claude jsonl');
+  }
+}
+
+function syncBusyFromPtyOutput(output: string): void {
+  const lifecycle = getClaudePtyLifecycle(output);
+  if (lifecycle === 'not_ready') {
+    return;
+  }
+
+  const nextBusy = lifecycle === 'running';
+  if (state.busy === nextBusy) {
+    return;
+  }
+
+  state.busy = nextBusy;
+  emitMessagesUpdate();
+  scheduleSnapshot();
 }
 
 function messagesEqual(left: ChatMessage[], right: ChatMessage[]): boolean {
@@ -174,42 +242,46 @@ function messagesEqual(left: ChatMessage[], right: ChatMessage[]): boolean {
 async function refreshMessagesFromJsonl(): Promise<void> {
   const sessionId = state.sessionId;
   if (!sessionId) {
-    if (state.messages.length > 0 || state.busy) {
+    closeJsonlWatcher();
+    if (state.messages.length > 0 || state.busy || state.rawJsonl) {
       state.messages = [];
       state.busy = false;
+      state.rawJsonl = '';
       emitMessagesUpdate();
       scheduleSnapshot();
     }
     return;
   }
 
-  const filePath = resolveClaudeJsonlFilePath(ROOT_DIR, sessionId, os.homedir());
+  ensureJsonlWatcher(sessionId);
+
+  const filePath = resolveSessionJsonlFilePath(sessionId);
 
   try {
     const raw = await fs.readFile(filePath, 'utf8');
     const nextState = parseClaudeJsonlState(raw);
     const messagesChanged = !messagesEqual(state.messages, nextState.messages);
-    const busyChanged = state.busy !== nextState.busy;
+    const rawJsonlChanged = state.rawJsonl !== raw;
 
     if (messagesChanged) {
       state.messages = nextState.messages;
     }
-    if (busyChanged) {
-      state.busy = nextState.busy;
+    if (rawJsonlChanged) {
+      state.rawJsonl = raw;
     }
 
-    if (messagesChanged || busyChanged) {
+    if (messagesChanged || rawJsonlChanged) {
       emitMessagesUpdate();
       scheduleSnapshot();
-    }
-
-    if (!nextState.busy && activeJob) {
-      clearActiveJobPollTimer();
-      activeJob = null;
     }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') {
+      if (state.rawJsonl) {
+        state.rawJsonl = '';
+        emitMessagesUpdate();
+        scheduleSnapshot();
+      }
       return;
     }
     setLastError(error instanceof Error ? error.message : 'Failed to read Claude jsonl');
@@ -245,7 +317,8 @@ function handlePtyData(chunk: string): void {
   }
 
   state.terminalReplay = appendReplayChunk(session, chunk, TERMINAL_REPLAY_MAX_BYTES);
-  appendRecentOutput(session, chunk, RECENT_OUTPUT_MAX_CHARS);
+  const recentOutput = appendRecentOutput(session, chunk, RECENT_OUTPUT_MAX_CHARS);
+  syncBusyFromPtyOutput(recentOutput);
   emitTerminalChunk(chunk);
   scheduleReplaySnapshot();
   scheduleJsonlRefresh();
@@ -253,8 +326,7 @@ function handlePtyData(chunk: string): void {
 
 async function handlePtyExit(): Promise<void> {
   claudePty = null;
-  clearActiveJobPollTimer();
-  activeJob = null;
+  closeJsonlWatcher();
   state.busy = false;
   emitMessagesUpdate();
   scheduleSnapshot();
@@ -331,18 +403,11 @@ async function ensureClaudePtySession(): Promise<void> {
 
   claudePty = started.session;
   state.sessionId = started.sessionId;
+  ensureJsonlWatcher(started.sessionId);
   emitMessagesUpdate();
   scheduleSnapshot();
-
-  try {
-    await waitForClaudeReady();
-    scheduleJsonlRefresh(0);
-    scheduleSnapshot();
-  } catch (error) {
-    stopClaudePtySession(claudePty);
-    claudePty = null;
-    throw error;
-  }
+  scheduleJsonlRefresh(0);
+  scheduleSnapshot();
 }
 
 async function sendPromptToClaudePty(content: string): Promise<void> {
@@ -376,21 +441,14 @@ async function dispatchClaudeMessage(content: string): Promise<void> {
   await ensureClaudePtySession();
   clearLastError();
 
-  state.busy = true;
-  emitMessagesUpdate();
-  activeJob = {
-    pollTimer: setInterval(() => {
-      void refreshMessagesFromJsonl();
-    }, JOB_JSONL_POLL_MS)
-  };
-  scheduleSnapshot();
-
   try {
+    await waitForClaudeReady();
+    state.busy = true;
+    emitMessagesUpdate();
+    scheduleSnapshot();
     await sendPromptToClaudePty(trimmedContent);
     scheduleJsonlRefresh(0);
   } catch (error) {
-    clearActiveJobPollTimer();
-    activeJob = null;
     state.busy = false;
     emitMessagesUpdate();
     setLastError(error instanceof Error ? error.message : 'Claude request failed');
@@ -398,8 +456,7 @@ async function dispatchClaudeMessage(content: string): Promise<void> {
 }
 
 async function resetConversation(): Promise<void> {
-  clearActiveJobPollTimer();
-  activeJob = null;
+  closeJsonlWatcher();
   stopClaudePtySession(claudePty);
   claudePty = null;
   state = createFreshState();
@@ -479,7 +536,6 @@ async function shutdownCliClient(reason: string, exitCode = 0): Promise<void> {
   shuttingDown = true;
   shutdownPromise = (async () => {
     console.log(`shutting down cli client (${reason})`);
-    clearActiveJobPollTimer();
     if (snapshotTimer) {
       clearTimeout(snapshotTimer);
       snapshotTimer = null;
@@ -488,6 +544,7 @@ async function shutdownCliClient(reason: string, exitCode = 0): Promise<void> {
       clearTimeout(jsonlRefreshTimer);
       jsonlRefreshTimer = null;
     }
+    closeJsonlWatcher();
     if (replaySnapshotTimer) {
       clearTimeout(replaySnapshotTimer);
       replaySnapshotTimer = null;

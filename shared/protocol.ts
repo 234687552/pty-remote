@@ -36,6 +36,7 @@ export interface RuntimeSnapshotEnvelope {
 export interface MessagesUpdatePayload {
   busy: boolean;
   sessionId: string | null;
+  rawJsonl: string;
   messages: ChatMessage[];
   lastError: string | null;
 }

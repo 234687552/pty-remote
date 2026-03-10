@@ -4,3 +4,4 @@ dist/
 .claude/
 .serena/
 .runtime/
+.playwright-mcp/

@@ -135,6 +135,7 @@ function updateSnapshotFromMessages(record: CliRuntimeRecord, payload: MessagesU
   record.snapshot = {
     busy: payload.busy,
     sessionId: payload.sessionId,
+    rawJsonl: payload.rawJsonl,
     messages: cloneValue(payload.messages),
     lastError: payload.lastError,
     terminalReplay: sessionChanged ? '' : record.snapshot?.terminalReplay ?? ''

@@ -13,6 +13,7 @@ export interface RuntimeSnapshot {
   busy: boolean;
   sessionId: string | null;
   terminalReplay: string;
+  rawJsonl: string;
   messages: ChatMessage[];
   lastError: string | null;
 }

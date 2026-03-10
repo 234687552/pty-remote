@@ -20,6 +20,7 @@ function createEmptySnapshot(): RuntimeSnapshot {
     busy: false,
     sessionId: null,
     terminalReplay: '',
+    rawJsonl: '',
     messages: [],
     lastError: null
   };
@@ -131,6 +132,7 @@ export function App() {
           ...current,
           busy: payload.busy,
           sessionId: payload.sessionId,
+          rawJsonl: payload.rawJsonl,
           messages: payload.messages,
           lastError: payload.lastError,
           terminalReplay: sessionChanged ? '' : current.terminalReplay
@@ -346,6 +348,23 @@ export function App() {
             </button>
           </div>
         </form>
+
+        <section className="rounded-3xl border border-zinc-200 bg-white shadow-sm">
+          <div className="border-b border-zinc-200 px-4 py-3">
+            <h2 className="text-lg font-semibold">Raw JSONL</h2>
+          </div>
+          <div className="p-4">
+            {snapshot.rawJsonl ? (
+              <pre className="max-h-[22rem] min-h-[14rem] overflow-auto rounded-2xl border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-100">
+                {snapshot.rawJsonl}
+              </pre>
+            ) : (
+              <div className="flex min-h-[14rem] items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
+                等待 Claude jsonl 原始内容。
+              </div>
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );
