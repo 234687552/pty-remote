@@ -12,7 +12,7 @@ import type {
   CliRegisterResult,
   CliStatusPayload,
   MessagesUpdatePayload,
-  RuntimeSnapshotEnvelope,
+  RawJsonlUpdatePayload,
   TerminalChunkPayload,
   WebCommandEnvelope,
   WebInitPayload
@@ -28,6 +28,7 @@ const WEB_BUILD_INDEX_FILE = path.join(WEB_BUILD_DIR, 'index.html');
 
 const PORT = Number.parseInt(process.env.PORT ?? '3001', 10);
 const HOST = process.env.HOST ?? '127.0.0.1';
+const TERMINAL_REPLAY_MAX_BYTES = 256 * 1024;
 
 const MIME_TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -117,6 +118,32 @@ function createCliDescriptor(cliId: string, payload: CliRegisterPayload): CliDes
   };
 }
 
+function createEmptySnapshot(): RuntimeSnapshot {
+  return {
+    busy: false,
+    sessionId: null,
+    terminalReplay: '',
+    rawJsonl: '',
+    messages: [],
+    lastError: null
+  };
+}
+
+function ensureSnapshot(record: CliRuntimeRecord): RuntimeSnapshot {
+  if (!record.snapshot) {
+    record.snapshot = createEmptySnapshot();
+  }
+  return record.snapshot;
+}
+
+function trimTerminalReplay(value: string): string {
+  const buffer = Buffer.from(value, 'utf8');
+  if (buffer.length <= TERMINAL_REPLAY_MAX_BYTES) {
+    return value;
+  }
+  return buffer.subarray(buffer.length - TERMINAL_REPLAY_MAX_BYTES).toString('utf8');
+}
+
 function updateDescriptorFromSnapshot(record: CliRuntimeRecord): void {
   if (!record.snapshot) {
     return;
@@ -131,16 +158,51 @@ function updateDescriptorFromSnapshot(record: CliRuntimeRecord): void {
 }
 
 function updateSnapshotFromMessages(record: CliRuntimeRecord, payload: MessagesUpdatePayload): void {
-  const sessionChanged = record.snapshot?.sessionId !== payload.sessionId;
+  const snapshot = ensureSnapshot(record);
+  const sessionChanged = snapshot.sessionId !== payload.sessionId;
   record.snapshot = {
     busy: payload.busy,
     sessionId: payload.sessionId,
-    rawJsonl: payload.rawJsonl,
+    rawJsonl: sessionChanged ? '' : snapshot.rawJsonl,
     messages: cloneValue(payload.messages),
     lastError: payload.lastError,
-    terminalReplay: sessionChanged ? '' : record.snapshot?.terminalReplay ?? ''
+    terminalReplay: sessionChanged ? '' : snapshot.terminalReplay
   };
   updateDescriptorFromSnapshot(record);
+}
+
+function applyRawJsonlUpdate(record: CliRuntimeRecord, payload: RawJsonlUpdatePayload): void {
+  const snapshot = ensureSnapshot(record);
+  const sessionChanged = snapshot.sessionId !== payload.sessionId;
+
+  if (sessionChanged) {
+    snapshot.sessionId = payload.sessionId;
+    snapshot.rawJsonl = '';
+  }
+
+  if (payload.reset) {
+    snapshot.rawJsonl = payload.chunk;
+    return;
+  }
+
+  if (snapshot.rawJsonl.length !== payload.baseLength) {
+    snapshot.rawJsonl = `${snapshot.rawJsonl.slice(0, Math.max(0, payload.baseLength))}${payload.chunk}`;
+    return;
+  }
+
+  snapshot.rawJsonl += payload.chunk;
+}
+
+function applyTerminalChunk(record: CliRuntimeRecord, payload: TerminalChunkPayload): void {
+  const snapshot = ensureSnapshot(record);
+  const sessionChanged = snapshot.sessionId !== payload.sessionId;
+
+  if (sessionChanged) {
+    snapshot.sessionId = payload.sessionId;
+    snapshot.terminalReplay = '';
+  }
+
+  snapshot.terminalReplay = trimTerminalReplay(`${snapshot.terminalReplay}${payload.data}`);
 }
 
 function emitCliStatus(io: SocketIOServer): void {
@@ -257,17 +319,6 @@ export async function startSocketServer(): Promise<void> {
       callback?.({ cliId });
     });
 
-    socket.on('cli:snapshot', (envelope: RuntimeSnapshotEnvelope) => {
-      if (!cliRecord || cliRecord.socket.id !== socket.id) {
-        return;
-      }
-
-      cliRecord.snapshot = cloneValue(envelope.snapshot);
-      cliRecord.descriptor.connected = true;
-      updateDescriptorFromSnapshot(cliRecord);
-      emitCliStatus(io);
-    });
-
     socket.on('cli:messages-update', (payload: MessagesUpdatePayload) => {
       if (!cliRecord || cliRecord.socket.id !== socket.id) {
         return;
@@ -279,12 +330,27 @@ export async function startSocketServer(): Promise<void> {
       emitCliStatus(io);
     });
 
+    socket.on('cli:raw-jsonl-update', (payload: RawJsonlUpdatePayload) => {
+      if (!cliRecord || cliRecord.socket.id !== socket.id) {
+        return;
+      }
+
+      cliRecord.descriptor.connected = true;
+      applyRawJsonlUpdate(cliRecord, payload);
+      updateDescriptorFromSnapshot(cliRecord);
+      io.of('/web').emit('raw-jsonl:update', cloneValue(payload));
+      emitCliStatus(io);
+    });
+
     socket.on('cli:terminal-chunk', (payload: TerminalChunkPayload) => {
       if (!cliRecord || cliRecord.socket.id !== socket.id) {
         return;
       }
 
+      cliRecord.descriptor.connected = true;
+      applyTerminalChunk(cliRecord, payload);
       cliRecord.descriptor.lastSeenAt = new Date().toISOString();
+      updateDescriptorFromSnapshot(cliRecord);
       io.of('/web').emit('terminal:chunk', payload);
     });
 

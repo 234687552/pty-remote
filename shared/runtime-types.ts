@@ -1,12 +1,18 @@
 export type Role = 'user' | 'assistant';
 export type MessageStatus = 'complete' | 'streaming' | 'error';
+export type ChatMessageType = 'markdown' | 'tool-invocation';
 
 export interface ChatMessage {
   id: string;
   role: Role;
+  type: ChatMessageType;
   content: string;
   status: MessageStatus;
   createdAt: string;
+  toolCallId?: string;
+  toolName?: string;
+  toolInput?: string;
+  toolResult?: string;
 }
 
 export interface RuntimeSnapshot {

@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from 'xterm';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 import type {
   CliCommandName,
@@ -9,11 +11,12 @@ import type {
   CliCommandResult,
   CliStatusPayload,
   MessagesUpdatePayload,
+  RawJsonlUpdatePayload,
   TerminalChunkPayload,
   WebCommandEnvelope,
   WebInitPayload
 } from '@shared/protocol.ts';
-import type { CliDescriptor, RuntimeSnapshot } from '@shared/runtime-types.ts';
+import type { ChatMessage, CliDescriptor, RuntimeSnapshot } from '@shared/runtime-types.ts';
 
 function createEmptySnapshot(): RuntimeSnapshot {
   return {
@@ -32,6 +35,185 @@ function getSocketBaseUrl(): string {
     return envValue.trim();
   }
   return window.location.origin;
+}
+
+function MessageMarkdown({ content }: { content: string }) {
+  return (
+    <div className="markdown-body space-y-3 leading-6 text-zinc-800">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          a: ({ ...props }) => <a {...props} className="text-blue-700 underline underline-offset-2" target="_blank" rel="noreferrer" />,
+          blockquote: ({ ...props }) => <blockquote {...props} className="border-l-2 border-zinc-300 pl-4 text-zinc-600" />,
+          code: ({ children, className, ...props }) => {
+            const isBlock = Boolean(className);
+            if (isBlock) {
+              return (
+                <code
+                  {...props}
+                  className={`${className} block overflow-x-auto rounded-xl bg-zinc-950 px-4 py-3 text-xs leading-5 text-zinc-100`}
+                >
+                  {children}
+                </code>
+              );
+            }
+
+            return (
+              <code {...props} className="rounded bg-zinc-200 px-1.5 py-0.5 text-[0.85em] text-zinc-900">
+                {children}
+              </code>
+            );
+          },
+          h1: ({ ...props }) => <h1 {...props} className="text-lg font-semibold text-zinc-950" />,
+          h2: ({ ...props }) => <h2 {...props} className="text-base font-semibold text-zinc-950" />,
+          h3: ({ ...props }) => <h3 {...props} className="text-sm font-semibold text-zinc-950" />,
+          li: ({ ...props }) => <li {...props} className="ml-5 list-item" />,
+          ol: ({ ...props }) => <ol {...props} className="list-decimal space-y-1 pl-5" />,
+          p: ({ ...props }) => <p {...props} className="whitespace-pre-wrap break-words" />,
+          pre: ({ ...props }) => <pre {...props} className="overflow-x-auto rounded-xl bg-zinc-950" />,
+          ul: ({ ...props }) => <ul {...props} className="list-disc space-y-1 pl-5" />
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function getToolInputPreview(input: string | undefined, maxChars = 180): string {
+  const normalized = (input || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '(no input)';
+  }
+
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxChars - 3)}...`;
+}
+
+function getToolBadgeLabel(toolName: string | undefined): string {
+  const normalized = (toolName || '').trim();
+  const lower = normalized.toLowerCase();
+
+  if (!normalized) {
+    return 'TL';
+  }
+  if (lower.includes('bash') || lower.includes('shell') || lower.includes('terminal')) {
+    return '>_';
+  }
+  if (lower.startsWith('web')) {
+    return 'WEB';
+  }
+  if (lower.startsWith('mcp__')) {
+    return 'MCP';
+  }
+
+  return normalized.replace(/[^a-zA-Z0-9]/g, '').slice(0, 3).toUpperCase() || 'TL';
+}
+
+function ToolStatusIcon({ status }: { status: ChatMessage['status'] }) {
+  if (status === 'error') {
+    return <span className="text-sm text-red-600">●</span>;
+  }
+  if (status === 'complete') {
+    return <span className="text-sm text-emerald-600">◉</span>;
+  }
+  return <span className="text-sm text-amber-500">◌</span>;
+}
+
+function ToolDetailSection({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <section className="space-y-2">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{label}</div>
+      {children}
+    </section>
+  );
+}
+
+function MessageShell({ message, children }: { message: ChatMessage; children: React.ReactNode }) {
+  const shellClass =
+    message.type === 'tool-invocation'
+      ? 'rounded-2xl border border-zinc-200 bg-zinc-100/90 p-2.5 text-sm break-words'
+      : [
+          'rounded-2xl border p-3 text-sm break-words',
+          message.role === 'user'
+            ? 'border-zinc-200 bg-zinc-50'
+            : message.status === 'error'
+              ? 'border-red-200 bg-red-50'
+              : 'border-blue-200 bg-blue-50'
+        ].join(' ');
+
+  return (
+    <article className={shellClass}>
+      {message.type !== 'tool-invocation' ? (
+        <div className="mb-2 flex items-center justify-between gap-2 text-xs uppercase tracking-wide text-zinc-500">
+          <span>{message.role}</span>
+          <span>{message.status}</span>
+        </div>
+      ) : null}
+      {children}
+    </article>
+  );
+}
+
+function MarkdownMessageContent({ message }: { message: ChatMessage }) {
+  return <MessageMarkdown content={message.content || (message.status === 'streaming' ? '...' : '')} />;
+}
+
+function ToolCallMessageContent({ message }: { message: ChatMessage }) {
+  const toolName = message.toolName || 'Tool';
+  const toolInput = message.toolInput || '';
+  const toolResult = message.toolResult || '';
+
+  return (
+    <details className="group overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm">
+      <summary className="cursor-pointer list-none px-4 py-3 [&::-webkit-details-marker]:hidden">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-zinc-200 text-[10px] font-semibold text-zinc-700">
+              {getToolBadgeLabel(toolName)}
+            </div>
+            <div className="min-w-0">
+              <div className="font-medium text-zinc-900">{toolName}</div>
+              <div className="mt-1 font-mono text-xs text-zinc-500">{getToolInputPreview(toolInput)}</div>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2 text-xs text-zinc-500">
+            <ToolStatusIcon status={message.status} />
+            <span className="transition-transform group-open:rotate-180">▾</span>
+          </div>
+        </div>
+      </summary>
+      <div className="space-y-4 border-t border-zinc-200 px-4 py-4">
+        <ToolDetailSection label="Input">
+          <pre className="overflow-auto rounded-xl border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-700">
+            {toolInput || '(no input)'}
+          </pre>
+        </ToolDetailSection>
+        <ToolDetailSection label="Result">
+          {toolResult ? (
+            <MessageMarkdown content={toolResult} />
+          ) : (
+            <div className="rounded-xl border border-dashed border-zinc-200 bg-zinc-50 px-3 py-2 text-sm text-zinc-500">
+              Waiting for tool result.
+            </div>
+          )}
+        </ToolDetailSection>
+      </div>
+    </details>
+  );
+}
+
+function MessageContent({ message }: { message: ChatMessage }) {
+  switch (message.type) {
+    case 'tool-invocation':
+      return <ToolCallMessageContent message={message} />;
+    case 'markdown':
+    default:
+      return <MarkdownMessageContent message={message} />;
+  }
 }
 
 export function App() {
@@ -132,10 +314,32 @@ export function App() {
           ...current,
           busy: payload.busy,
           sessionId: payload.sessionId,
-          rawJsonl: payload.rawJsonl,
+          rawJsonl: sessionChanged ? '' : current.rawJsonl,
           messages: payload.messages,
           lastError: payload.lastError,
           terminalReplay: sessionChanged ? '' : current.terminalReplay
+        };
+      });
+    });
+
+    socket.on('raw-jsonl:update', (payload: RawJsonlUpdatePayload) => {
+      setSnapshot((current) => {
+        const sessionChanged = current.sessionId !== payload.sessionId;
+        const currentRawJsonl = sessionChanged ? '' : current.rawJsonl;
+        let nextRawJsonl = currentRawJsonl;
+
+        if (payload.reset) {
+          nextRawJsonl = payload.chunk;
+        } else if (currentRawJsonl.length === payload.baseLength) {
+          nextRawJsonl = `${currentRawJsonl}${payload.chunk}`;
+        } else {
+          nextRawJsonl = `${currentRawJsonl.slice(0, Math.max(0, payload.baseLength))}${payload.chunk}`;
+        }
+
+        return {
+          ...current,
+          sessionId: payload.sessionId,
+          rawJsonl: nextRawJsonl
         };
       });
     });
@@ -281,23 +485,9 @@ export function App() {
                 </div>
               ) : (
                 snapshot.messages.map((message) => (
-                  <article
-                    key={message.id}
-                    className={[
-                      'rounded-2xl border p-3 text-sm whitespace-pre-wrap break-words',
-                      message.role === 'user'
-                        ? 'border-zinc-200 bg-zinc-50'
-                        : message.status === 'error'
-                          ? 'border-red-200 bg-red-50'
-                          : 'border-blue-200 bg-blue-50'
-                    ].join(' ')}
-                  >
-                    <div className="mb-2 flex items-center justify-between gap-2 text-xs uppercase tracking-wide text-zinc-500">
-                      <span>{message.role}</span>
-                      <span>{message.status}</span>
-                    </div>
-                    <div>{message.content || (message.status === 'streaming' ? '...' : '')}</div>
-                  </article>
+                  <MessageShell key={message.id} message={message}>
+                    <MessageContent message={message} />
+                  </MessageShell>
                 ))
               )}
             </div>

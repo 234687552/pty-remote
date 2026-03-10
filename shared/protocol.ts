@@ -29,16 +29,18 @@ export interface CliCommandResult {
   error?: string;
 }
 
-export interface RuntimeSnapshotEnvelope {
-  snapshot: RuntimeSnapshot;
-}
-
 export interface MessagesUpdatePayload {
   busy: boolean;
   sessionId: string | null;
-  rawJsonl: string;
   messages: ChatMessage[];
   lastError: string | null;
+}
+
+export interface RawJsonlUpdatePayload {
+  sessionId: string | null;
+  baseLength: number;
+  chunk: string;
+  reset: boolean;
 }
 
 export interface TerminalChunkPayload {
