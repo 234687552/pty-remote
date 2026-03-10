@@ -356,18 +356,20 @@ function MermaidDiagram({ definition }: { definition: string }) {
       <div className="group relative overflow-x-auto rounded-xl border border-zinc-200 bg-white px-3 py-3 shadow-sm">
         {svg ? (
           <>
-            <button
-              type="button"
-              aria-label="Expand Mermaid diagram"
-              className="absolute top-2 right-2 z-10 inline-flex h-8 items-center gap-1 rounded-full border border-zinc-200 bg-white/95 px-2.5 text-[11px] font-medium text-zinc-700 shadow-sm transition md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 hover:border-zinc-300 hover:text-zinc-950 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-zinc-400/60"
-              onClick={() => setIsExpanded(true)}
-            >
-              <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.4">
-                <path d="M6 3.5H3.5V6M10 3.5h2.5V6M6 12.5H3.5V10M10 12.5h2.5V10" strokeLinecap="round" />
-                <path d="M3.5 6 6.8 2.7M12.5 6 9.2 2.7M3.5 10l3.3 3.3M12.5 10l-3.3 3.3" strokeLinecap="round" />
-              </svg>
-              <span>Zoom</span>
-            </button>
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+              <button
+                type="button"
+                aria-label="Expand Mermaid diagram"
+                className="pointer-events-auto inline-flex h-10 items-center gap-1.5 rounded-full border border-zinc-200 bg-white/95 px-3 text-xs font-medium text-zinc-700 shadow-sm transition md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 hover:border-zinc-300 hover:text-zinc-950 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-zinc-400/60"
+                onClick={() => setIsExpanded(true)}
+              >
+                <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.4">
+                  <path d="M6 3.5H3.5V6M10 3.5h2.5V6M6 12.5H3.5V10M10 12.5h2.5V10" strokeLinecap="round" />
+                  <path d="M3.5 6 6.8 2.7M12.5 6 9.2 2.7M3.5 10l3.3 3.3M12.5 10l-3.3 3.3" strokeLinecap="round" />
+                </svg>
+                <span>Zoom</span>
+              </button>
+            </div>
             <div
               ref={inlineContainerRef}
               className="[&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
@@ -381,34 +383,41 @@ function MermaidDiagram({ definition }: { definition: string }) {
 
       {isExpanded ? (
         <div
-          className="fixed inset-0 z-50 bg-zinc-950/70 px-4 py-5 backdrop-blur-sm sm:px-6 sm:py-6"
+          className="fixed inset-0 z-50 bg-zinc-950/72 backdrop-blur-sm"
           onClick={(event) => {
             if (event.target === event.currentTarget) {
               setIsExpanded(false);
             }
           }}
         >
-          <div className="mx-auto flex h-full max-w-7xl flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl">
-            <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
-              <div>
-                <div className="text-sm font-semibold text-zinc-950">Mermaid diagram</div>
-                <div className="text-xs text-zinc-500">Drag to pan. Press Escape to close.</div>
-              </div>
+          <div
+            className="relative h-full w-full px-3 pb-3 sm:px-6 sm:pb-6"
+            style={{
+              paddingTop: 'max(0.75rem, env(safe-area-inset-top))',
+              paddingRight: 'max(0.75rem, env(safe-area-inset-right))',
+              paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
+              paddingLeft: 'max(0.75rem, env(safe-area-inset-left))'
+            }}
+          >
+            <div className="pointer-events-none absolute top-0 right-0 z-10 p-3 sm:p-4">
               <button
                 type="button"
-                className="inline-flex h-9 items-center rounded-full border border-zinc-200 px-3 text-sm font-medium text-zinc-700 transition hover:border-zinc-300 hover:text-zinc-950"
+                aria-label="Close Mermaid diagram"
+                className="pointer-events-auto inline-flex h-11 w-11 items-center justify-center rounded-full border border-zinc-200 bg-white/96 text-zinc-700 shadow-lg transition hover:border-zinc-300 hover:text-zinc-950 focus:outline-none focus:ring-2 focus:ring-zinc-300/80"
                 onClick={() => setIsExpanded(false)}
               >
-                Close
+                <svg viewBox="0 0 16 16" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.6">
+                  <path d="M4 4l8 8M12 4 4 12" strokeLinecap="round" />
+                </svg>
               </button>
             </div>
             <div
               ref={expandedViewportRef}
-              className="relative flex-1 overflow-hidden bg-zinc-100/80 p-6 touch-none"
+              className="relative h-full w-full overflow-hidden rounded-2xl bg-white/96 shadow-2xl ring-1 ring-black/5 touch-none"
             >
               <div
                 ref={expandedContainerRef}
-                className="relative h-full w-full overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-lg [&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
+                className="relative h-full w-full overflow-hidden rounded-2xl bg-white [&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
                 dangerouslySetInnerHTML={{ __html: svg }}
               />
             </div>
@@ -685,6 +694,8 @@ interface ToolCallMeta {
   resultStatus?: MessageStatus;
 }
 
+type MobilePane = 'chat' | 'terminal' | 'jsonl';
+
 function createToolCallIndex(messages: ChatMessage[]): Map<string, ToolCallMeta> {
   const index = new Map<string, ToolCallMeta>();
 
@@ -851,6 +862,7 @@ export function App() {
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot>(createEmptySnapshot());
   const [prompt, setPrompt] = useState('');
   const [error, setError] = useState('');
+  const [mobilePane, setMobilePane] = useState<MobilePane>('chat');
 
   const socketRef = useRef<Socket | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -1026,6 +1038,20 @@ export function App() {
   }, [snapshot.sessionId, snapshot.terminalReplay]);
 
   useEffect(() => {
+    if (mobilePane !== 'terminal') {
+      return;
+    }
+
+    const frameId = requestAnimationFrame(() => {
+      fitAddonRef.current?.fit();
+    });
+
+    return () => {
+      cancelAnimationFrame(frameId);
+    };
+  }, [mobilePane]);
+
+  useEffect(() => {
     messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight });
   }, [renderableMessages]);
 
@@ -1071,6 +1097,7 @@ export function App() {
       setError('');
       await sendCommand('send-message', { content });
       setPrompt('');
+      setMobilePane('chat');
     } catch (submitError) {
       setError(submitError instanceof Error ? submitError.message : '发送失败');
     }
@@ -1080,6 +1107,7 @@ export function App() {
     try {
       setError('');
       await sendCommand('reset-session', {});
+      setMobilePane('chat');
     } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : '重置失败');
     }
@@ -1107,8 +1135,43 @@ export function App() {
           </div>
         </header>
 
-        <section className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[1fr,1.2fr]">
-          <div className="flex min-h-[28rem] flex-col rounded-3xl border border-zinc-200 bg-white shadow-sm">
+        <nav className="rounded-2xl border border-zinc-200 bg-white p-1 shadow-sm lg:hidden" aria-label="Mobile panels">
+          <div className="grid grid-cols-3 gap-1">
+            {(
+              [
+                ['chat', 'Chat'],
+                ['terminal', 'Terminal'],
+                ['jsonl', 'JSONL']
+              ] as const satisfies ReadonlyArray<readonly [MobilePane, string]>
+            ).map(([pane, label]) => (
+              <button
+                key={pane}
+                type="button"
+                onClick={() => setMobilePane(pane)}
+                className={[
+                  'rounded-xl px-3 py-2 text-sm font-medium transition',
+                  mobilePane === pane ? 'bg-zinc-900 text-white shadow-sm' : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
+                ].join(' ')}
+                aria-pressed={mobilePane === pane}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </nav>
+
+        <section
+          className={[
+            'min-h-0 flex-col gap-4 lg:grid lg:grid-cols-[1fr,1.2fr]',
+            mobilePane === 'jsonl' ? 'hidden lg:grid' : 'flex'
+          ].join(' ')}
+        >
+          <div
+            className={[
+              'min-h-[22rem] flex-col rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:flex lg:min-h-[28rem]',
+              mobilePane === 'chat' ? 'flex' : 'hidden'
+            ].join(' ')}
+          >
             <div className="border-b border-zinc-200 px-4 py-3">
               <h2 className="text-lg font-semibold">Messages</h2>
             </div>
@@ -1127,7 +1190,12 @@ export function App() {
             </div>
           </div>
 
-          <div className="flex min-h-[28rem] flex-col rounded-3xl border border-zinc-200 bg-white shadow-sm">
+          <div
+            className={[
+              'min-h-[22rem] flex-col rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:flex lg:min-h-[28rem]',
+              mobilePane === 'terminal' ? 'flex' : 'hidden'
+            ].join(' ')}
+          >
             <div className="border-b border-zinc-200 px-4 py-3">
               <h2 className="text-lg font-semibold">Terminal</h2>
             </div>
@@ -1137,7 +1205,7 @@ export function App() {
           </div>
         </section>
 
-        <form onSubmit={handleSubmit} className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
+        <form onSubmit={handleSubmit} className="order-5 rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm lg:order-4">
           <div className="mb-3 flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold">Composer</h2>
             <button
@@ -1157,7 +1225,7 @@ export function App() {
             onChange={(event) => setPrompt(event.target.value)}
             rows={5}
             placeholder={!connected ? '等待 CLI 连接...' : snapshot.busy ? 'Claude 正在运行...' : '输入消息，点击发送。'}
-            className="min-h-32 w-full rounded-2xl border border-zinc-300 bg-zinc-50 px-4 py-3 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500"
+            className="min-h-28 w-full rounded-2xl border border-zinc-300 bg-zinc-50 px-4 py-3 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500 md:min-h-32"
             disabled={!canCompose}
           />
 
@@ -1173,17 +1241,22 @@ export function App() {
           </div>
         </form>
 
-        <section className="rounded-3xl border border-zinc-200 bg-white shadow-sm">
+        <section
+          className={[
+            'order-4 rounded-3xl border border-zinc-200 bg-white shadow-sm lg:order-5 lg:block',
+            mobilePane === 'jsonl' ? 'block' : 'hidden'
+          ].join(' ')}
+        >
           <div className="border-b border-zinc-200 px-4 py-3">
             <h2 className="text-lg font-semibold">Raw JSONL</h2>
           </div>
           <div className="p-4">
             {snapshot.rawJsonl ? (
-              <pre className="max-h-[22rem] min-h-[14rem] overflow-auto rounded-2xl border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-100">
+              <pre className="max-h-[18rem] min-h-[12rem] overflow-auto rounded-2xl border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-100 sm:max-h-[22rem] sm:min-h-[14rem]">
                 {snapshot.rawJsonl}
               </pre>
             ) : (
-              <div className="flex min-h-[14rem] items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
+              <div className="flex min-h-[12rem] items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500 sm:min-h-[14rem]">
                 等待 Claude jsonl 原始内容。
               </div>
             )}
