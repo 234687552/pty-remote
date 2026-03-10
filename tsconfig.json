@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noEmit": true,
+    "allowJs": false,
+    "allowImportingTsExtensions": true,
+    "skipLibCheck": true,
+    "jsx": "react-jsx",
+    "types": ["vite/client"],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["web/src/*"],
+      "@shared/*": ["shared/*"]
+    }
+  },
+  "include": [
+    "shared/**/*.ts",
+    "src/**/*.ts",
+    "web/**/*.ts",
+    "web/**/*.tsx",
+    "vite.config.ts"
+  ]
+}

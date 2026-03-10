@@ -1,0 +1,40 @@
+{
+  "name": "hapi-tmux",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=23.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:socket\" \"npm:dev:cli\"",
+    "dev:web": "vite build --watch",
+    "dev:socket": "node --watch --disable-warning=ExperimentalWarning src/socket-main.ts",
+    "dev:cli": "node --watch --disable-warning=ExperimentalWarning src/cli-main.ts",
+    "build": "npm run build:web",
+    "build:web": "vite build",
+    "start": "npm run build:web && concurrently -k \"npm:start:socket\" \"npm:start:cli\"",
+    "start:socket": "node --disable-warning=ExperimentalWarning src/socket-main.ts",
+    "start:cli": "node --disable-warning=ExperimentalWarning src/cli-main.ts",
+    "postinstall": "node scripts/ensure-node-pty-helper.js"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.2.1",
+    "@vitejs/plugin-react": "^5.1.4",
+    "@xterm/addon-fit": "^0.11.0",
+    "node-pty": "^1.1.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3",
+    "tailwindcss": "^4.2.1",
+    "vite": "^7.3.1",
+    "xterm": "^5.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3"
+  }
+}
