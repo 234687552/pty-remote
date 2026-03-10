@@ -55,6 +55,11 @@ interface MarkdownNode {
   value?: string;
 }
 
+interface SvgDimensions {
+  width: number;
+  height: number;
+}
+
 let mermaidRenderSequence = 0;
 let mermaidLoader: Promise<MermaidApi> | null = null;
 
@@ -128,10 +133,53 @@ function getMermaidDefinition(node: MarkdownNode | undefined): string | null {
   return getMarkdownNodeText(codeNode).trimEnd();
 }
 
+function getSvgDimensions(svg: string): SvgDimensions | null {
+  const documentParser = new DOMParser();
+  const svgDocument = documentParser.parseFromString(svg, 'image/svg+xml');
+  const svgElement = svgDocument.documentElement;
+  if (svgElement.tagName.toLowerCase() !== 'svg') {
+    return null;
+  }
+
+  const viewBox = svgElement.getAttribute('viewBox');
+  if (viewBox) {
+    const [, , width, height] = viewBox
+      .split(/[\s,]+/)
+      .map((value) => Number.parseFloat(value))
+      .filter((value) => Number.isFinite(value));
+    if (Number.isFinite(width) && Number.isFinite(height)) {
+      return { width, height };
+    }
+  }
+
+  const width = Number.parseFloat(svgElement.getAttribute('width') || '');
+  const height = Number.parseFloat(svgElement.getAttribute('height') || '');
+  if (Number.isFinite(width) && Number.isFinite(height)) {
+    return { width, height };
+  }
+
+  return null;
+}
+
 function MermaidDiagram({ definition }: { definition: string }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
+  const inlineContainerRef = useRef<HTMLDivElement | null>(null);
+  const expandedContainerRef = useRef<HTMLDivElement | null>(null);
+  const expandedViewportRef = useRef<HTMLDivElement | null>(null);
+  const bindFunctionsRef = useRef<((element: Element) => void) | null>(null);
+  const dragStateRef = useRef<{
+    pointerId: number;
+    scrollLeft: number;
+    scrollTop: number;
+    startX: number;
+    startY: number;
+  } | null>(null);
   const [svg, setSvg] = useState('');
+  const [svgDimensions, setSvgDimensions] = useState<SvgDimensions | null>(null);
   const [error, setError] = useState('');
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [isDraggingExpanded, setIsDraggingExpanded] = useState(false);
+
+  const expandedScale = 1.6;
 
   useEffect(() => {
     let cancelled = false;
@@ -139,6 +187,7 @@ function MermaidDiagram({ definition }: { definition: string }) {
 
     if (!definition.trim()) {
       setSvg('');
+      setSvgDimensions(null);
       setError('Diagram is empty.');
       return () => {
         if (frameId) {
@@ -160,9 +209,11 @@ function MermaidDiagram({ definition }: { definition: string }) {
         }
 
         setSvg(nextSvg);
+        setSvgDimensions(getSvgDimensions(nextSvg));
+        bindFunctionsRef.current = bindFunctions ?? null;
         frameId = window.requestAnimationFrame(() => {
-          if (!cancelled && bindFunctions && containerRef.current) {
-            bindFunctions(containerRef.current);
+          if (!cancelled && bindFunctions && inlineContainerRef.current) {
+            bindFunctions(inlineContainerRef.current);
           }
         });
       } catch (renderError) {
@@ -171,6 +222,8 @@ function MermaidDiagram({ definition }: { definition: string }) {
         }
 
         setSvg('');
+        setSvgDimensions(null);
+        bindFunctionsRef.current = null;
         setError(renderError instanceof Error ? renderError.message : 'Mermaid could not render this diagram.');
       }
     };
@@ -185,6 +238,102 @@ function MermaidDiagram({ definition }: { definition: string }) {
     };
   }, [definition]);
 
+  useEffect(() => {
+    if (!isExpanded) {
+      setIsDraggingExpanded(false);
+      dragStateRef.current = null;
+      return;
+    }
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsExpanded(false);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isExpanded]);
+
+  useEffect(() => {
+    if (!isExpanded || !bindFunctionsRef.current || !expandedContainerRef.current) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      if (expandedContainerRef.current && bindFunctionsRef.current) {
+        bindFunctionsRef.current(expandedContainerRef.current);
+      }
+
+      const svgElement = expandedContainerRef.current?.querySelector('svg');
+      if (svgElement && svgDimensions) {
+        svgElement.setAttribute('width', String(svgDimensions.width * expandedScale));
+        svgElement.setAttribute('height', String(svgDimensions.height * expandedScale));
+        svgElement.style.width = `${svgDimensions.width * expandedScale}px`;
+        svgElement.style.height = `${svgDimensions.height * expandedScale}px`;
+      }
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [expandedScale, isExpanded, svg, svgDimensions]);
+
+  const endExpandedDrag = (pointerId?: number) => {
+    const viewport = expandedViewportRef.current;
+    if (viewport && pointerId !== undefined && viewport.hasPointerCapture(pointerId)) {
+      viewport.releasePointerCapture(pointerId);
+    }
+    dragStateRef.current = null;
+    setIsDraggingExpanded(false);
+  };
+
+  const handleExpandedPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !expandedViewportRef.current) {
+      return;
+    }
+
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      scrollLeft: expandedViewportRef.current.scrollLeft,
+      scrollTop: expandedViewportRef.current.scrollTop,
+      startX: event.clientX,
+      startY: event.clientY
+    };
+    expandedViewportRef.current.setPointerCapture(event.pointerId);
+    setIsDraggingExpanded(true);
+  };
+
+  const handleExpandedPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const dragState = dragStateRef.current;
+    const viewport = expandedViewportRef.current;
+    if (!dragState || !viewport || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    viewport.scrollLeft = dragState.scrollLeft - (event.clientX - dragState.startX);
+    viewport.scrollTop = dragState.scrollTop - (event.clientY - dragState.startY);
+  };
+
+  const handleExpandedPointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (dragStateRef.current?.pointerId === event.pointerId) {
+      endExpandedDrag(event.pointerId);
+    }
+  };
+
+  const handleExpandedPointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (dragStateRef.current?.pointerId === event.pointerId) {
+      endExpandedDrag(event.pointerId);
+    }
+  };
+
   if (error) {
     return (
       <div className="space-y-2 rounded-xl border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-800">
@@ -198,33 +347,111 @@ function MermaidDiagram({ definition }: { definition: string }) {
   }
 
   return (
-    <div className="overflow-x-auto rounded-xl border border-zinc-200 bg-white px-3 py-3 shadow-sm">
-      {svg ? (
+    <>
+      <div className="group relative overflow-x-auto rounded-xl border border-zinc-200 bg-white px-3 py-3 shadow-sm">
+        {svg ? (
+          <>
+            <button
+              type="button"
+              aria-label="Expand Mermaid diagram"
+              className="absolute top-2 right-2 z-10 inline-flex h-8 items-center gap-1 rounded-full border border-zinc-200 bg-white/95 px-2.5 text-[11px] font-medium text-zinc-700 shadow-sm transition md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 hover:border-zinc-300 hover:text-zinc-950 focus:opacity-100 focus:outline-none focus:ring-2 focus:ring-zinc-400/60"
+              onClick={() => setIsExpanded(true)}
+            >
+              <svg viewBox="0 0 16 16" aria-hidden="true" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.4">
+                <path d="M6 3.5H3.5V6M10 3.5h2.5V6M6 12.5H3.5V10M10 12.5h2.5V10" strokeLinecap="round" />
+                <path d="M3.5 6 6.8 2.7M12.5 6 9.2 2.7M3.5 10l3.3 3.3M12.5 10l-3.3 3.3" strokeLinecap="round" />
+              </svg>
+              <span>Zoom</span>
+            </button>
+            <div
+              ref={inlineContainerRef}
+              className="[&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
+              dangerouslySetInnerHTML={{ __html: svg }}
+            />
+          </>
+        ) : (
+          <div className="text-xs text-zinc-500">Rendering diagram...</div>
+        )}
+      </div>
+
+      {isExpanded ? (
         <div
-          ref={containerRef}
-          className="[&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
-      ) : (
-        <div className="text-xs text-zinc-500">Rendering diagram...</div>
-      )}
-    </div>
+          className="fixed inset-0 z-50 bg-zinc-950/70 px-4 py-5 backdrop-blur-sm sm:px-6 sm:py-6"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setIsExpanded(false);
+            }
+          }}
+        >
+          <div className="mx-auto flex h-full max-w-7xl flex-col rounded-2xl border border-zinc-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+              <div>
+                <div className="text-sm font-semibold text-zinc-950">Mermaid diagram</div>
+                <div className="text-xs text-zinc-500">Drag to pan. Press Escape to close.</div>
+              </div>
+              <button
+                type="button"
+                className="inline-flex h-9 items-center rounded-full border border-zinc-200 px-3 text-sm font-medium text-zinc-700 transition hover:border-zinc-300 hover:text-zinc-950"
+                onClick={() => setIsExpanded(false)}
+              >
+                Close
+              </button>
+            </div>
+            <div
+              ref={expandedViewportRef}
+              className={`relative flex-1 overflow-auto bg-zinc-100/80 p-6 touch-none ${isDraggingExpanded ? 'cursor-grabbing' : 'cursor-grab'}`}
+              onPointerDown={handleExpandedPointerDown}
+              onPointerMove={handleExpandedPointerMove}
+              onPointerUp={handleExpandedPointerUp}
+              onPointerCancel={handleExpandedPointerCancel}
+            >
+              <div className="flex min-h-full min-w-full items-start justify-center">
+                <div
+                  ref={expandedContainerRef}
+                  className="inline-block rounded-xl border border-zinc-200 bg-white shadow-lg [&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
+                  dangerouslySetInnerHTML={{ __html: svg }}
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }
 
-function MessageMarkdown({ content }: { content: string }) {
+function MessageMarkdown({ content, tone = 'default' }: { content: string; tone?: 'default' | 'inverse' }) {
+  const isInverse = tone === 'inverse';
+
   return (
-    <div className="markdown-body space-y-3 leading-6 text-zinc-800">
+    <div className={`markdown-body space-y-3 leading-6 ${isInverse ? 'text-zinc-100' : 'text-zinc-800'}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          a: ({ ...props }) => <a {...props} className="text-blue-700 underline underline-offset-2" target="_blank" rel="noreferrer" />,
-          blockquote: ({ ...props }) => <blockquote {...props} className="border-l-2 border-zinc-300 pl-4 text-zinc-600" />,
+          a: ({ ...props }) => (
+            <a
+              {...props}
+              className={isInverse ? 'text-zinc-100 underline underline-offset-2' : 'text-blue-700 underline underline-offset-2'}
+              target="_blank"
+              rel="noreferrer"
+            />
+          ),
+          blockquote: ({ ...props }) => (
+            <blockquote
+              {...props}
+              className={isInverse ? 'border-l-2 border-zinc-600 pl-4 text-zinc-300' : 'border-l-2 border-zinc-300 pl-4 text-zinc-600'}
+            />
+          ),
           code: ({ children, className, ...props }) => {
             const codeContent = getMarkdownTextContent(children);
             const isBlock = Boolean(className) || codeContent.includes('\n');
             if (isBlock) {
-              const codeClassName = [className, 'block overflow-x-auto rounded-xl bg-zinc-950 px-4 py-3 text-xs leading-5 text-zinc-100']
+              const codeClassName = [
+                className,
+                isInverse
+                  ? 'block overflow-x-auto rounded-xl bg-zinc-950/90 px-4 py-3 text-xs leading-5 text-zinc-100'
+                  : 'block overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-3 text-xs leading-5 text-zinc-800'
+              ]
                 .filter(Boolean)
                 .join(' ');
 
@@ -236,14 +463,21 @@ function MessageMarkdown({ content }: { content: string }) {
             }
 
             return (
-              <code {...props} className="rounded bg-zinc-200 px-1.5 py-0.5 text-[0.85em] text-zinc-900">
+              <code
+                {...props}
+                className={
+                  isInverse
+                    ? 'rounded bg-white/15 px-1.5 py-0.5 text-[0.85em] text-zinc-100'
+                    : 'rounded bg-zinc-200 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
+                }
+              >
                 {children}
               </code>
             );
           },
-          h1: ({ ...props }) => <h1 {...props} className="text-lg font-semibold text-zinc-950" />,
-          h2: ({ ...props }) => <h2 {...props} className="text-base font-semibold text-zinc-950" />,
-          h3: ({ ...props }) => <h3 {...props} className="text-sm font-semibold text-zinc-950" />,
+          h1: ({ ...props }) => <h1 {...props} className={isInverse ? 'text-lg font-semibold text-white' : 'text-lg font-semibold text-zinc-950'} />,
+          h2: ({ ...props }) => <h2 {...props} className={isInverse ? 'text-base font-semibold text-white' : 'text-base font-semibold text-zinc-950'} />,
+          h3: ({ ...props }) => <h3 {...props} className={isInverse ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-zinc-950'} />,
           li: ({ ...props }) => <li {...props} className="ml-5 list-item" />,
           ol: ({ ...props }) => <ol {...props} className="list-decimal space-y-1 pl-5" />,
           p: ({ ...props }) => <p {...props} className="whitespace-pre-wrap break-words" />,
@@ -254,7 +488,14 @@ function MessageMarkdown({ content }: { content: string }) {
             }
 
             return (
-              <pre {...props} className="overflow-x-auto rounded-xl bg-zinc-950">
+              <pre
+                {...props}
+                className={
+                  isInverse
+                    ? 'overflow-x-auto rounded-xl bg-zinc-950'
+                    : 'overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100'
+                }
+              >
                 {children}
               </pre>
             );
@@ -421,23 +662,20 @@ function MessageShell({ message, children }: { message: ChatMessage; children: R
     return <>{children}</>;
   }
 
+  const wrapperClass = message.role === 'user' ? 'flex justify-end' : 'flex justify-start';
   const shellClass = [
-    'rounded-xl border px-3 py-2.5 text-sm break-words',
+    'w-fit max-w-[85%] px-3.5 py-2.5 text-sm break-words',
     message.role === 'user'
-      ? 'border-zinc-200 bg-zinc-50'
+      ? 'rounded-2xl bg-zinc-900 text-white shadow-sm'
       : message.status === 'error'
-        ? 'border-red-200 bg-red-50'
-        : 'border-blue-200 bg-blue-50'
+        ? 'rounded-2xl border border-red-200 bg-red-50 text-zinc-900 shadow-sm'
+        : 'text-zinc-900'
   ].join(' ');
 
   return (
-    <article className={shellClass}>
-      <div className="mb-1.5 flex items-center justify-between gap-2 text-[11px] uppercase tracking-wide text-zinc-500">
-        <span>{message.role}</span>
-        <span>{message.status}</span>
-      </div>
-      {children}
-    </article>
+    <div className={wrapperClass}>
+      <article className={shellClass}>{children}</article>
+    </div>
   );
 }
 
@@ -474,9 +712,17 @@ function createToolCallIndex(messages: ChatMessage[]): Map<string, ToolCallMeta>
   return index;
 }
 
-function TextBlockContent({ block, isStreaming }: { block: Extract<ChatMessageBlock, { type: 'text' }>; isStreaming: boolean }) {
+function TextBlockContent({
+  block,
+  isStreaming,
+  tone
+}: {
+  block: Extract<ChatMessageBlock, { type: 'text' }>;
+  isStreaming: boolean;
+  tone?: 'default' | 'inverse';
+}) {
   const content = isStreaming ? `${block.text}\n\n...` : block.text;
-  return <MessageMarkdown content={content} />;
+  return <MessageMarkdown content={content} tone={tone} />;
 }
 
 function resolveToolUseStatus(
@@ -506,49 +752,55 @@ function ToolUseBlockContent({
   const summaryPreview = getToolInputPreview(block.input, 112);
 
   return (
-    <details className={`group overflow-hidden rounded-lg border ${toneClasses.border} ${toneClasses.surface} shadow-sm`}>
-      <summary className="cursor-pointer list-none px-3 py-2 [&::-webkit-details-marker]:hidden">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
-            <div
-              className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-[8px] font-semibold ${toneClasses.badge}`}
-            >
-              <ToolBadgeIcon kind={variant.iconKind} />
+    <div className="flex justify-start">
+      <details className={`group w-full overflow-hidden rounded-lg border ${toneClasses.border} ${toneClasses.surface} shadow-sm`}>
+        <summary className="cursor-pointer list-none px-3 py-2 [&::-webkit-details-marker]:hidden">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 flex-1 items-center gap-2">
+              <div className="flex h-5 w-5 shrink-0 items-center justify-center">
+                <ToolStatusIcon status={status} />
+              </div>
+              <div
+                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-[8px] font-semibold ${toneClasses.badge}`}
+              >
+                <ToolBadgeIcon kind={variant.iconKind} />
+              </div>
+              <div className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden">
+                <div className={`shrink-0 text-[11px] font-medium ${toneClasses.title}`}>{compactTitle}</div>
+                <div className={`min-w-0 flex-1 truncate font-mono text-[11px] ${toneClasses.meta}`}>{summaryPreview || '(no input)'}</div>
+              </div>
             </div>
-            <div className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden">
-              <div className={`shrink-0 text-[11px] font-medium ${toneClasses.title}`}>{compactTitle}</div>
-              <div className={`min-w-0 flex-1 truncate font-mono text-[11px] ${toneClasses.meta}`}>{summaryPreview || '(no input)'}</div>
-            </div>
+            <span className="shrink-0 text-[15px] font-semibold leading-none text-zinc-700 transition-transform group-open:rotate-180">
+              ▾
+            </span>
           </div>
-          <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-zinc-500">
-            <ToolStatusIcon status={status} />
-            <span className="text-[10px] transition-transform group-open:rotate-180">▾</span>
-          </div>
-        </div>
-      </summary>
-      <div className={`space-y-3 border-t px-3 py-3 ${toneClasses.border}`}>
-        <ToolDetailSection label="Input">
-          <pre className="overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
-            {block.input || '(no input)'}
-          </pre>
-        </ToolDetailSection>
-        <ToolDetailSection label="Output">
-          {resultBlock ? (
-            resultBlock.content ? (
-              <MessageMarkdown content={resultBlock.content} />
+        </summary>
+        <div className={`space-y-3 border-t px-3 py-3 ${toneClasses.border}`}>
+          <ToolDetailSection label="Input">
+            <pre className="overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
+              {block.input || '(no input)'}
+            </pre>
+          </ToolDetailSection>
+          <ToolDetailSection label="Output">
+            {resultBlock ? (
+              resultBlock.content ? (
+                <pre className="overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
+                  {resultBlock.content}
+                </pre>
+              ) : (
+                <div className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-500">
+                  Empty output.
+                </div>
+              )
             ) : (
               <div className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-500">
-                Empty output.
+                {status === 'streaming' ? 'Waiting for output.' : 'No output.'}
               </div>
-            )
-          ) : (
-            <div className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-500">
-              {status === 'streaming' ? 'Waiting for output.' : 'No output.'}
-            </div>
-          )}
-        </ToolDetailSection>
-      </div>
-    </details>
+            )}
+          </ToolDetailSection>
+        </div>
+      </details>
+    </div>
   );
 }
 
@@ -566,7 +818,14 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
       {message.blocks.map((block, index) => {
         if (block.type === 'text') {
           const isLastBlock = index === message.blocks.length - 1;
-          return <TextBlockContent key={block.id} block={block} isStreaming={message.status === 'streaming' && isLastBlock} />;
+          return (
+            <TextBlockContent
+              key={block.id}
+              block={block}
+              isStreaming={message.status === 'streaming' && isLastBlock}
+              tone={message.role === 'user' ? 'inverse' : 'default'}
+            />
+          );
         }
 
         if (block.type === 'tool_use') {
