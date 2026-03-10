@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Children, useEffect, useMemo, useRef, useState } from 'react';
 import { io, type Socket } from 'socket.io-client';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from 'xterm';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import type { Mermaid as MermaidApi } from 'mermaid';
 
 import type {
   CliCommandName,
@@ -22,6 +23,7 @@ import type {
   CliDescriptor,
   MessageStatus,
   RuntimeSnapshot,
+  ToolResultChatMessageBlock,
   ToolUseChatMessageBlock
 } from '@shared/runtime-types.ts';
 
@@ -44,6 +46,172 @@ function getSocketBaseUrl(): string {
   return window.location.origin;
 }
 
+interface MarkdownNode {
+  children?: MarkdownNode[];
+  properties?: {
+    className?: unknown;
+  };
+  tagName?: string;
+  value?: string;
+}
+
+let mermaidRenderSequence = 0;
+let mermaidLoader: Promise<MermaidApi> | null = null;
+
+function loadMermaid(): Promise<MermaidApi> {
+  if (!mermaidLoader) {
+    mermaidLoader = import('mermaid')
+      .then(({ default: mermaidApi }) => {
+        mermaidApi.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: 'neutral',
+          fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
+        });
+        return mermaidApi;
+      })
+      .catch((error) => {
+        mermaidLoader = null;
+        throw error;
+      });
+  }
+
+  return mermaidLoader;
+}
+
+function normalizeClassName(className: unknown): string {
+  if (typeof className === 'string') {
+    return className;
+  }
+
+  if (!Array.isArray(className)) {
+    return '';
+  }
+
+  return className.filter((name): name is string => typeof name === 'string').join(' ');
+}
+
+function getMarkdownCodeLanguage(className: string | undefined): string | null {
+  const match = className?.match(/language-([\w-]+)/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
+function getMarkdownTextContent(children: React.ReactNode): string {
+  return Children.toArray(children)
+    .map((child) => (typeof child === 'string' || typeof child === 'number' ? String(child) : ''))
+    .join('');
+}
+
+function getMarkdownNodeText(node: MarkdownNode | undefined): string {
+  if (!node) {
+    return '';
+  }
+
+  if (typeof node.value === 'string') {
+    return node.value;
+  }
+
+  return node.children?.map((child) => getMarkdownNodeText(child)).join('') ?? '';
+}
+
+function getMermaidDefinition(node: MarkdownNode | undefined): string | null {
+  const codeNode = node?.children?.find((child) => child.tagName === 'code');
+  if (!codeNode) {
+    return null;
+  }
+
+  const language = getMarkdownCodeLanguage(normalizeClassName(codeNode.properties?.className));
+  if (language !== 'mermaid') {
+    return null;
+  }
+
+  return getMarkdownNodeText(codeNode).trimEnd();
+}
+
+function MermaidDiagram({ definition }: { definition: string }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [svg, setSvg] = useState('');
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    let frameId = 0;
+
+    if (!definition.trim()) {
+      setSvg('');
+      setError('Diagram is empty.');
+      return () => {
+        if (frameId) {
+          window.cancelAnimationFrame(frameId);
+        }
+      };
+    }
+
+    setSvg('');
+    setError('');
+
+    const renderDiagram = async () => {
+      try {
+        const mermaidApi = await loadMermaid();
+        const renderId = `mermaid-diagram-${++mermaidRenderSequence}`;
+        const { svg: nextSvg, bindFunctions } = await mermaidApi.render(renderId, definition);
+        if (cancelled) {
+          return;
+        }
+
+        setSvg(nextSvg);
+        frameId = window.requestAnimationFrame(() => {
+          if (!cancelled && bindFunctions && containerRef.current) {
+            bindFunctions(containerRef.current);
+          }
+        });
+      } catch (renderError) {
+        if (cancelled) {
+          return;
+        }
+
+        setSvg('');
+        setError(renderError instanceof Error ? renderError.message : 'Mermaid could not render this diagram.');
+      }
+    };
+
+    void renderDiagram();
+
+    return () => {
+      cancelled = true;
+      if (frameId) {
+        window.cancelAnimationFrame(frameId);
+      }
+    };
+  }, [definition]);
+
+  if (error) {
+    return (
+      <div className="space-y-2 rounded-xl border border-red-200 bg-red-50 px-3 py-3 text-sm text-red-800">
+        <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-red-600">Mermaid Render Failed</div>
+        <div className="text-xs leading-5 text-red-700">{error}</div>
+        <pre className="overflow-x-auto rounded-lg border border-red-200 bg-white/80 px-3 py-2 text-xs leading-5 whitespace-pre-wrap text-red-950">
+          {definition}
+        </pre>
+      </div>
+    );
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-xl border border-zinc-200 bg-white px-3 py-3 shadow-sm">
+      {svg ? (
+        <div
+          ref={containerRef}
+          className="[&_svg]:block [&_svg]:h-auto [&_svg]:max-w-none"
+          dangerouslySetInnerHTML={{ __html: svg }}
+        />
+      ) : (
+        <div className="text-xs text-zinc-500">Rendering diagram...</div>
+      )}
+    </div>
+  );
+}
+
 function MessageMarkdown({ content }: { content: string }) {
   return (
     <div className="markdown-body space-y-3 leading-6 text-zinc-800">
@@ -53,13 +221,15 @@ function MessageMarkdown({ content }: { content: string }) {
           a: ({ ...props }) => <a {...props} className="text-blue-700 underline underline-offset-2" target="_blank" rel="noreferrer" />,
           blockquote: ({ ...props }) => <blockquote {...props} className="border-l-2 border-zinc-300 pl-4 text-zinc-600" />,
           code: ({ children, className, ...props }) => {
-            const isBlock = Boolean(className);
+            const codeContent = getMarkdownTextContent(children);
+            const isBlock = Boolean(className) || codeContent.includes('\n');
             if (isBlock) {
+              const codeClassName = [className, 'block overflow-x-auto rounded-xl bg-zinc-950 px-4 py-3 text-xs leading-5 text-zinc-100']
+                .filter(Boolean)
+                .join(' ');
+
               return (
-                <code
-                  {...props}
-                  className={`${className} block overflow-x-auto rounded-xl bg-zinc-950 px-4 py-3 text-xs leading-5 text-zinc-100`}
-                >
+                <code {...props} className={codeClassName}>
                   {children}
                 </code>
               );
@@ -77,7 +247,18 @@ function MessageMarkdown({ content }: { content: string }) {
           li: ({ ...props }) => <li {...props} className="ml-5 list-item" />,
           ol: ({ ...props }) => <ol {...props} className="list-decimal space-y-1 pl-5" />,
           p: ({ ...props }) => <p {...props} className="whitespace-pre-wrap break-words" />,
-          pre: ({ ...props }) => <pre {...props} className="overflow-x-auto rounded-xl bg-zinc-950" />,
+          pre: ({ children, node, ...props }) => {
+            const mermaidDefinition = getMermaidDefinition(node as MarkdownNode | undefined);
+            if (mermaidDefinition) {
+              return <MermaidDiagram definition={mermaidDefinition} />;
+            }
+
+            return (
+              <pre {...props} className="overflow-x-auto rounded-xl bg-zinc-950">
+                {children}
+              </pre>
+            );
+          },
           ul: ({ ...props }) => <ul {...props} className="list-disc space-y-1 pl-5" />
         }}
       >
@@ -101,31 +282,71 @@ function getToolInputPreview(input: string, maxChars = 180): string {
 }
 
 type ToolVariantTone = 'generic' | 'shell' | 'web' | 'mcp';
+type ToolIconKind = 'generic' | 'network' | 'command' | 'tool';
 
-function getToolVariant(toolName: string | undefined): { badgeLabel: string; tone: ToolVariantTone } {
+function getToolVariant(toolName: string | undefined): { iconKind: ToolIconKind; tone: ToolVariantTone } {
   const normalized = (toolName || '').trim();
   const lower = normalized.toLowerCase();
 
   if (!normalized) {
-    return { badgeLabel: 'TL', tone: 'generic' };
+    return { iconKind: 'generic', tone: 'generic' };
   }
 
   if (lower.includes('bash') || lower.includes('shell') || lower.includes('terminal')) {
-    return { badgeLabel: '>_', tone: 'shell' };
+    return { iconKind: 'command', tone: 'shell' };
   }
 
-  if (lower.startsWith('web')) {
-    return { badgeLabel: 'WEB', tone: 'web' };
+  if (lower.includes('websearch') || lower.includes('fetch') || lower.startsWith('web')) {
+    return { iconKind: 'network', tone: 'web' };
   }
 
   if (lower.startsWith('mcp__')) {
-    return { badgeLabel: 'MCP', tone: 'mcp' };
+    return { iconKind: 'tool', tone: 'mcp' };
   }
 
   return {
-    badgeLabel: normalized.replace(/[^a-zA-Z0-9]/g, '').slice(0, 3).toUpperCase() || 'TL',
+    iconKind: 'generic',
     tone: 'generic'
   };
+}
+
+function ToolBadgeIcon({ kind }: { kind: ToolIconKind }) {
+  switch (kind) {
+    case 'network':
+      return (
+        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="1.4">
+          <path d="M3 6.2a7.6 7.6 0 0 1 10 0" strokeLinecap="round" />
+          <path d="M5.3 8.6a4.6 4.6 0 0 1 5.4 0" strokeLinecap="round" />
+          <path d="M7.2 11a1.7 1.7 0 0 1 1.6 0" strokeLinecap="round" />
+          <circle cx="8" cy="12.9" r="0.9" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case 'command':
+      return (
+        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="1.4">
+          <path d="m3.5 4.5 3 3-3 3" strokeLinecap="round" strokeLinejoin="round" />
+          <path d="M8.5 10.5h4" strokeLinecap="round" />
+        </svg>
+      );
+    case 'tool':
+      return (
+        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="1.4">
+          <path
+            d="M9.8 2.7a3 3 0 0 0 3.4 3.5l-2 2-1.8-1.8-4.8 4.8a1.2 1.2 0 1 0 1.7 1.7l4.8-4.8 1.8 1.8 2-2a3 3 0 0 0-3.5-3.4Z"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case 'generic':
+    default:
+      return (
+        <svg viewBox="0 0 16 16" aria-hidden="true" className="h-2.5 w-2.5" fill="none" stroke="currentColor" strokeWidth="1.4">
+          <rect x="3" y="3" width="10" height="10" rx="2" />
+          <path d="M5.5 5.5h5M5.5 8h5M5.5 10.5h3" strokeLinecap="round" />
+        </svg>
+      );
+  }
 }
 
 function getCompactToolTitle(toolName: string | undefined): string {
@@ -151,48 +372,20 @@ function getCompactToolTitle(toolName: string | undefined): string {
   return normalized.split(/[.:/]/).at(-1) || normalized;
 }
 
-function getToolToneClasses(tone: ToolVariantTone): {
+function getToolToneClasses(_tone: ToolVariantTone): {
   badge: string;
   surface: string;
   border: string;
   title: string;
   meta: string;
 } {
-  switch (tone) {
-    case 'shell':
-      return {
-        badge: 'bg-slate-900 text-white',
-        surface: 'bg-slate-50',
-        border: 'border-slate-200',
-        title: 'text-slate-950',
-        meta: 'text-slate-600'
-      };
-    case 'web':
-      return {
-        badge: 'bg-sky-600 text-white',
-        surface: 'bg-sky-50',
-        border: 'border-sky-200',
-        title: 'text-sky-950',
-        meta: 'text-sky-700'
-      };
-    case 'mcp':
-      return {
-        badge: 'bg-emerald-600 text-white',
-        surface: 'bg-emerald-50',
-        border: 'border-emerald-200',
-        title: 'text-emerald-950',
-        meta: 'text-emerald-700'
-      };
-    case 'generic':
-    default:
-      return {
-        badge: 'bg-zinc-200 text-zinc-700',
-        surface: 'bg-white',
-        border: 'border-zinc-200',
-        title: 'text-zinc-900',
-        meta: 'text-zinc-500'
-      };
-  }
+  return {
+    badge: 'border border-zinc-300 bg-white text-zinc-950',
+    surface: 'bg-white',
+    border: 'border-zinc-200',
+    title: 'text-zinc-900',
+    meta: 'text-zinc-500'
+  };
 }
 
 function ToolStatusIcon({ status }: { status: MessageStatus }) {
@@ -202,7 +395,12 @@ function ToolStatusIcon({ status }: { status: MessageStatus }) {
   if (status === 'complete') {
     return <span className="inline-block h-2 w-2 rounded-full bg-emerald-600" />;
   }
-  return <span className="inline-block h-2 w-2 rounded-full bg-amber-500 animate-pulse" />;
+  return (
+    <span className="relative inline-flex h-3 w-3 items-center justify-center">
+      <span className="absolute inline-flex h-3 w-3 rounded-full bg-emerald-600/30 animate-ping" />
+      <span className="relative inline-block h-2 w-2 rounded-full bg-emerald-600" />
+    </span>
+  );
 }
 
 function ToolDetailSection({ label, children }: { label: string; children: React.ReactNode }) {
@@ -246,6 +444,7 @@ function MessageShell({ message, children }: { message: ChatMessage; children: R
 interface ToolCallMeta {
   toolName?: string;
   useBlockId?: string;
+  resultBlock?: ToolResultChatMessageBlock;
   resultStatus?: MessageStatus;
 }
 
@@ -265,6 +464,7 @@ function createToolCallIndex(messages: ChatMessage[]): Map<string, ToolCallMeta>
       if (block.type === 'tool_result' && block.toolCallId) {
         index.set(block.toolCallId, {
           ...index.get(block.toolCallId),
+          resultBlock: block,
           resultStatus: block.isError ? 'error' : 'complete'
         });
       }
@@ -293,10 +493,12 @@ function resolveToolUseStatus(
 
 function ToolUseBlockContent({
   block,
-  status
+  status,
+  resultBlock
 }: {
   block: ToolUseChatMessageBlock;
   status: MessageStatus;
+  resultBlock?: ToolResultChatMessageBlock;
 }) {
   const variant = getToolVariant(block.toolName);
   const compactTitle = getCompactToolTitle(block.toolName);
@@ -311,11 +513,11 @@ function ToolUseBlockContent({
             <div
               className={`flex h-5 w-5 shrink-0 items-center justify-center rounded text-[8px] font-semibold ${toneClasses.badge}`}
             >
-              {variant.badgeLabel}
+              <ToolBadgeIcon kind={variant.iconKind} />
             </div>
-            <div className="flex min-w-0 items-baseline gap-1.5">
+            <div className="flex min-w-0 flex-1 items-baseline gap-1.5 overflow-hidden">
               <div className={`shrink-0 text-[11px] font-medium ${toneClasses.title}`}>{compactTitle}</div>
-              <div className={`min-w-0 truncate font-mono text-[11px] ${toneClasses.meta}`}>{summaryPreview || '(no input)'}</div>
+              <div className={`min-w-0 flex-1 truncate font-mono text-[11px] ${toneClasses.meta}`}>{summaryPreview || '(no input)'}</div>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-zinc-500">
@@ -329,6 +531,21 @@ function ToolUseBlockContent({
           <pre className="overflow-auto rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
             {block.input || '(no input)'}
           </pre>
+        </ToolDetailSection>
+        <ToolDetailSection label="Output">
+          {resultBlock ? (
+            resultBlock.content ? (
+              <MessageMarkdown content={resultBlock.content} />
+            ) : (
+              <div className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-500">
+                Empty output.
+              </div>
+            )
+          ) : (
+            <div className="rounded-lg border border-dashed border-zinc-200 bg-zinc-50 px-2.5 py-2 text-xs text-zinc-500">
+              {status === 'streaming' ? 'Waiting for output.' : 'No output.'}
+            </div>
+          )}
         </ToolDetailSection>
       </div>
     </details>
@@ -353,11 +570,13 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
         }
 
         if (block.type === 'tool_use') {
+          const toolMeta = block.toolCallId ? toolCallIndex.get(block.toolCallId) : undefined;
           return (
             <ToolUseBlockContent
               key={block.id}
               block={block}
               status={resolveToolUseStatus(block, toolCallIndex, message.status)}
+              resultBlock={toolMeta?.resultBlock}
             />
           );
         }
