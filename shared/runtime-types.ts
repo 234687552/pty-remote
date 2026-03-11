@@ -1,5 +1,6 @@
 export type Role = 'user' | 'assistant';
 export type MessageStatus = 'complete' | 'streaming' | 'error';
+export type RuntimeStatus = 'idle' | 'starting' | 'running' | 'error';
 
 export interface TextChatMessageBlock {
   id: string;
@@ -34,11 +35,10 @@ export interface ChatMessage {
 }
 
 export interface RuntimeSnapshot {
-  busy: boolean;
+  status: RuntimeStatus;
   sessionId: string | null;
-  terminalReplay: string;
-  rawJsonl: string;
   messages: ChatMessage[];
+  hasOlderMessages: boolean;
   lastError: string | null;
 }
 
@@ -48,7 +48,7 @@ export interface CliDescriptor {
   cwd: string;
   runtimeBackend: string;
   connected: boolean;
-  busy: boolean;
+  status: RuntimeStatus;
   sessionId: string | null;
   connectedAt: string | null;
   lastSeenAt: string | null;

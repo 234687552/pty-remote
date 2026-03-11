@@ -12,8 +12,9 @@ import type {
   CliCommandPayloadMap,
   CliCommandResult,
   CliStatusPayload,
-  MessagesUpdatePayload,
-  RawJsonlUpdatePayload,
+  GetOlderMessagesResultPayload,
+  GetRawJsonlResultPayload,
+  RuntimeSnapshotPayload,
   TerminalChunkPayload,
   WebCommandEnvelope,
   WebInitPayload
@@ -24,19 +25,36 @@ import type {
   CliDescriptor,
   MessageStatus,
   RuntimeSnapshot,
+  RuntimeStatus,
   ToolResultChatMessageBlock,
   ToolUseChatMessageBlock
 } from '@shared/runtime-types.ts';
 
 function createEmptySnapshot(): RuntimeSnapshot {
   return {
-    busy: false,
+    status: 'idle',
     sessionId: null,
-    terminalReplay: '',
-    rawJsonl: '',
     messages: [],
+    hasOlderMessages: false,
     lastError: null
   };
+}
+
+function isBusyStatus(status: RuntimeStatus): boolean {
+  return status === 'starting' || status === 'running';
+}
+
+function getRuntimeStatusLabel(status: RuntimeStatus): string {
+  switch (status) {
+    case 'starting':
+      return 'starting';
+    case 'running':
+      return 'running';
+    case 'error':
+      return 'error';
+    default:
+      return 'idle';
+  }
 }
 
 function getSocketBaseUrl(): string {
@@ -72,6 +90,7 @@ function loadMermaid(): Promise<MermaidApi> {
         mermaidApi.initialize({
           startOnLoad: false,
           securityLevel: 'strict',
+          suppressErrorRendering: true,
           theme: 'neutral',
           fontFamily: 'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif'
         });
@@ -216,7 +235,8 @@ function MermaidDiagram({ definition }: { definition: string }) {
       try {
         const mermaidApi = await loadMermaid();
         const renderId = `mermaid-diagram-${++mermaidRenderSequence}`;
-        const { svg: nextSvg, bindFunctions } = await mermaidApi.render(renderId, definition);
+        const renderContainer = document.createElement('div');
+        const { svg: nextSvg, bindFunctions } = await mermaidApi.render(renderId, definition, renderContainer);
         if (cancelled) {
           return;
         }
@@ -565,6 +585,25 @@ function getToolInputPreview(input: string, maxChars = 180): string {
   return `${normalized.slice(0, maxChars - 3)}...`;
 }
 
+function parseStructuredToolInput(input: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(input) as unknown;
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // ignore invalid JSON input previews
+  }
+
+  return null;
+}
+
+function getStructuredToolInputField(input: string, field: string): string | null {
+  const parsed = parseStructuredToolInput(input);
+  const value = parsed?.[field];
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 type ToolVariantTone = 'generic' | 'shell' | 'web' | 'mcp';
 
 function getToolVariant(toolName: string | undefined): { tone: ToolVariantTone } {
@@ -590,14 +629,44 @@ function getToolVariant(toolName: string | undefined): { tone: ToolVariantTone }
   return { tone: 'generic' };
 }
 
-function getCompactToolTitle(toolName: string | undefined): string {
+function getCompactToolTitle(toolName: string | undefined, input: string): string {
   const normalized = (toolName || '').trim();
+
+  if (normalized === 'Task') {
+    const subagentType = getStructuredToolInputField(input, 'subagent_type');
+    const description = getStructuredToolInputField(input, 'description');
+
+    if (subagentType && description) {
+      return `${subagentType}(${description})`;
+    }
+
+    if (description) {
+      return description;
+    }
+
+    if (subagentType) {
+      return subagentType;
+    }
+  }
 
   if (!normalized) {
     return 'Tool';
   }
 
   return normalized;
+}
+
+function getCompactToolPreview(toolName: string | undefined, input: string, maxChars = 180): string {
+  const normalized = (toolName || '').trim();
+
+  if (normalized === 'Task') {
+    const prompt = getStructuredToolInputField(input, 'prompt');
+    if (prompt) {
+      return getToolInputPreview(prompt, maxChars);
+    }
+  }
+
+  return getToolInputPreview(input, maxChars);
 }
 
 function getToolToneClasses(_tone: ToolVariantTone): {
@@ -699,6 +768,24 @@ function createToolCallIndex(messages: ChatMessage[]): Map<string, ToolCallMeta>
   return index;
 }
 
+function mergeChronologicalMessages(left: ChatMessage[], right: ChatMessage[]): ChatMessage[] {
+  const merged = [...left];
+  const indexById = new Map(merged.map((message, index) => [message.id, index]));
+
+  for (const message of right) {
+    const existingIndex = indexById.get(message.id);
+    if (existingIndex === undefined) {
+      indexById.set(message.id, merged.length);
+      merged.push(message);
+      continue;
+    }
+
+    merged[existingIndex] = message;
+  }
+
+  return merged;
+}
+
 function TextBlockContent({
   block,
   isStreaming,
@@ -735,9 +822,9 @@ function ToolUseBlockContent({
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const variant = getToolVariant(block.toolName);
-  const compactTitle = getCompactToolTitle(block.toolName);
+  const compactTitle = getCompactToolTitle(block.toolName, block.input);
   const toneClasses = getToolToneClasses(variant.tone);
-  const summaryPreview = getToolInputPreview(block.input, 112);
+  const summaryPreview = getCompactToolPreview(block.toolName, block.input, 112);
   const closeExpandedViewer = () => {
     setIsExpanded(false);
   };
@@ -913,9 +1000,15 @@ export function App() {
   const [socketConnected, setSocketConnected] = useState(false);
   const [cli, setCli] = useState<CliDescriptor | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot>(createEmptySnapshot());
+  const [olderMessages, setOlderMessages] = useState<ChatMessage[]>([]);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [error, setError] = useState('');
   const [mobilePane, setMobilePane] = useState<MobilePane>('chat');
+  const [rawJsonl, setRawJsonl] = useState('');
+  const [rawJsonlLoading, setRawJsonlLoading] = useState(false);
+  const [rawJsonlTruncated, setRawJsonlTruncated] = useState(false);
 
   const socketRef = useRef<Socket | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -924,13 +1017,33 @@ export function App() {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const appliedReplayLengthRef = useRef(0);
   const appliedSessionIdRef = useRef<string | null>(null);
+  const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+
+  function applyTerminalReplay(sessionId: string | null, replay: string): void {
+    const terminal = terminalInstanceRef.current;
+    if (!terminal) {
+      return;
+    }
+
+    terminal.reset();
+    if (replay) {
+      terminal.write(replay);
+    }
+    appliedSessionIdRef.current = sessionId;
+    appliedReplayLengthRef.current = replay.length;
+    fitAddonRef.current?.fit();
+  }
 
   const connected = Boolean(socketConnected && cli?.connected);
-  const canCompose = connected && !snapshot.busy;
-  const toolCallIndex = useMemo(() => createToolCallIndex(snapshot.messages), [snapshot.messages]);
+  const canCompose = connected && !isBusyStatus(snapshot.status);
+  const visibleMessages = useMemo(
+    () => mergeChronologicalMessages(olderMessages, snapshot.messages),
+    [olderMessages, snapshot.messages]
+  );
+  const toolCallIndex = useMemo(() => createToolCallIndex(visibleMessages), [visibleMessages]);
   const renderableMessages = useMemo(
-    () => snapshot.messages.filter((message) => hasRenderableMessageContent(message)),
-    [snapshot.messages]
+    () => visibleMessages.filter((message) => hasRenderableMessageContent(message)),
+    [visibleMessages]
   );
 
   useEffect(() => {
@@ -1000,47 +1113,15 @@ export function App() {
     socket.on('web:init', (payload: WebInitPayload) => {
       setCli(payload.cli);
       setSnapshot(payload.snapshot ?? createEmptySnapshot());
+      applyTerminalReplay(payload.snapshot?.sessionId ?? null, payload.terminalReplay ?? '');
     });
 
     socket.on('cli:update', (payload: CliStatusPayload) => {
       setCli(payload.cli);
     });
 
-    socket.on('messages:update', (payload: MessagesUpdatePayload) => {
-      setSnapshot((current) => {
-        const sessionChanged = current.sessionId !== payload.sessionId;
-        return {
-          ...current,
-          busy: payload.busy,
-          sessionId: payload.sessionId,
-          rawJsonl: sessionChanged ? '' : current.rawJsonl,
-          messages: payload.messages,
-          lastError: payload.lastError,
-          terminalReplay: sessionChanged ? '' : current.terminalReplay
-        };
-      });
-    });
-
-    socket.on('raw-jsonl:update', (payload: RawJsonlUpdatePayload) => {
-      setSnapshot((current) => {
-        const sessionChanged = current.sessionId !== payload.sessionId;
-        const currentRawJsonl = sessionChanged ? '' : current.rawJsonl;
-        let nextRawJsonl = currentRawJsonl;
-
-        if (payload.reset) {
-          nextRawJsonl = payload.chunk;
-        } else if (currentRawJsonl.length === payload.baseLength) {
-          nextRawJsonl = `${currentRawJsonl}${payload.chunk}`;
-        } else {
-          nextRawJsonl = `${currentRawJsonl.slice(0, Math.max(0, payload.baseLength))}${payload.chunk}`;
-        }
-
-        return {
-          ...current,
-          sessionId: payload.sessionId,
-          rawJsonl: nextRawJsonl
-        };
-      });
+    socket.on('runtime:snapshot', (payload: RuntimeSnapshotPayload) => {
+      setSnapshot(payload.snapshot);
     });
 
     socket.on('terminal:chunk', (payload: TerminalChunkPayload) => {
@@ -1064,31 +1145,27 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const terminal = terminalInstanceRef.current;
-    if (!terminal) {
+    if (appliedSessionIdRef.current === snapshot.sessionId) {
       return;
     }
+    applyTerminalReplay(snapshot.sessionId, '');
+  }, [snapshot.sessionId]);
 
-    const nextReplay = snapshot.terminalReplay || '';
-    const sessionChanged = appliedSessionIdRef.current !== snapshot.sessionId;
-    const replayRewound = nextReplay.length < appliedReplayLengthRef.current;
+  useEffect(() => {
+    setOlderMessages([]);
+    setHasOlderMessages(snapshot.hasOlderMessages);
+    setOlderMessagesLoading(false);
+    setRawJsonl('');
+    setRawJsonlTruncated(false);
+    setRawJsonlLoading(false);
+  }, [snapshot.sessionId]);
 
-    if (sessionChanged || replayRewound) {
-      terminal.reset();
-      if (nextReplay) {
-        terminal.write(nextReplay);
-      }
-      appliedSessionIdRef.current = snapshot.sessionId;
-      appliedReplayLengthRef.current = nextReplay.length;
-      fitAddonRef.current?.fit();
+  useEffect(() => {
+    if (olderMessages.length > 0) {
       return;
     }
-
-    if (nextReplay.length > appliedReplayLengthRef.current) {
-      terminal.write(nextReplay.slice(appliedReplayLengthRef.current));
-      appliedReplayLengthRef.current = nextReplay.length;
-    }
-  }, [snapshot.sessionId, snapshot.terminalReplay]);
+    setHasOlderMessages(snapshot.hasOlderMessages);
+  }, [olderMessages.length, snapshot.hasOlderMessages]);
 
   useEffect(() => {
     if (mobilePane !== 'terminal') {
@@ -1105,7 +1182,19 @@ export function App() {
   }, [mobilePane]);
 
   useEffect(() => {
-    messagesRef.current?.scrollTo({ top: messagesRef.current.scrollHeight });
+    const messagesElement = messagesRef.current;
+    if (!messagesElement) {
+      return;
+    }
+
+    const preservedScroll = preserveMessagesScrollRef.current;
+    if (preservedScroll) {
+      messagesElement.scrollTop = preservedScroll.scrollTop + (messagesElement.scrollHeight - preservedScroll.scrollHeight);
+      preserveMessagesScrollRef.current = null;
+      return;
+    }
+
+    messagesElement.scrollTo({ top: messagesElement.scrollHeight });
   }, [renderableMessages]);
 
   const headerText = useMemo(() => {
@@ -1115,20 +1204,20 @@ export function App() {
     if (!cli?.connected) {
       return 'waiting for cli';
     }
-    if (snapshot.busy) {
-      return 'running';
-    }
-    return 'idle';
-  }, [cli?.connected, snapshot.busy, socketConnected]);
+    return getRuntimeStatusLabel(snapshot.status);
+  }, [cli?.connected, snapshot.status, socketConnected]);
 
-  async function sendCommand<TName extends CliCommandName>(name: TName, payload: CliCommandPayloadMap[TName]) {
+  async function sendCommand<TName extends CliCommandName>(
+    name: TName,
+    payload: CliCommandPayloadMap[TName]
+  ): Promise<CliCommandResult<TName>> {
     const socket = socketRef.current;
     if (!socket?.connected) {
       throw new Error('Socket is not connected');
     }
 
-    const result = await new Promise<CliCommandResult>((resolve) => {
-      socket.emit('web:command', { name, payload } satisfies WebCommandEnvelope<TName>, (ack?: CliCommandResult) => {
+    const result = await new Promise<CliCommandResult<TName>>((resolve) => {
+      socket.emit('web:command', { name, payload } satisfies WebCommandEnvelope<TName>, (ack?: CliCommandResult<TName>) => {
         resolve(ack ?? { ok: false, error: 'No response from server' });
       });
     });
@@ -1136,6 +1225,8 @@ export function App() {
     if (!result.ok) {
       throw new Error(result.error || 'Request failed');
     }
+
+    return result;
   }
 
   async function handleSubmit(event: React.FormEvent) {
@@ -1163,6 +1254,59 @@ export function App() {
       setMobilePane('chat');
     } catch (resetError) {
       setError(resetError instanceof Error ? resetError.message : '重置失败');
+    }
+  }
+
+  async function handleLoadRawJsonl() {
+    try {
+      setError('');
+      setRawJsonlLoading(true);
+      const result = await sendCommand('get-raw-jsonl', { maxChars: 200_000 });
+      const payload = result.payload as GetRawJsonlResultPayload | undefined;
+      setRawJsonl(payload?.rawJsonl ?? '');
+      setRawJsonlTruncated(Boolean(payload?.truncated));
+      setMobilePane('jsonl');
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : '加载 JSONL 失败');
+    } finally {
+      setRawJsonlLoading(false);
+    }
+  }
+
+  async function handleLoadOlderMessages() {
+    try {
+      setError('');
+      setOlderMessagesLoading(true);
+      if (messagesRef.current) {
+        preserveMessagesScrollRef.current = {
+          scrollHeight: messagesRef.current.scrollHeight,
+          scrollTop: messagesRef.current.scrollTop
+        };
+      }
+
+      const oldestMessageId = visibleMessages[0]?.id;
+      const result = await sendCommand('get-older-messages', {
+        beforeMessageId: oldestMessageId,
+        maxMessages: 40
+      });
+      const payload = result.payload as GetOlderMessagesResultPayload | undefined;
+
+      if ((payload?.sessionId ?? null) !== snapshot.sessionId) {
+        preserveMessagesScrollRef.current = null;
+        return;
+      }
+
+      if (!payload?.messages?.length) {
+        preserveMessagesScrollRef.current = null;
+      }
+
+      setOlderMessages((current) => mergeChronologicalMessages(payload?.messages ?? [], current));
+      setHasOlderMessages(Boolean(payload?.hasOlderMessages));
+    } catch (loadError) {
+      preserveMessagesScrollRef.current = null;
+      setError(loadError instanceof Error ? loadError.message : '加载更早消息失败');
+    } finally {
+      setOlderMessagesLoading(false);
     }
   }
 
@@ -1226,7 +1370,24 @@ export function App() {
             ].join(' ')}
           >
             <div className="border-b border-zinc-200 px-4 py-3">
-              <h2 className="text-lg font-semibold">Messages</h2>
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-lg font-semibold">Messages</h2>
+                  <p className="text-xs text-zinc-500">默认同步最近消息，旧消息按需补拉。</p>
+                </div>
+                {hasOlderMessages ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void handleLoadOlderMessages();
+                    }}
+                    className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={!connected || olderMessagesLoading}
+                  >
+                    {olderMessagesLoading ? '加载中...' : '加载更早消息'}
+                  </button>
+                ) : null}
+              </div>
             </div>
             <div ref={messagesRef} className="flex-1 space-y-2 overflow-auto px-4 py-4">
               {renderableMessages.length === 0 ? (
@@ -1277,7 +1438,17 @@ export function App() {
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
             rows={5}
-            placeholder={!connected ? '等待 CLI 连接...' : snapshot.busy ? 'Claude 正在运行...' : '输入消息，点击发送。'}
+            placeholder={
+              !connected
+                ? '等待 CLI 连接...'
+                : snapshot.status === 'starting'
+                  ? 'Claude 正在启动...'
+                  : snapshot.status === 'running'
+                    ? 'Claude 正在运行...'
+                    : snapshot.status === 'error'
+                      ? '上次运行出错，可继续输入或新建会话。'
+                      : '输入消息，点击发送。'
+            }
             className="min-h-28 w-full rounded-2xl border border-zinc-300 bg-zinc-50 px-4 py-3 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500 md:min-h-32"
             disabled={!canCompose}
           />
@@ -1289,7 +1460,7 @@ export function App() {
               className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
               disabled={!canCompose}
             >
-              {snapshot.busy ? '处理中...' : '发送'}
+              {isBusyStatus(snapshot.status) ? '处理中...' : '发送'}
             </button>
           </div>
         </form>
@@ -1300,17 +1471,37 @@ export function App() {
             mobilePane === 'jsonl' ? 'block' : 'hidden'
           ].join(' ')}
         >
-          <div className="border-b border-zinc-200 px-4 py-3">
-            <h2 className="text-lg font-semibold">Raw JSONL</h2>
+          <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
+            <div>
+              <h2 className="text-lg font-semibold">Raw JSONL</h2>
+              <p className="text-xs text-zinc-500">调试时按需从 Agent 拉取，不走实时同步。</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                void handleLoadRawJsonl();
+              }}
+              className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={!connected || rawJsonlLoading}
+            >
+              {rawJsonlLoading ? '加载中...' : '刷新 JSONL'}
+            </button>
           </div>
           <div className="p-4">
-            {snapshot.rawJsonl ? (
-              <pre className="max-h-[18rem] min-h-[12rem] overflow-auto rounded-2xl border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-100 sm:max-h-[22rem] sm:min-h-[14rem]">
-                {snapshot.rawJsonl}
-              </pre>
+            {rawJsonl ? (
+              <div className="space-y-3">
+                {rawJsonlTruncated ? (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                    仅展示最近一部分 JSONL 内容。
+                  </div>
+                ) : null}
+                <pre className="max-h-[18rem] min-h-[12rem] overflow-auto rounded-2xl border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-100 sm:max-h-[22rem] sm:min-h-[14rem]">
+                    {rawJsonl}
+                </pre>
+              </div>
             ) : (
               <div className="flex min-h-[12rem] items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500 sm:min-h-[14rem]">
-                等待 Claude jsonl 原始内容。
+                {connected ? '点击“刷新 JSONL”加载调试内容。' : '等待 CLI 连接后再加载 JSONL。'}
               </div>
             )}
           </div>

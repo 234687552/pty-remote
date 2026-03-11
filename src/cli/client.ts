@@ -8,13 +8,14 @@ import { io, type Socket } from 'socket.io-client';
 import type {
   CliCommandEnvelope,
   CliCommandResult,
+  GetOlderMessagesResultPayload,
+  GetRawJsonlResultPayload,
   CliRegisterResult,
-  MessagesUpdatePayload,
-  RawJsonlUpdatePayload,
+  RuntimeSnapshotPayload,
   TerminalChunkPayload
 } from '../../shared/protocol.ts';
-import type { ChatMessage, RuntimeSnapshot } from '../../shared/runtime-types.ts';
-import { parseClaudeJsonlState, resolveClaudeJsonlFilePath } from './jsonl.ts';
+import type { ChatMessage, RuntimeSnapshot, RuntimeStatus } from '../../shared/runtime-types.ts';
+import { parseClaudeJsonlMessages, resolveClaudeJsonlFilePath } from './jsonl.ts';
 import {
   appendRecentOutput,
   appendReplayChunk,
@@ -41,20 +42,31 @@ const RECENT_OUTPUT_MAX_CHARS = 12_000;
 const CLAUDE_READY_TIMEOUT_MS = 20_000;
 const PROMPT_SUBMIT_DELAY_MS = 120;
 const JSONL_REFRESH_DEBOUNCE_MS = 120;
-const RAW_JSONL_CHUNK_CHARS = 24_000;
+const SNAPSHOT_EMIT_DEBOUNCE_MS = 200;
+const SNAPSHOT_MESSAGES_MAX = 40;
+const OLDER_MESSAGES_PAGE_MAX = 40;
+const RAW_JSONL_MAX_CHARS = 200_000;
 const CLAUDE_PERMISSION_MODE = sanitizePermissionMode(process.env.CLAUDE_PERMISSION_MODE);
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude');
 const TERMINAL_COLS = 120;
 const TERMINAL_ROWS = 32;
 
-let state: RuntimeSnapshot = createFreshState();
+interface AgentRuntimeState extends RuntimeSnapshot {
+  allMessages: ChatMessage[];
+  rawJsonl: string;
+  terminalReplay: string;
+}
+
+let state: AgentRuntimeState = createFreshState();
 let claudePty: ClaudePtySession | null = null;
 let socketClient: Socket | null = null;
 let jsonlRefreshTimer: NodeJS.Timeout | null = null;
+let snapshotEmitTimer: NodeJS.Timeout | null = null;
 let jsonlWatcher: FSWatcher | null = null;
 let watchedJsonlSessionId: string | null = null;
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | null = null;
+let suppressNextPtyExitError = false;
 
 function sanitizePermissionMode(value: string | undefined): string {
   const allowed = new Set(['default', 'acceptEdits', 'dontAsk', 'plan', 'bypassPermissions']);
@@ -64,14 +76,16 @@ function sanitizePermissionMode(value: string | undefined): string {
   return 'bypassPermissions';
 }
 
-function createFreshState(): RuntimeSnapshot {
+function createFreshState(): AgentRuntimeState {
   return {
-    busy: false,
+    status: 'idle',
     sessionId: null,
+    allMessages: [],
     terminalReplay: '',
-    rawJsonl: '',
     messages: [],
-    lastError: null
+    hasOlderMessages: false,
+    lastError: null,
+    rawJsonl: ''
   };
 }
 
@@ -79,86 +93,88 @@ function cloneValue<T>(value: T): T {
   return structuredClone(value);
 }
 
-function emitMessagesUpdate(): void {
-  if (!socketClient?.connected) {
-    return;
-  }
-
-  socketClient.emit('cli:messages-update', {
-    busy: state.busy,
+function createRuntimeSnapshot(): RuntimeSnapshot {
+  return {
+    status: state.status,
     sessionId: state.sessionId,
     messages: cloneValue(state.messages),
+    hasOlderMessages: state.hasOlderMessages,
     lastError: state.lastError
-  } satisfies MessagesUpdatePayload);
+  };
 }
 
-function emitRawJsonlUpdate(payload: RawJsonlUpdatePayload): void {
+function emitSnapshot(): void {
   if (!socketClient?.connected) {
     return;
   }
 
-  socketClient.emit('cli:raw-jsonl-update', payload);
+  socketClient.emit('cli:snapshot', {
+    snapshot: createRuntimeSnapshot()
+  } satisfies RuntimeSnapshotPayload);
 }
 
-function emitRawJsonlSync(rawJsonl: string, sessionId: string | null): void {
-  if (!socketClient?.connected) {
-    return;
+function scheduleSnapshotEmit(delayMs = SNAPSHOT_EMIT_DEBOUNCE_MS): void {
+  if (snapshotEmitTimer) {
+    clearTimeout(snapshotEmitTimer);
   }
 
-  if (!rawJsonl) {
-    emitRawJsonlUpdate({
-      sessionId,
-      baseLength: 0,
-      chunk: '',
-      reset: true
-    });
-    return;
-  }
-
-  for (let start = 0; start < rawJsonl.length; start += RAW_JSONL_CHUNK_CHARS) {
-    emitRawJsonlUpdate({
-      sessionId,
-      baseLength: start,
-      chunk: rawJsonl.slice(start, start + RAW_JSONL_CHUNK_CHARS),
-      reset: start === 0
-    });
-  }
+  snapshotEmitTimer = setTimeout(() => {
+    snapshotEmitTimer = null;
+    emitSnapshot();
+  }, delayMs);
 }
 
-function emitRawJsonlDiff(previousRawJsonl: string, nextRawJsonl: string, sessionId: string | null): void {
-  if (!socketClient?.connected) {
+function isActiveStatus(status: RuntimeStatus): boolean {
+  return status === 'starting' || status === 'running';
+}
+
+function resolveRuntimeStatusFromPtyOutput(output: string): RuntimeStatus {
+  const lifecycle = getClaudePtyLifecycle(output);
+  if (lifecycle === 'running') {
+    return 'running';
+  }
+  if (lifecycle === 'idle') {
+    return 'idle';
+  }
+  return 'starting';
+}
+
+function setStatus(nextStatus: RuntimeStatus, immediate = false): void {
+  if (state.status === nextStatus) {
     return;
   }
 
-  if (nextRawJsonl.startsWith(previousRawJsonl)) {
-    for (let start = previousRawJsonl.length; start < nextRawJsonl.length; start += RAW_JSONL_CHUNK_CHARS) {
-      emitRawJsonlUpdate({
-        sessionId,
-        baseLength: start,
-        chunk: nextRawJsonl.slice(start, start + RAW_JSONL_CHUNK_CHARS),
-        reset: false
-      });
-    }
+  state.status = nextStatus;
+  if (immediate) {
+    emitSnapshot();
     return;
   }
 
-  emitRawJsonlSync(nextRawJsonl, sessionId);
+  scheduleSnapshotEmit();
 }
 
 function clearLastError(): void {
-  if (state.lastError === null) {
+  if (state.lastError === null && state.status !== 'error') {
     return;
   }
+
   state.lastError = null;
-  emitMessagesUpdate();
+  if (state.status === 'error') {
+    state.status = claudePty ? resolveRuntimeStatusFromPtyOutput(claudePty.recentOutput) : 'idle';
+  }
+  emitSnapshot();
 }
 
 function setLastError(nextError: string | null): void {
-  if (state.lastError === nextError) {
+  if (state.lastError === nextError && (nextError === null || state.status === 'error')) {
     return;
   }
+
   state.lastError = nextError;
-  emitMessagesUpdate();
+  if (nextError !== null) {
+    state.status = 'error';
+  }
+  emitSnapshot();
 }
 
 function closeJsonlWatcher(): void {
@@ -222,19 +238,77 @@ function ensureJsonlWatcher(sessionId: string | null): void {
   }
 }
 
-function syncBusyFromPtyOutput(output: string): void {
-  const lifecycle = getClaudePtyLifecycle(output);
-  if (lifecycle === 'not_ready') {
-    return;
+function syncStatusFromPtyOutput(output: string): void {
+  setStatus(resolveRuntimeStatusFromPtyOutput(output));
+}
+
+function applyStreamingStatus(messages: ChatMessage[], status: RuntimeStatus): ChatMessage[] {
+  if (status !== 'running') {
+    return messages;
   }
 
-  const nextBusy = lifecycle === 'running';
-  if (state.busy === nextBusy) {
-    return;
+  const lastAssistantIndex = [...messages].reverse().findIndex((message) => message.role === 'assistant');
+  if (lastAssistantIndex < 0) {
+    return messages;
   }
 
-  state.busy = nextBusy;
-  emitMessagesUpdate();
+  const targetIndex = messages.length - 1 - lastAssistantIndex;
+  const targetMessage = messages[targetIndex];
+  if (!targetMessage || targetMessage.status === 'error' || targetMessage.status === 'streaming') {
+    return messages;
+  }
+
+  const nextMessages = messages.slice();
+  nextMessages[targetIndex] = {
+    ...targetMessage,
+    status: 'streaming'
+  };
+  return nextMessages;
+}
+
+function selectRecentMessages(messages: ChatMessage[], maxMessages = SNAPSHOT_MESSAGES_MAX): ChatMessage[] {
+  if (messages.length <= maxMessages) {
+    return messages;
+  }
+  return messages.slice(-maxMessages);
+}
+
+function createRawJsonlResult(maxChars = RAW_JSONL_MAX_CHARS): GetRawJsonlResultPayload {
+  const normalizedMaxChars = Number.isFinite(maxChars) ? Math.max(1, Math.min(Math.floor(maxChars), RAW_JSONL_MAX_CHARS)) : RAW_JSONL_MAX_CHARS;
+  const rawJsonl = state.rawJsonl;
+
+  if (rawJsonl.length <= normalizedMaxChars) {
+    return {
+      rawJsonl,
+      sessionId: state.sessionId,
+      truncated: false
+    };
+  }
+
+  return {
+    rawJsonl: rawJsonl.slice(-normalizedMaxChars),
+    sessionId: state.sessionId,
+    truncated: true
+  };
+}
+
+function createOlderMessagesResult(
+  beforeMessageId: string | undefined,
+  maxMessages = OLDER_MESSAGES_PAGE_MAX
+): GetOlderMessagesResultPayload {
+  const normalizedMaxMessages = Number.isFinite(maxMessages)
+    ? Math.max(1, Math.min(Math.floor(maxMessages), OLDER_MESSAGES_PAGE_MAX))
+    : OLDER_MESSAGES_PAGE_MAX;
+  const allMessages = state.allMessages;
+  const boundaryIndex = beforeMessageId ? allMessages.findIndex((message) => message.id === beforeMessageId) : allMessages.length;
+  const end = boundaryIndex >= 0 ? boundaryIndex : allMessages.length;
+  const start = Math.max(0, end - normalizedMaxMessages);
+
+  return {
+    messages: cloneValue(allMessages.slice(start, end)),
+    sessionId: state.sessionId,
+    hasOlderMessages: start > 0
+  };
 }
 
 function messagesEqual(left: ChatMessage[], right: ChatMessage[]): boolean {
@@ -258,12 +332,13 @@ async function refreshMessagesFromJsonl(): Promise<void> {
   const sessionId = state.sessionId;
   if (!sessionId) {
     closeJsonlWatcher();
-    if (state.messages.length > 0 || state.busy || state.rawJsonl) {
+    if (state.allMessages.length > 0 || state.messages.length > 0 || state.status !== 'idle' || state.rawJsonl) {
+      state.allMessages = [];
       state.messages = [];
-      state.busy = false;
-      emitRawJsonlDiff(state.rawJsonl, '', null);
+      state.status = 'idle';
+      state.hasOlderMessages = false;
       state.rawJsonl = '';
-      emitMessagesUpdate();
+      emitSnapshot();
     }
     return;
   }
@@ -274,27 +349,33 @@ async function refreshMessagesFromJsonl(): Promise<void> {
 
   try {
     const raw = await fs.readFile(filePath, 'utf8');
-    const nextState = parseClaudeJsonlState(raw);
-    const messagesChanged = !messagesEqual(state.messages, nextState.messages);
+    const nextAllMessages = applyStreamingStatus(parseClaudeJsonlMessages(raw), state.status);
+    const nextMessages = selectRecentMessages(nextAllMessages);
+    const allMessagesChanged = !messagesEqual(state.allMessages, nextAllMessages);
+    const messagesChanged = !messagesEqual(state.messages, nextMessages);
+    const hasOlderMessagesChanged = state.hasOlderMessages !== (nextAllMessages.length > nextMessages.length);
     const rawJsonlChanged = state.rawJsonl !== raw;
-    const previousRawJsonl = state.rawJsonl;
 
+    if (allMessagesChanged) {
+      state.allMessages = nextAllMessages;
+    }
     if (messagesChanged) {
-      state.messages = nextState.messages;
+      state.messages = nextMessages;
+    }
+    if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
+      state.hasOlderMessages = nextAllMessages.length > nextMessages.length;
     }
     if (rawJsonlChanged) {
-      emitRawJsonlDiff(previousRawJsonl, raw, sessionId);
       state.rawJsonl = raw;
     }
 
-    if (messagesChanged) {
-      emitMessagesUpdate();
+    if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
+      emitSnapshot();
     }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ENOENT') {
       if (state.rawJsonl) {
-        emitRawJsonlDiff(state.rawJsonl, '', sessionId);
         state.rawJsonl = '';
       }
       return;
@@ -333,16 +414,20 @@ function handlePtyData(chunk: string): void {
 
   state.terminalReplay = appendReplayChunk(session, chunk, TERMINAL_REPLAY_MAX_BYTES);
   const recentOutput = appendRecentOutput(session, chunk, RECENT_OUTPUT_MAX_CHARS);
-  syncBusyFromPtyOutput(recentOutput);
+  syncStatusFromPtyOutput(recentOutput);
   emitTerminalChunk(chunk);
   scheduleJsonlRefresh();
 }
 
 async function handlePtyExit(): Promise<void> {
+  const expectedExit = suppressNextPtyExitError;
+  suppressNextPtyExitError = false;
   claudePty = null;
-  state.busy = false;
-  emitMessagesUpdate();
   scheduleJsonlRefresh(0);
+  if (expectedExit) {
+    setStatus('idle', true);
+    return;
+  }
   setLastError('Claude CLI exited unexpectedly');
 }
 
@@ -415,8 +500,9 @@ async function ensureClaudePtySession(): Promise<void> {
 
   claudePty = started.session;
   state.sessionId = started.sessionId;
+  state.status = 'starting';
   ensureJsonlWatcher(started.sessionId);
-  emitMessagesUpdate();
+  emitSnapshot();
   scheduleJsonlRefresh(0);
 }
 
@@ -439,50 +525,66 @@ async function sendPromptToClaudePty(content: string): Promise<void> {
 }
 
 async function dispatchClaudeMessage(content: string): Promise<void> {
-  if (state.busy) {
-    throw new Error('Claude is still handling the previous message');
-  }
-
   const trimmedContent = content.trim();
   if (!trimmedContent) {
     throw new Error('Message cannot be empty');
   }
 
-  await ensureClaudePtySession();
   clearLastError();
+  if (isActiveStatus(state.status)) {
+    throw new Error('Claude is still handling the previous message');
+  }
+  await ensureClaudePtySession();
 
   try {
     await waitForClaudeReady();
-    state.busy = true;
-    emitMessagesUpdate();
+    setStatus('running', true);
     await sendPromptToClaudePty(trimmedContent);
     scheduleJsonlRefresh(0);
   } catch (error) {
-    state.busy = false;
-    emitMessagesUpdate();
+    setStatus('idle', true);
     setLastError(error instanceof Error ? error.message : 'Claude request failed');
   }
 }
 
 async function resetConversation(): Promise<void> {
   closeJsonlWatcher();
+  suppressNextPtyExitError = true;
   stopClaudePtySession(claudePty);
   claudePty = null;
-  emitRawJsonlDiff(state.rawJsonl, '', null);
   state = createFreshState();
-  emitMessagesUpdate();
+  emitSnapshot();
 }
 
 async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCommandResult> {
   try {
     if (envelope.name === 'send-message') {
-      await dispatchClaudeMessage(envelope.payload.content);
-      return { ok: true };
+      await dispatchClaudeMessage((envelope.payload as { content: string }).content);
+      return { ok: true, payload: null };
     }
 
     if (envelope.name === 'reset-session') {
       await resetConversation();
-      return { ok: true };
+      return { ok: true, payload: null };
+    }
+
+    if (envelope.name === 'get-raw-jsonl') {
+      await refreshMessagesFromJsonl();
+      return {
+        ok: true,
+        payload: createRawJsonlResult((envelope.payload as { maxChars?: number }).maxChars)
+      };
+    }
+
+    if (envelope.name === 'get-older-messages') {
+      await refreshMessagesFromJsonl();
+      return {
+        ok: true,
+        payload: createOlderMessagesResult(
+          (envelope.payload as { beforeMessageId?: string; maxMessages?: number }).beforeMessageId,
+          (envelope.payload as { beforeMessageId?: string; maxMessages?: number }).maxMessages
+        )
+      };
     }
 
     return { ok: false, error: `Unsupported command: ${envelope.name}` };
@@ -515,8 +617,7 @@ function connectSocketClient(): void {
       },
       (result: CliRegisterResult) => {
         console.log(`cli registered as ${result.cliId}`);
-        emitMessagesUpdate();
-        emitRawJsonlSync(state.rawJsonl, state.sessionId);
+        emitSnapshot();
       }
     );
   });
@@ -549,7 +650,12 @@ async function shutdownCliClient(reason: string, exitCode = 0): Promise<void> {
       clearTimeout(jsonlRefreshTimer);
       jsonlRefreshTimer = null;
     }
+    if (snapshotEmitTimer) {
+      clearTimeout(snapshotEmitTimer);
+      snapshotEmitTimer = null;
+    }
     closeJsonlWatcher();
+    suppressNextPtyExitError = true;
     stopClaudePtySession(claudePty);
     claudePty = null;
     socketClient?.removeAllListeners();

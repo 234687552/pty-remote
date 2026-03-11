@@ -11,8 +11,7 @@ import type {
   CliRegisterPayload,
   CliRegisterResult,
   CliStatusPayload,
-  MessagesUpdatePayload,
-  RawJsonlUpdatePayload,
+  RuntimeSnapshotPayload,
   TerminalChunkPayload,
   WebCommandEnvelope,
   WebInitPayload
@@ -42,6 +41,8 @@ interface CliRuntimeRecord {
   socket: Socket;
   descriptor: CliDescriptor;
   snapshot: RuntimeSnapshot | null;
+  terminalReplay: string;
+  terminalReplaySessionId: string | null;
 }
 
 let cliRecord: CliRuntimeRecord | null = null;
@@ -111,29 +112,29 @@ function createCliDescriptor(cliId: string, payload: CliRegisterPayload): CliDes
     cwd: payload.cwd,
     runtimeBackend: payload.runtimeBackend,
     connected: true,
-    busy: false,
+    status: 'idle',
     sessionId: null,
     connectedAt: now,
     lastSeenAt: now
   };
 }
 
-function createEmptySnapshot(): RuntimeSnapshot {
-  return {
-    busy: false,
-    sessionId: null,
-    terminalReplay: '',
-    rawJsonl: '',
-    messages: [],
-    lastError: null
+function updateDescriptorFromSnapshot(record: CliRuntimeRecord): void {
+  if (!record.snapshot) {
+    return;
+  }
+
+  record.descriptor = {
+    ...record.descriptor,
+    status: record.snapshot.status,
+    sessionId: record.snapshot.sessionId,
+    lastSeenAt: new Date().toISOString()
   };
 }
 
-function ensureSnapshot(record: CliRuntimeRecord): RuntimeSnapshot {
-  if (!record.snapshot) {
-    record.snapshot = createEmptySnapshot();
-  }
-  return record.snapshot;
+function clearTerminalReplay(record: CliRuntimeRecord, sessionId: string | null): void {
+  record.terminalReplay = '';
+  record.terminalReplaySessionId = sessionId;
 }
 
 function trimTerminalReplay(value: string): string {
@@ -144,65 +145,11 @@ function trimTerminalReplay(value: string): string {
   return buffer.subarray(buffer.length - TERMINAL_REPLAY_MAX_BYTES).toString('utf8');
 }
 
-function updateDescriptorFromSnapshot(record: CliRuntimeRecord): void {
-  if (!record.snapshot) {
+function syncTerminalReplaySession(record: CliRuntimeRecord, sessionId: string | null): void {
+  if (record.terminalReplaySessionId === sessionId) {
     return;
   }
-
-  record.descriptor = {
-    ...record.descriptor,
-    busy: record.snapshot.busy,
-    sessionId: record.snapshot.sessionId,
-    lastSeenAt: new Date().toISOString()
-  };
-}
-
-function updateSnapshotFromMessages(record: CliRuntimeRecord, payload: MessagesUpdatePayload): void {
-  const snapshot = ensureSnapshot(record);
-  const sessionChanged = snapshot.sessionId !== payload.sessionId;
-  record.snapshot = {
-    busy: payload.busy,
-    sessionId: payload.sessionId,
-    rawJsonl: sessionChanged ? '' : snapshot.rawJsonl,
-    messages: cloneValue(payload.messages),
-    lastError: payload.lastError,
-    terminalReplay: sessionChanged ? '' : snapshot.terminalReplay
-  };
-  updateDescriptorFromSnapshot(record);
-}
-
-function applyRawJsonlUpdate(record: CliRuntimeRecord, payload: RawJsonlUpdatePayload): void {
-  const snapshot = ensureSnapshot(record);
-  const sessionChanged = snapshot.sessionId !== payload.sessionId;
-
-  if (sessionChanged) {
-    snapshot.sessionId = payload.sessionId;
-    snapshot.rawJsonl = '';
-  }
-
-  if (payload.reset) {
-    snapshot.rawJsonl = payload.chunk;
-    return;
-  }
-
-  if (snapshot.rawJsonl.length !== payload.baseLength) {
-    snapshot.rawJsonl = `${snapshot.rawJsonl.slice(0, Math.max(0, payload.baseLength))}${payload.chunk}`;
-    return;
-  }
-
-  snapshot.rawJsonl += payload.chunk;
-}
-
-function applyTerminalChunk(record: CliRuntimeRecord, payload: TerminalChunkPayload): void {
-  const snapshot = ensureSnapshot(record);
-  const sessionChanged = snapshot.sessionId !== payload.sessionId;
-
-  if (sessionChanged) {
-    snapshot.sessionId = payload.sessionId;
-    snapshot.terminalReplay = '';
-  }
-
-  snapshot.terminalReplay = trimTerminalReplay(`${snapshot.terminalReplay}${payload.data}`);
+  clearTerminalReplay(record, sessionId);
 }
 
 function emitCliStatus(io: SocketIOServer): void {
@@ -312,33 +259,25 @@ export async function startSocketServer(): Promise<void> {
       cliRecord = {
         socket,
         descriptor: createCliDescriptor(cliId, payload),
-        snapshot: cliRecord?.snapshot ?? null
+        snapshot: cliRecord?.snapshot ?? null,
+        terminalReplay: cliRecord?.terminalReplay ?? '',
+        terminalReplaySessionId: cliRecord?.terminalReplaySessionId ?? null
       };
       updateDescriptorFromSnapshot(cliRecord);
       emitCliStatus(io);
       callback?.({ cliId });
     });
 
-    socket.on('cli:messages-update', (payload: MessagesUpdatePayload) => {
+    socket.on('cli:snapshot', (payload: RuntimeSnapshotPayload) => {
       if (!cliRecord || cliRecord.socket.id !== socket.id) {
         return;
       }
 
       cliRecord.descriptor.connected = true;
-      updateSnapshotFromMessages(cliRecord, payload);
-      io.of('/web').emit('messages:update', cloneValue(payload));
-      emitCliStatus(io);
-    });
-
-    socket.on('cli:raw-jsonl-update', (payload: RawJsonlUpdatePayload) => {
-      if (!cliRecord || cliRecord.socket.id !== socket.id) {
-        return;
-      }
-
-      cliRecord.descriptor.connected = true;
-      applyRawJsonlUpdate(cliRecord, payload);
+      syncTerminalReplaySession(cliRecord, payload.snapshot.sessionId);
+      cliRecord.snapshot = cloneValue(payload.snapshot);
       updateDescriptorFromSnapshot(cliRecord);
-      io.of('/web').emit('raw-jsonl:update', cloneValue(payload));
+      io.of('/web').emit('runtime:snapshot', cloneValue(payload));
       emitCliStatus(io);
     });
 
@@ -348,10 +287,10 @@ export async function startSocketServer(): Promise<void> {
       }
 
       cliRecord.descriptor.connected = true;
-      applyTerminalChunk(cliRecord, payload);
+      syncTerminalReplaySession(cliRecord, payload.sessionId);
+      cliRecord.terminalReplay = trimTerminalReplay(`${cliRecord.terminalReplay}${payload.data}`);
       cliRecord.descriptor.lastSeenAt = new Date().toISOString();
-      updateDescriptorFromSnapshot(cliRecord);
-      io.of('/web').emit('terminal:chunk', payload);
+      io.of('/web').emit('terminal:chunk', cloneValue(payload));
     });
 
     socket.on('disconnect', () => {
@@ -362,7 +301,7 @@ export async function startSocketServer(): Promise<void> {
       cliRecord.descriptor = {
         ...cliRecord.descriptor,
         connected: false,
-        busy: false,
+        status: 'idle',
         lastSeenAt: new Date().toISOString()
       };
       emitCliStatus(io);
@@ -372,7 +311,8 @@ export async function startSocketServer(): Promise<void> {
   io.of('/web').on('connection', (socket) => {
     socket.emit('web:init', {
       cli: cliRecord ? cloneValue(cliRecord.descriptor) : null,
-      snapshot: cliRecord?.snapshot ? cloneValue(cliRecord.snapshot) : null
+      snapshot: cliRecord?.snapshot ? cloneValue(cliRecord.snapshot) : null,
+      terminalReplay: cliRecord?.terminalReplay ?? ''
     } satisfies WebInitPayload);
 
     socket.on('web:command', async (command: WebCommandEnvelope, callback?: (result: CliCommandResult) => void) => {

@@ -42,8 +42,6 @@ interface ClaudeJsonlRecord {
   };
 }
 
-type ClaudeMessageContent = string | ClaudeContentBlock[] | undefined;
-
 export function resolveClaudeJsonlFilePath(projectRoot: string, sessionId: string, homeDir: string): string {
   const projectSlug = projectRoot.replace(/[\\/]/g, '-');
   return path.join(homeDir, '.claude', 'projects', projectSlug, `${sessionId}.jsonl`);
@@ -146,23 +144,6 @@ function stringifyUnknown(value: unknown): string {
   return String(value);
 }
 
-function extractTextContent(content: ClaudeMessageContent): string {
-  if (typeof content === 'string') {
-    return content;
-  }
-
-  if (!Array.isArray(content)) {
-    return '';
-  }
-
-  return content
-    .filter(isTextContentBlock)
-    .map((block) => block.text?.trimEnd() ?? '')
-    .filter(Boolean)
-    .join('\n\n')
-    .trim();
-}
-
 function resolveRecordMessageId(record: ClaudeJsonlRecord, role: 'user' | 'assistant'): string | null {
   if (role === 'assistant') {
     return record.message?.id ?? record.uuid ?? null;
@@ -252,9 +233,37 @@ function deriveMessageStatus(blocks: ChatMessageBlock[]): ChatMessage['status'] 
   return 'complete';
 }
 
+function mergeMessageBlocks(existingBlocks: ChatMessageBlock[], nextBlocks: ChatMessageBlock[]): ChatMessageBlock[] {
+  if (existingBlocks.length === 0) {
+    return nextBlocks;
+  }
+
+  if (nextBlocks.length === 0) {
+    return existingBlocks;
+  }
+
+  const mergedBlocks = existingBlocks.slice();
+  const blockIndexById = new Map(mergedBlocks.map((block, index) => [block.id, index]));
+
+  for (const block of nextBlocks) {
+    const existingIndex = blockIndexById.get(block.id);
+    if (existingIndex === undefined) {
+      blockIndexById.set(block.id, mergedBlocks.length);
+      mergedBlocks.push(block);
+      continue;
+    }
+
+    mergedBlocks[existingIndex] = block;
+  }
+
+  return mergedBlocks;
+}
+
 function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessage>, nextMessage: ChatMessage): void {
   const existing = messagesById.get(nextMessage.id);
-  const blocks = hasVisibleBlocks(nextMessage.blocks) ? nextMessage.blocks : existing?.blocks ?? [];
+  const blocks = hasVisibleBlocks(nextMessage.blocks)
+    ? mergeMessageBlocks(existing?.blocks ?? [], nextMessage.blocks)
+    : existing?.blocks ?? [];
 
   if (!hasVisibleBlocks(blocks)) {
     return;
@@ -264,7 +273,7 @@ function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessa
     id: nextMessage.id,
     role: nextMessage.role,
     blocks,
-    status: nextMessage.status,
+    status: deriveMessageStatus(blocks),
     createdAt: existing?.createdAt || nextMessage.createdAt
   };
 
@@ -275,10 +284,9 @@ function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessa
   messagesById.set(nextMessage.id, mergedMessage);
 }
 
-export function parseClaudeJsonlState(rawText: string): { busy: boolean; messages: ChatMessage[] } {
+export function parseClaudeJsonlMessages(rawText: string): ChatMessage[] {
   const orderedIds: string[] = [];
   const messagesById = new Map<string, ChatMessage>();
-  let busy = false;
 
   for (const line of rawText.split('\n')) {
     const trimmed = line.trim();
@@ -294,10 +302,6 @@ export function parseClaudeJsonlState(rawText: string): { busy: boolean; message
     }
 
     const role = record.message?.role;
-    const rawContent = record.message?.content;
-    const isToolResultUserMessage =
-      Array.isArray(rawContent) && rawContent.some((block) => block && typeof block === 'object' && block.type === 'tool_result');
-
     if (role !== 'user' && role !== 'assistant') {
       continue;
     }
@@ -305,22 +309,6 @@ export function parseClaudeJsonlState(rawText: string): { busy: boolean; message
     const messageId = resolveRecordMessageId(record, role);
     if (!messageId) {
       continue;
-    }
-
-    if (role === 'user' && !isToolResultUserMessage) {
-      busy = true;
-    }
-
-    if (role === 'assistant') {
-      const stopReason = record.message?.stop_reason;
-      const hasToolUse =
-        Array.isArray(rawContent) && rawContent.some((block) => block && typeof block === 'object' && block.type === 'tool_use');
-
-      if (stopReason === 'end_turn' || stopReason === 'stop_sequence' || stopReason === 'max_tokens') {
-        busy = false;
-      } else if (stopReason === 'tool_use' || hasToolUse || Boolean(extractTextContent(rawContent).trim())) {
-        busy = true;
-      }
     }
 
     const blocks = extractMessageBlocks(record, messageId);
@@ -336,13 +324,5 @@ export function parseClaudeJsonlState(rawText: string): { busy: boolean; message
   const messages = compactMessages(
     orderedIds.map((messageId) => messagesById.get(messageId)).filter(Boolean) as ChatMessage[]
   );
-
-  if (busy) {
-    const lastAssistant = [...messages].reverse().find((message) => message.role === 'assistant');
-    if (lastAssistant) {
-      lastAssistant.status = 'streaming';
-    }
-  }
-
-  return { busy, messages };
+  return messages;
 }

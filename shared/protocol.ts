@@ -11,11 +11,37 @@ export interface CliRegisterResult {
   cliId: string;
 }
 
-export type CliCommandName = 'send-message' | 'reset-session';
+export type CliCommandName = 'send-message' | 'reset-session' | 'get-raw-jsonl' | 'get-older-messages';
 
 export interface CliCommandPayloadMap {
   'send-message': { content: string };
   'reset-session': Record<string, never>;
+  'get-raw-jsonl': {
+    maxChars?: number;
+  };
+  'get-older-messages': {
+    beforeMessageId?: string;
+    maxMessages?: number;
+  };
+}
+
+export interface GetRawJsonlResultPayload {
+  rawJsonl: string;
+  sessionId: string | null;
+  truncated: boolean;
+}
+
+export interface GetOlderMessagesResultPayload {
+  messages: ChatMessage[];
+  sessionId: string | null;
+  hasOlderMessages: boolean;
+}
+
+export interface CliCommandResultPayloadMap {
+  'send-message': null;
+  'reset-session': null;
+  'get-raw-jsonl': GetRawJsonlResultPayload;
+  'get-older-messages': GetOlderMessagesResultPayload;
 }
 
 export interface CliCommandEnvelope<TName extends CliCommandName = CliCommandName> {
@@ -24,23 +50,10 @@ export interface CliCommandEnvelope<TName extends CliCommandName = CliCommandNam
   payload: CliCommandPayloadMap[TName];
 }
 
-export interface CliCommandResult {
+export interface CliCommandResult<TName extends CliCommandName = CliCommandName> {
   ok: boolean;
   error?: string;
-}
-
-export interface MessagesUpdatePayload {
-  busy: boolean;
-  sessionId: string | null;
-  messages: ChatMessage[];
-  lastError: string | null;
-}
-
-export interface RawJsonlUpdatePayload {
-  sessionId: string | null;
-  baseLength: number;
-  chunk: string;
-  reset: boolean;
+  payload?: CliCommandResultPayloadMap[TName];
 }
 
 export interface TerminalChunkPayload {
@@ -48,9 +61,14 @@ export interface TerminalChunkPayload {
   sessionId: string | null;
 }
 
+export interface RuntimeSnapshotPayload {
+  snapshot: RuntimeSnapshot;
+}
+
 export interface WebInitPayload {
   cli: CliDescriptor | null;
   snapshot: RuntimeSnapshot | null;
+  terminalReplay: string;
 }
 
 export interface CliStatusPayload {
