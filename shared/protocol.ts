@@ -58,6 +58,19 @@ export interface CliCommandResult<TName extends CliCommandName = CliCommandName>
 
 export interface TerminalChunkPayload {
   data: string;
+  offset: number;
+  sessionId: string | null;
+}
+
+export interface TerminalResumeRequestPayload {
+  lastOffset: number;
+  sessionId: string | null;
+}
+
+export interface TerminalResumeResultPayload {
+  data: string;
+  mode: 'delta' | 'reset';
+  offset: number;
   sessionId: string | null;
 }
 
@@ -65,10 +78,19 @@ export interface RuntimeSnapshotPayload {
   snapshot: RuntimeSnapshot;
 }
 
+export interface MessagesUpsertPayload {
+  sessionId: string | null;
+  upserts: ChatMessage[];
+  recentMessageIds: string[];
+  hasOlderMessages: boolean;
+}
+
 export interface WebInitPayload {
   cli: CliDescriptor | null;
   snapshot: RuntimeSnapshot | null;
-  terminalReplay: string;
+  terminalReplayEndOffset: number;
+  terminalReplayStartOffset: number;
+  terminalSessionId: string | null;
 }
 
 export interface CliStatusPayload {

@@ -14,8 +14,11 @@ import type {
   CliStatusPayload,
   GetOlderMessagesResultPayload,
   GetRawJsonlResultPayload,
+  MessagesUpsertPayload,
   RuntimeSnapshotPayload,
   TerminalChunkPayload,
+  TerminalResumeRequestPayload,
+  TerminalResumeResultPayload,
   WebCommandEnvelope,
   WebInitPayload
 } from '@shared/protocol.ts';
@@ -63,6 +66,10 @@ function getSocketBaseUrl(): string {
     return envValue.trim();
   }
   return window.location.origin;
+}
+
+function getUtf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
 }
 
 interface MarkdownNode {
@@ -487,14 +494,14 @@ function MessageMarkdown({ content, tone = 'default' }: { content: string; tone?
   const isInverse = tone === 'inverse';
 
   return (
-    <div className={`markdown-body space-y-3 leading-6 ${isInverse ? 'text-zinc-100' : 'text-zinc-800'}`}>
+    <div className={`markdown-body space-y-3 leading-6 ${isInverse ? 'text-zinc-950' : 'text-zinc-800'}`}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ ...props }) => (
             <a
               {...props}
-              className={isInverse ? 'text-zinc-100 underline underline-offset-2' : 'text-blue-700 underline underline-offset-2'}
+              className={isInverse ? 'text-sky-900 underline underline-offset-2' : 'text-blue-700 underline underline-offset-2'}
               target="_blank"
               rel="noreferrer"
             />
@@ -502,7 +509,7 @@ function MessageMarkdown({ content, tone = 'default' }: { content: string; tone?
           blockquote: ({ ...props }) => (
             <blockquote
               {...props}
-              className={isInverse ? 'border-l-2 border-zinc-600 pl-4 text-zinc-300' : 'border-l-2 border-zinc-300 pl-4 text-zinc-600'}
+              className={isInverse ? 'border-l-2 border-sky-300 pl-4 text-zinc-700' : 'border-l-2 border-zinc-300 pl-4 text-zinc-600'}
             />
           ),
           code: ({ children, className, ...props }) => {
@@ -512,7 +519,7 @@ function MessageMarkdown({ content, tone = 'default' }: { content: string; tone?
               const codeClassName = [
                 className,
                 isInverse
-                  ? 'block overflow-x-auto rounded-xl bg-zinc-950/90 px-4 py-3 text-xs leading-5 text-zinc-100'
+                  ? 'block overflow-x-auto rounded-xl border border-sky-200 bg-sky-100 px-4 py-3 text-xs leading-5 text-zinc-900'
                   : 'block overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-3 text-xs leading-5 text-zinc-800'
               ]
                 .filter(Boolean)
@@ -530,7 +537,7 @@ function MessageMarkdown({ content, tone = 'default' }: { content: string; tone?
                 {...props}
                 className={
                   isInverse
-                    ? 'rounded bg-white/15 px-1.5 py-0.5 text-[0.85em] text-zinc-100'
+                    ? 'rounded bg-sky-100 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
                     : 'rounded bg-zinc-200 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
                 }
               >
@@ -538,9 +545,9 @@ function MessageMarkdown({ content, tone = 'default' }: { content: string; tone?
               </code>
             );
           },
-          h1: ({ ...props }) => <h1 {...props} className={isInverse ? 'text-lg font-semibold text-white' : 'text-lg font-semibold text-zinc-950'} />,
-          h2: ({ ...props }) => <h2 {...props} className={isInverse ? 'text-base font-semibold text-white' : 'text-base font-semibold text-zinc-950'} />,
-          h3: ({ ...props }) => <h3 {...props} className={isInverse ? 'text-sm font-semibold text-white' : 'text-sm font-semibold text-zinc-950'} />,
+          h1: ({ ...props }) => <h1 {...props} className={isInverse ? 'text-lg font-semibold text-zinc-950' : 'text-lg font-semibold text-zinc-950'} />,
+          h2: ({ ...props }) => <h2 {...props} className={isInverse ? 'text-base font-semibold text-zinc-950' : 'text-base font-semibold text-zinc-950'} />,
+          h3: ({ ...props }) => <h3 {...props} className={isInverse ? 'text-sm font-semibold text-zinc-950' : 'text-sm font-semibold text-zinc-950'} />,
           li: ({ ...props }) => <li {...props} className="ml-5 list-item" />,
           ol: ({ ...props }) => <ol {...props} className="list-decimal space-y-1 pl-5" />,
           p: ({ ...props }) => <p {...props} className="whitespace-pre-wrap break-words" />,
@@ -555,7 +562,7 @@ function MessageMarkdown({ content, tone = 'default' }: { content: string; tone?
                 {...props}
                 className={
                   isInverse
-                    ? 'overflow-x-auto rounded-xl bg-zinc-950'
+                    ? 'overflow-x-auto rounded-xl border border-sky-200 bg-sky-100'
                     : 'overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100'
                 }
               >
@@ -721,7 +728,7 @@ function MessageShell({ message, children }: { message: ChatMessage; children: R
   const wrapperClass = message.role === 'user' ? 'flex justify-end' : 'flex justify-start';
   const shellClass =
     message.role === 'user'
-      ? 'w-fit max-w-[85%] rounded-2xl bg-zinc-900 px-3.5 py-2.5 text-sm break-words text-white shadow-sm'
+      ? 'w-fit max-w-[85%] rounded-2xl bg-sky-200 px-3.5 py-2.5 text-sm break-words text-zinc-950 shadow-sm'
       : message.status === 'error'
         ? 'w-fit max-w-[85%] rounded-2xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm break-words text-zinc-900 shadow-sm'
         : 'w-full py-2.5 text-sm break-words text-zinc-900';
@@ -1015,11 +1022,13 @@ export function App() {
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalInstanceRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
-  const appliedReplayLengthRef = useRef(0);
+  const appliedTerminalOffsetRef = useRef(0);
   const appliedSessionIdRef = useRef<string | null>(null);
+  const terminalResumePendingRef = useRef(false);
+  const bufferedTerminalChunksRef = useRef<TerminalChunkPayload[]>([]);
   const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
 
-  function applyTerminalReplay(sessionId: string | null, replay: string): void {
+  function applyTerminalReplay(sessionId: string | null, replay: string, replayOffset: number): void {
     const terminal = terminalInstanceRef.current;
     if (!terminal) {
       return;
@@ -1030,8 +1039,84 @@ export function App() {
       terminal.write(replay);
     }
     appliedSessionIdRef.current = sessionId;
-    appliedReplayLengthRef.current = replay.length;
+    appliedTerminalOffsetRef.current = replayOffset + getUtf8ByteLength(replay);
     fitAddonRef.current?.fit();
+  }
+
+  function applyTerminalChunk(payload: TerminalChunkPayload): void {
+    const terminal = terminalInstanceRef.current;
+    if (!terminal) {
+      return;
+    }
+    if (!payload.sessionId || payload.sessionId !== appliedSessionIdRef.current) {
+      return;
+    }
+
+    const chunkEndOffset = payload.offset + getUtf8ByteLength(payload.data);
+    if (chunkEndOffset <= appliedTerminalOffsetRef.current) {
+      return;
+    }
+    if (payload.offset !== appliedTerminalOffsetRef.current) {
+      setError((current) => current || '终端流已失步，请等待重连同步。');
+      return;
+    }
+
+    terminal.write(payload.data);
+    appliedTerminalOffsetRef.current = chunkEndOffset;
+  }
+
+  function flushBufferedTerminalChunks(): void {
+    const pendingChunks = bufferedTerminalChunksRef.current
+      .splice(0)
+      .sort((left, right) => left.offset - right.offset);
+
+    for (const chunk of pendingChunks) {
+      applyTerminalChunk(chunk);
+    }
+  }
+
+  async function requestTerminalResume(targetSessionId: string | null): Promise<void> {
+    const socket = socketRef.current;
+    if (!socket?.connected) {
+      return;
+    }
+
+    const payload: TerminalResumeRequestPayload =
+      appliedSessionIdRef.current === targetSessionId
+        ? {
+            sessionId: appliedSessionIdRef.current,
+            lastOffset: appliedTerminalOffsetRef.current
+          }
+        : {
+            sessionId: null,
+            lastOffset: 0
+          };
+
+    const result = await new Promise<TerminalResumeResultPayload>((resolve) => {
+      socket.emit('web:terminal-resume', payload, (resumePayload?: TerminalResumeResultPayload) => {
+        resolve(
+          resumePayload ?? {
+            mode: 'reset',
+            sessionId: targetSessionId,
+            offset: 0,
+            data: ''
+          }
+        );
+      });
+    });
+
+    if (result.mode === 'reset') {
+      applyTerminalReplay(result.sessionId, result.data, result.offset);
+    } else {
+      applyTerminalChunk({
+        data: result.data,
+        offset: result.offset,
+        sessionId: result.sessionId
+      });
+    }
+
+    terminalResumePendingRef.current = false;
+    flushBufferedTerminalChunks();
   }
 
   const connected = Boolean(socketConnected && cli?.connected);
@@ -1102,6 +1187,8 @@ export function App() {
     socketRef.current = socket;
 
     socket.on('connect', () => {
+      terminalResumePendingRef.current = true;
+      bufferedTerminalChunksRef.current = [];
       setSocketConnected(true);
       setError('');
     });
@@ -1113,7 +1200,7 @@ export function App() {
     socket.on('web:init', (payload: WebInitPayload) => {
       setCli(payload.cli);
       setSnapshot(payload.snapshot ?? createEmptySnapshot());
-      applyTerminalReplay(payload.snapshot?.sessionId ?? null, payload.terminalReplay ?? '');
+      void requestTerminalResume(payload.terminalSessionId ?? payload.snapshot?.sessionId ?? null);
     });
 
     socket.on('cli:update', (payload: CliStatusPayload) => {
@@ -1124,17 +1211,39 @@ export function App() {
       setSnapshot(payload.snapshot);
     });
 
-    socket.on('terminal:chunk', (payload: TerminalChunkPayload) => {
-      const terminal = terminalInstanceRef.current;
-      if (!terminal) {
-        return;
-      }
-      if (!payload.sessionId || payload.sessionId !== appliedSessionIdRef.current) {
-        return;
-      }
+    socket.on('runtime:messages-upsert', (payload: MessagesUpsertPayload) => {
+      setSnapshot((current) => {
+        const isSameSession = current.sessionId === payload.sessionId;
+        const baseSnapshot = isSameSession
+          ? current
+          : {
+              ...current,
+              sessionId: payload.sessionId,
+              messages: [],
+              hasOlderMessages: false
+            };
 
-      terminal.write(payload.data);
-      appliedReplayLengthRef.current += payload.data.length;
+        const messagesById = new Map(baseSnapshot.messages.map((message) => [message.id, message]));
+        for (const message of payload.upserts) {
+          messagesById.set(message.id, message);
+        }
+
+        return {
+          ...baseSnapshot,
+          messages: payload.recentMessageIds
+            .map((messageId) => messagesById.get(messageId))
+            .filter(Boolean) as ChatMessage[],
+          hasOlderMessages: payload.hasOlderMessages
+        };
+      });
+    });
+
+    socket.on('terminal:chunk', (payload: TerminalChunkPayload) => {
+      if (terminalResumePendingRef.current) {
+        bufferedTerminalChunksRef.current.push(payload);
+        return;
+      }
+      applyTerminalChunk(payload);
     });
 
     return () => {
@@ -1145,11 +1254,19 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!socketConnected) {
+      return;
+    }
+    if (terminalResumePendingRef.current) {
+      return;
+    }
     if (appliedSessionIdRef.current === snapshot.sessionId) {
       return;
     }
-    applyTerminalReplay(snapshot.sessionId, '');
-  }, [snapshot.sessionId]);
+    terminalResumePendingRef.current = true;
+    bufferedTerminalChunksRef.current = [];
+    void requestTerminalResume(snapshot.sessionId);
+  }, [snapshot.sessionId, socketConnected]);
 
   useEffect(() => {
     setOlderMessages([]);

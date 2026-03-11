@@ -11,8 +11,11 @@ import type {
   CliRegisterPayload,
   CliRegisterResult,
   CliStatusPayload,
+  MessagesUpsertPayload,
   RuntimeSnapshotPayload,
   TerminalChunkPayload,
+  TerminalResumeRequestPayload,
+  TerminalResumeResultPayload,
   WebCommandEnvelope,
   WebInitPayload
 } from '../../shared/protocol.ts';
@@ -42,6 +45,7 @@ interface CliRuntimeRecord {
   descriptor: CliDescriptor;
   snapshot: RuntimeSnapshot | null;
   terminalReplay: string;
+  terminalReplayOffset: number;
   terminalReplaySessionId: string | null;
 }
 
@@ -132,8 +136,23 @@ function updateDescriptorFromSnapshot(record: CliRuntimeRecord): void {
   };
 }
 
+function ensureSnapshot(record: CliRuntimeRecord): RuntimeSnapshot {
+  if (!record.snapshot) {
+    record.snapshot = {
+      status: record.descriptor.status,
+      sessionId: record.descriptor.sessionId,
+      messages: [],
+      hasOlderMessages: false,
+      lastError: null
+    };
+  }
+
+  return record.snapshot;
+}
+
 function clearTerminalReplay(record: CliRuntimeRecord, sessionId: string | null): void {
   record.terminalReplay = '';
+  record.terminalReplayOffset = 0;
   record.terminalReplaySessionId = sessionId;
 }
 
@@ -150,6 +169,73 @@ function syncTerminalReplaySession(record: CliRuntimeRecord, sessionId: string |
     return;
   }
   clearTerminalReplay(record, sessionId);
+}
+
+function applyMessagesUpsert(record: CliRuntimeRecord, payload: MessagesUpsertPayload): void {
+  const snapshot = ensureSnapshot(record);
+  if (snapshot.sessionId !== payload.sessionId) {
+    snapshot.sessionId = payload.sessionId;
+    snapshot.messages = [];
+  }
+
+  const messagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
+  for (const message of payload.upserts) {
+    messagesById.set(message.id, cloneValue(message));
+  }
+
+  snapshot.messages = payload.recentMessageIds
+    .map((messageId) => messagesById.get(messageId))
+    .filter(Boolean) as RuntimeSnapshot['messages'];
+  snapshot.hasOlderMessages = payload.hasOlderMessages;
+}
+
+function appendTerminalReplay(record: CliRuntimeRecord, chunk: string): void {
+  const nextReplay = `${record.terminalReplay}${chunk}`;
+  const trimmedReplay = trimTerminalReplay(nextReplay);
+  const removedBytes = Buffer.byteLength(nextReplay, 'utf8') - Buffer.byteLength(trimmedReplay, 'utf8');
+  record.terminalReplay = trimmedReplay;
+  record.terminalReplayOffset += removedBytes;
+}
+
+function getTerminalReplayEndOffset(record: CliRuntimeRecord): number {
+  return record.terminalReplayOffset + Buffer.byteLength(record.terminalReplay, 'utf8');
+}
+
+function getTerminalSessionId(record: CliRuntimeRecord | null): string | null {
+  return record?.terminalReplaySessionId ?? record?.snapshot?.sessionId ?? null;
+}
+
+function createTerminalResumeResult(payload: TerminalResumeRequestPayload): TerminalResumeResultPayload {
+  const sessionId = getTerminalSessionId(cliRecord);
+  if (!cliRecord || !sessionId) {
+    return {
+      mode: 'reset',
+      sessionId: null,
+      offset: 0,
+      data: ''
+    };
+  }
+
+  const replayStartOffset = cliRecord.terminalReplayOffset;
+  const replayEndOffset = getTerminalReplayEndOffset(cliRecord);
+
+  if (payload.sessionId === sessionId && payload.lastOffset >= replayStartOffset && payload.lastOffset <= replayEndOffset) {
+    const replayBytes = Buffer.from(cliRecord.terminalReplay, 'utf8');
+    const byteOffset = payload.lastOffset - replayStartOffset;
+    return {
+      mode: 'delta',
+      sessionId,
+      offset: payload.lastOffset,
+      data: replayBytes.subarray(byteOffset).toString('utf8')
+    };
+  }
+
+  return {
+    mode: 'reset',
+    sessionId,
+    offset: replayStartOffset,
+    data: cliRecord.terminalReplay
+  };
 }
 
 function emitCliStatus(io: SocketIOServer): void {
@@ -261,6 +347,7 @@ export async function startSocketServer(): Promise<void> {
         descriptor: createCliDescriptor(cliId, payload),
         snapshot: cliRecord?.snapshot ?? null,
         terminalReplay: cliRecord?.terminalReplay ?? '',
+        terminalReplayOffset: cliRecord?.terminalReplayOffset ?? 0,
         terminalReplaySessionId: cliRecord?.terminalReplaySessionId ?? null
       };
       updateDescriptorFromSnapshot(cliRecord);
@@ -281,6 +368,18 @@ export async function startSocketServer(): Promise<void> {
       emitCliStatus(io);
     });
 
+    socket.on('cli:messages-upsert', (payload: MessagesUpsertPayload) => {
+      if (!cliRecord || cliRecord.socket.id !== socket.id) {
+        return;
+      }
+
+      cliRecord.descriptor.connected = true;
+      applyMessagesUpsert(cliRecord, payload);
+      updateDescriptorFromSnapshot(cliRecord);
+      io.of('/web').emit('runtime:messages-upsert', cloneValue(payload));
+      emitCliStatus(io);
+    });
+
     socket.on('cli:terminal-chunk', (payload: TerminalChunkPayload) => {
       if (!cliRecord || cliRecord.socket.id !== socket.id) {
         return;
@@ -288,7 +387,7 @@ export async function startSocketServer(): Promise<void> {
 
       cliRecord.descriptor.connected = true;
       syncTerminalReplaySession(cliRecord, payload.sessionId);
-      cliRecord.terminalReplay = trimTerminalReplay(`${cliRecord.terminalReplay}${payload.data}`);
+      appendTerminalReplay(cliRecord, payload.data);
       cliRecord.descriptor.lastSeenAt = new Date().toISOString();
       io.of('/web').emit('terminal:chunk', cloneValue(payload));
     });
@@ -312,11 +411,17 @@ export async function startSocketServer(): Promise<void> {
     socket.emit('web:init', {
       cli: cliRecord ? cloneValue(cliRecord.descriptor) : null,
       snapshot: cliRecord?.snapshot ? cloneValue(cliRecord.snapshot) : null,
-      terminalReplay: cliRecord?.terminalReplay ?? ''
+      terminalReplayEndOffset: cliRecord ? getTerminalReplayEndOffset(cliRecord) : 0,
+      terminalReplayStartOffset: cliRecord?.terminalReplayOffset ?? 0,
+      terminalSessionId: getTerminalSessionId(cliRecord)
     } satisfies WebInitPayload);
 
     socket.on('web:command', async (command: WebCommandEnvelope, callback?: (result: CliCommandResult) => void) => {
       callback?.(await routeWebCommand(command));
+    });
+
+    socket.on('web:terminal-resume', (payload: TerminalResumeRequestPayload, callback?: (result: TerminalResumeResultPayload) => void) => {
+      callback?.(createTerminalResumeResult(payload));
     });
   });
 

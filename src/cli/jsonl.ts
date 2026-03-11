@@ -42,9 +42,21 @@ interface ClaudeJsonlRecord {
   };
 }
 
+export interface ClaudeJsonlMessagesState {
+  orderedIds: string[];
+  messagesById: Map<string, ChatMessage>;
+}
+
 export function resolveClaudeJsonlFilePath(projectRoot: string, sessionId: string, homeDir: string): string {
   const projectSlug = projectRoot.replace(/[\\/]/g, '-');
   return path.join(homeDir, '.claude', 'projects', projectSlug, `${sessionId}.jsonl`);
+}
+
+export function createClaudeJsonlMessagesState(): ClaudeJsonlMessagesState {
+  return {
+    orderedIds: [],
+    messagesById: new Map<string, ChatMessage>()
+  };
 }
 
 function isTextContentBlock(block: ClaudeContentBlock): block is ClaudeTextContentBlock {
@@ -284,45 +296,53 @@ function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessa
   messagesById.set(nextMessage.id, mergedMessage);
 }
 
-export function parseClaudeJsonlMessages(rawText: string): ChatMessage[] {
-  const orderedIds: string[] = [];
-  const messagesById = new Map<string, ChatMessage>();
-
-  for (const line of rawText.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      continue;
-    }
-
-    let record: ClaudeJsonlRecord;
-    try {
-      record = JSON.parse(trimmed) as ClaudeJsonlRecord;
-    } catch {
-      continue;
-    }
-
-    const role = record.message?.role;
-    if (role !== 'user' && role !== 'assistant') {
-      continue;
-    }
-
-    const messageId = resolveRecordMessageId(record, role);
-    if (!messageId) {
-      continue;
-    }
-
-    const blocks = extractMessageBlocks(record, messageId);
-    upsertMessage(orderedIds, messagesById, {
-      id: messageId,
-      role,
-      blocks,
-      status: deriveMessageStatus(blocks),
-      createdAt: record.timestamp ?? new Date().toISOString()
-    });
+export function applyClaudeJsonlLine(state: ClaudeJsonlMessagesState, line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return false;
   }
 
-  const messages = compactMessages(
-    orderedIds.map((messageId) => messagesById.get(messageId)).filter(Boolean) as ChatMessage[]
+  let record: ClaudeJsonlRecord;
+  try {
+    record = JSON.parse(trimmed) as ClaudeJsonlRecord;
+  } catch {
+    return false;
+  }
+
+  const role = record.message?.role;
+  if (role !== 'user' && role !== 'assistant') {
+    return false;
+  }
+
+  const messageId = resolveRecordMessageId(record, role);
+  if (!messageId) {
+    return false;
+  }
+
+  const blocks = extractMessageBlocks(record, messageId);
+  upsertMessage(state.orderedIds, state.messagesById, {
+    id: messageId,
+    role,
+    blocks,
+    status: deriveMessageStatus(blocks),
+    createdAt: record.timestamp ?? new Date().toISOString()
+  });
+
+  return true;
+}
+
+export function materializeClaudeJsonlMessages(state: ClaudeJsonlMessagesState): ChatMessage[] {
+  return compactMessages(
+    state.orderedIds.map((messageId) => state.messagesById.get(messageId)).filter(Boolean) as ChatMessage[]
   );
-  return messages;
+}
+
+export function parseClaudeJsonlMessages(rawText: string): ChatMessage[] {
+  const state = createClaudeJsonlMessagesState();
+
+  for (const line of rawText.split('\n')) {
+    applyClaudeJsonlLine(state, line);
+  }
+
+  return materializeClaudeJsonlMessages(state);
 }

@@ -11,11 +11,18 @@ import type {
   GetOlderMessagesResultPayload,
   GetRawJsonlResultPayload,
   CliRegisterResult,
+  MessagesUpsertPayload,
   RuntimeSnapshotPayload,
   TerminalChunkPayload
 } from '../../shared/protocol.ts';
 import type { ChatMessage, RuntimeSnapshot, RuntimeStatus } from '../../shared/runtime-types.ts';
-import { parseClaudeJsonlMessages, resolveClaudeJsonlFilePath } from './jsonl.ts';
+import {
+  applyClaudeJsonlLine,
+  createClaudeJsonlMessagesState,
+  materializeClaudeJsonlMessages,
+  resolveClaudeJsonlFilePath,
+  type ClaudeJsonlMessagesState
+} from './jsonl.ts';
 import {
   appendRecentOutput,
   appendReplayChunk,
@@ -55,6 +62,7 @@ interface AgentRuntimeState extends RuntimeSnapshot {
   allMessages: ChatMessage[];
   rawJsonl: string;
   terminalReplay: string;
+  terminalOffset: number;
 }
 
 let state: AgentRuntimeState = createFreshState();
@@ -67,6 +75,10 @@ let watchedJsonlSessionId: string | null = null;
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | null = null;
 let suppressNextPtyExitError = false;
+let jsonlMessagesState: ClaudeJsonlMessagesState = createClaudeJsonlMessagesState();
+let parsedJsonlSessionId: string | null = null;
+let jsonlReadOffset = 0;
+let jsonlPendingLine = '';
 
 function sanitizePermissionMode(value: string | undefined): string {
   const allowed = new Set(['default', 'acceptEdits', 'dontAsk', 'plan', 'bypassPermissions']);
@@ -82,6 +94,7 @@ function createFreshState(): AgentRuntimeState {
     sessionId: null,
     allMessages: [],
     terminalReplay: '',
+    terminalOffset: 0,
     messages: [],
     hasOlderMessages: false,
     lastError: null,
@@ -91,6 +104,13 @@ function createFreshState(): AgentRuntimeState {
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
+}
+
+function resetJsonlParsingState(sessionId: string | null): void {
+  jsonlMessagesState = createClaudeJsonlMessagesState();
+  parsedJsonlSessionId = sessionId;
+  jsonlReadOffset = 0;
+  jsonlPendingLine = '';
 }
 
 function createRuntimeSnapshot(): RuntimeSnapshot {
@@ -111,6 +131,14 @@ function emitSnapshot(): void {
   socketClient.emit('cli:snapshot', {
     snapshot: createRuntimeSnapshot()
   } satisfies RuntimeSnapshotPayload);
+}
+
+function emitMessagesUpsert(payload: MessagesUpsertPayload): void {
+  if (!socketClient?.connected) {
+    return;
+  }
+
+  socketClient.emit('cli:messages-upsert', payload);
 }
 
 function scheduleSnapshotEmit(delayMs = SNAPSHOT_EMIT_DEBOUNCE_MS): void {
@@ -175,6 +203,20 @@ function setLastError(nextError: string | null): void {
     state.status = 'error';
   }
   emitSnapshot();
+}
+
+function messageEqual(left: ChatMessage | undefined, right: ChatMessage | undefined): boolean {
+  if (!left || !right) {
+    return false;
+  }
+
+  return (
+    left.id === right.id &&
+    left.role === right.role &&
+    left.status === right.status &&
+    left.createdAt === right.createdAt &&
+    JSON.stringify(left.blocks) === JSON.stringify(right.blocks)
+  );
 }
 
 function closeJsonlWatcher(): void {
@@ -311,21 +353,62 @@ function createOlderMessagesResult(
   };
 }
 
+function createMessagesUpsertPayload(
+  previousMessages: ChatMessage[],
+  nextMessages: ChatMessage[],
+  sessionId: string | null,
+  hasOlderMessages: boolean
+): MessagesUpsertPayload | null {
+  const previousIds = previousMessages.map((message) => message.id);
+  const nextIds = nextMessages.map((message) => message.id);
+  const idsChanged =
+    previousIds.length !== nextIds.length || previousIds.some((messageId, index) => messageId !== nextIds[index]);
+
+  const previousById = new Map(previousMessages.map((message) => [message.id, message]));
+  const upserts = nextMessages.filter((message) => !messageEqual(previousById.get(message.id), message));
+
+  if (!idsChanged && upserts.length === 0) {
+    return null;
+  }
+
+  return {
+    sessionId,
+    upserts: cloneValue(upserts),
+    recentMessageIds: nextIds,
+    hasOlderMessages
+  };
+}
+
+async function readJsonlTail(filePath: string, startOffset: number): Promise<{ text: string; size: number }> {
+  const stat = await fs.stat(filePath);
+  if (startOffset >= stat.size) {
+    return {
+      text: '',
+      size: stat.size
+    };
+  }
+
+  const handle = await fs.open(filePath, 'r');
+
+  try {
+    const length = stat.size - startOffset;
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, startOffset);
+    return {
+      text: buffer.toString('utf8'),
+      size: stat.size
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
 function messagesEqual(left: ChatMessage[], right: ChatMessage[]): boolean {
   if (left.length !== right.length) {
     return false;
   }
 
-  return left.every((message, index) => {
-    const next = right[index];
-    return (
-      message.id === next.id &&
-      message.role === next.role &&
-      message.status === next.status &&
-      message.createdAt === next.createdAt &&
-      JSON.stringify(message.blocks) === JSON.stringify(next.blocks)
-    );
-  });
+  return left.every((message, index) => messageEqual(message, right[index]));
 }
 
 async function refreshMessagesFromJsonl(): Promise<void> {
@@ -333,6 +416,7 @@ async function refreshMessagesFromJsonl(): Promise<void> {
   if (!sessionId) {
     closeJsonlWatcher();
     if (state.allMessages.length > 0 || state.messages.length > 0 || state.status !== 'idle' || state.rawJsonl) {
+      resetJsonlParsingState(null);
       state.allMessages = [];
       state.messages = [];
       state.status = 'idle';
@@ -346,15 +430,51 @@ async function refreshMessagesFromJsonl(): Promise<void> {
   ensureJsonlWatcher(sessionId);
 
   const filePath = resolveSessionJsonlFilePath(sessionId);
+  const previousMessages = state.messages;
+  const previousHasOlderMessages = state.hasOlderMessages;
 
   try {
-    const raw = await fs.readFile(filePath, 'utf8');
-    const nextAllMessages = applyStreamingStatus(parseClaudeJsonlMessages(raw), state.status);
+    if (parsedJsonlSessionId !== sessionId) {
+      resetJsonlParsingState(sessionId);
+      state.rawJsonl = '';
+      state.allMessages = [];
+      state.messages = [];
+      state.hasOlderMessages = false;
+    }
+
+    const stat = await fs.stat(filePath);
+    if (jsonlReadOffset > stat.size) {
+      resetJsonlParsingState(sessionId);
+      state.rawJsonl = '';
+    }
+
+    const { text, size } = await readJsonlTail(filePath, jsonlReadOffset);
+    if (text) {
+      state.rawJsonl += text;
+      const combined = `${jsonlPendingLine}${text}`;
+      const lines = combined.split('\n');
+      const trailingLine = lines.pop() ?? '';
+
+      for (const line of lines) {
+        applyClaudeJsonlLine(jsonlMessagesState, line);
+      }
+
+      if (trailingLine.trim() && !applyClaudeJsonlLine(jsonlMessagesState, trailingLine)) {
+        jsonlPendingLine = trailingLine;
+      } else {
+        jsonlPendingLine = '';
+      }
+    } else if (jsonlPendingLine.trim() && applyClaudeJsonlLine(jsonlMessagesState, jsonlPendingLine)) {
+      jsonlPendingLine = '';
+    }
+
+    jsonlReadOffset = size;
+
+    const nextAllMessages = applyStreamingStatus(materializeClaudeJsonlMessages(jsonlMessagesState), state.status);
     const nextMessages = selectRecentMessages(nextAllMessages);
     const allMessagesChanged = !messagesEqual(state.allMessages, nextAllMessages);
     const messagesChanged = !messagesEqual(state.messages, nextMessages);
     const hasOlderMessagesChanged = state.hasOlderMessages !== (nextAllMessages.length > nextMessages.length);
-    const rawJsonlChanged = state.rawJsonl !== raw;
 
     if (allMessagesChanged) {
       state.allMessages = nextAllMessages;
@@ -365,12 +485,18 @@ async function refreshMessagesFromJsonl(): Promise<void> {
     if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
       state.hasOlderMessages = nextAllMessages.length > nextMessages.length;
     }
-    if (rawJsonlChanged) {
-      state.rawJsonl = raw;
-    }
 
     if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
-      emitSnapshot();
+      const upsertPayload = createMessagesUpsertPayload(
+        previousMessages,
+        nextMessages,
+        sessionId,
+        nextAllMessages.length > nextMessages.length
+      );
+      if (upsertPayload) {
+        emitMessagesUpsert(upsertPayload);
+      }
+      scheduleSnapshotEmit(0);
     }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -395,13 +521,14 @@ function scheduleJsonlRefresh(delayMs = JSONL_REFRESH_DEBOUNCE_MS): void {
   }, delayMs);
 }
 
-function emitTerminalChunk(data: string): void {
+function emitTerminalChunk(data: string, offset: number): void {
   if (!socketClient?.connected) {
     return;
   }
 
   socketClient.emit('cli:terminal-chunk', {
     data,
+    offset,
     sessionId: state.sessionId
   } satisfies TerminalChunkPayload);
 }
@@ -412,10 +539,12 @@ function handlePtyData(chunk: string): void {
     return;
   }
 
+  const chunkOffset = state.terminalOffset;
   state.terminalReplay = appendReplayChunk(session, chunk, TERMINAL_REPLAY_MAX_BYTES);
+  state.terminalOffset += Buffer.byteLength(chunk, 'utf8');
   const recentOutput = appendRecentOutput(session, chunk, RECENT_OUTPUT_MAX_CHARS);
   syncStatusFromPtyOutput(recentOutput);
-  emitTerminalChunk(chunk);
+  emitTerminalChunk(chunk, chunkOffset);
   scheduleJsonlRefresh();
 }
 
