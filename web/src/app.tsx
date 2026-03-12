@@ -13,7 +13,6 @@ import type {
   CliCommandResult,
   CliStatusPayload,
   GetOlderMessagesResultPayload,
-  GetRawJsonlResultPayload,
   ListProjectSessionsResultPayload,
   MessagesUpsertPayload,
   PickProjectDirectoryResultPayload,
@@ -85,6 +84,8 @@ function getThreadLabel(cwd: string): string {
 const PROJECTS_STORAGE_KEY = 'pty-remote.projects.v1';
 const SIDEBAR_TOGGLE_MARGIN = 16;
 const SIDEBAR_TOGGLE_SIZE = 72;
+const MOBILE_TERMINAL_BREAKPOINT = 768;
+const MOBILE_TERMINAL_MIN_COLS = 80;
 
 function clampSidebarToggleTop(value: number, viewportHeight: number): number {
   const minTop = SIDEBAR_TOGGLE_MARGIN;
@@ -1214,15 +1215,12 @@ export function App() {
   const [prompt, setPrompt] = useState('');
   const [error, setError] = useState('');
   const [mobilePane, setMobilePane] = useState<MobilePane>('chat');
-  const [headerDetailsExpanded, setHeaderDetailsExpanded] = useState(false);
-  const [rawJsonl, setRawJsonl] = useState('');
-  const [rawJsonlLoading, setRawJsonlLoading] = useState(false);
-  const [rawJsonlTruncated, setRawJsonlTruncated] = useState(false);
   const [projectLoadingCwd, setProjectLoadingCwd] = useState<string | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const questionMessageRefs = useRef(new Map<string, HTMLDivElement>());
+  const terminalViewportRef = useRef<HTMLDivElement | null>(null);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalInstanceRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -1237,6 +1235,7 @@ export function App() {
   const requestedThreadKeyRef = useRef<string | null>(null);
   const sidebarToggleDragRef = useRef<{ pointerId: number; startY: number; startTop: number; moved: boolean } | null>(null);
   const suppressSidebarToggleClickRef = useRef(false);
+  const questionJumpClickTimeoutRef = useRef<number | null>(null);
 
   function applyTerminalReplay(sessionId: string | null, replay: string, replayOffset: number): void {
     const terminal = terminalInstanceRef.current;
@@ -1250,17 +1249,21 @@ export function App() {
     }
     appliedSessionIdRef.current = sessionId;
     appliedTerminalOffsetRef.current = replayOffset + getUtf8ByteLength(replay);
-    fitAddonRef.current?.fit();
+    scheduleTerminalResize();
   }
 
   function emitTerminalResize(): void {
     const socket = socketRef.current;
     const terminal = terminalInstanceRef.current;
     const fitAddon = fitAddonRef.current;
-    if (!socket?.connected || !terminal || !fitAddon) {
+    const terminalHost = terminalHostRef.current;
+    const terminalViewport = terminalViewportRef.current;
+    if (!socket?.connected || !terminal || !fitAddon || !terminalHost || !terminalViewport) {
       return;
     }
 
+    terminalHost.style.width = '100%';
+    terminalHost.style.minWidth = '100%';
     fitAddon.fit();
     const proposedDimensions = fitAddon.proposeDimensions();
     const cols = proposedDimensions?.cols ?? terminal.cols;
@@ -1269,10 +1272,26 @@ export function App() {
       return;
     }
 
+    const viewportWidth = terminalViewport.clientWidth;
+    const shouldAllowHorizontalScroll = viewportWidth > 0 && viewportWidth < MOBILE_TERMINAL_BREAKPOINT;
     const nextSize = {
-      cols: Math.max(20, cols),
+      cols: Math.max(shouldAllowHorizontalScroll ? MOBILE_TERMINAL_MIN_COLS : 20, cols),
       rows: Math.max(8, rows)
     };
+
+    if (shouldAllowHorizontalScroll && cols > 0) {
+      const targetWidth = Math.ceil((viewportWidth / cols) * nextSize.cols);
+      terminalHost.style.width = `${targetWidth}px`;
+      terminalHost.style.minWidth = `${targetWidth}px`;
+    } else {
+      terminalHost.style.width = '100%';
+      terminalHost.style.minWidth = '100%';
+    }
+
+    if (terminal.cols !== nextSize.cols || terminal.rows !== nextSize.rows) {
+      terminal.resize(nextSize.cols, nextSize.rows);
+    }
+
     if (lastTerminalSizeRef.current?.cols === nextSize.cols && lastTerminalSizeRef.current?.rows === nextSize.rows) {
       return;
     }
@@ -1411,7 +1430,7 @@ export function App() {
   const canStop = connected && busy && Boolean(activeProject && activeThread);
 
   useEffect(() => {
-    if (!terminalHostRef.current || terminalInstanceRef.current) {
+    if (!terminalHostRef.current || !terminalViewportRef.current || terminalInstanceRef.current) {
       return;
     }
 
@@ -1446,7 +1465,7 @@ export function App() {
     const observer = new ResizeObserver(() => {
       scheduleTerminalResize();
     });
-    observer.observe(terminalHostRef.current);
+    observer.observe(terminalViewportRef.current);
     scheduleTerminalResize();
 
     return () => {
@@ -1561,9 +1580,6 @@ export function App() {
     setOlderMessages([]);
     setHasOlderMessages(snapshot.hasOlderMessages);
     setOlderMessagesLoading(false);
-    setRawJsonl('');
-    setRawJsonlTruncated(false);
-    setRawJsonlLoading(false);
   }, [snapshot.sessionId]);
 
   useEffect(() => {
@@ -1600,6 +1616,14 @@ export function App() {
     window.addEventListener('resize', handleResize);
     return () => {
       window.removeEventListener('resize', handleResize);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (questionJumpClickTimeoutRef.current !== null) {
+        window.clearTimeout(questionJumpClickTimeoutRef.current);
+      }
     };
   }, []);
 
@@ -1756,6 +1780,16 @@ export function App() {
     return getRuntimeStatusLabel(snapshot.status);
   }, [cli?.connected, snapshot.status, socketConnected]);
 
+  const headerSummary = useMemo(
+    () => [
+      `项目 ${compactPreview(activeProject?.label ?? cli?.label ?? 'Workspace', 28)}`,
+      `目录 ${compactPreview(activeProject?.cwd ?? cli?.cwd ?? '-', 56)}`,
+      `线程 ${compactPreview(activeThread?.title ?? '-', 36)}`,
+      `会话 ${compactPreview(activeThread?.sessionId ?? snapshot.sessionId ?? '-', 24)}`
+    ],
+    [activeProject?.cwd, activeProject?.label, activeThread?.sessionId, activeThread?.title, cli?.cwd, cli?.label, snapshot.sessionId]
+  );
+
   async function sendCommand<TName extends CliCommandName>(
     name: TName,
     payload: CliCommandPayloadMap[TName]
@@ -1831,6 +1865,38 @@ export function App() {
       behavior: 'smooth',
       block: 'start'
     });
+  }
+
+  function handleJumpToMessagesEdge(direction: QuestionJumpDirection): void {
+    const container = messagesRef.current;
+    if (!container) {
+      return;
+    }
+
+    container.scrollTo({
+      top: direction === 'up' ? 0 : container.scrollHeight,
+      behavior: 'smooth'
+    });
+  }
+
+  function handleQuestionJumpButtonClick(direction: QuestionJumpDirection): void {
+    if (questionJumpClickTimeoutRef.current !== null) {
+      window.clearTimeout(questionJumpClickTimeoutRef.current);
+    }
+
+    questionJumpClickTimeoutRef.current = window.setTimeout(() => {
+      questionJumpClickTimeoutRef.current = null;
+      handleJumpToQuestion(direction);
+    }, 220);
+  }
+
+  function handleQuestionJumpButtonDoubleClick(direction: QuestionJumpDirection): void {
+    if (questionJumpClickTimeoutRef.current !== null) {
+      window.clearTimeout(questionJumpClickTimeoutRef.current);
+      questionJumpClickTimeoutRef.current = null;
+    }
+
+    handleJumpToMessagesEdge(direction);
   }
 
   function handleOpenSidebarButtonClick(event: React.MouseEvent<HTMLButtonElement>): void {
@@ -1927,8 +1993,6 @@ export function App() {
         setSnapshot(createEmptySnapshot());
         setOlderMessages([]);
         setHasOlderMessages(false);
-        setRawJsonl('');
-        setRawJsonlTruncated(false);
       }
       patchWorkspace((current) => ({
         ...current,
@@ -2076,25 +2140,6 @@ export function App() {
       await sendCommand('stop-message', {});
     } catch (stopError) {
       setError(stopError instanceof Error ? stopError.message : '结束失败');
-    }
-  }
-
-  async function handleLoadRawJsonl() {
-    try {
-      setError('');
-      setRawJsonlLoading(true);
-      const result = await sendCommand('get-raw-jsonl', { maxChars: 200_000 });
-      const payload = result.payload as GetRawJsonlResultPayload | undefined;
-      if ((payload?.threadKey ?? null) !== snapshot.threadKey) {
-        return;
-      }
-      setRawJsonl(payload?.rawJsonl ?? '');
-      setRawJsonlTruncated(Boolean(payload?.truncated));
-      setMobilePane('chat');
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : '加载 JSONL 失败');
-    } finally {
-      setRawJsonlLoading(false);
     }
   }
 
@@ -2313,88 +2358,16 @@ export function App() {
       <div className="mx-auto flex h-full max-w-[1600px] flex-col gap-4 overflow-hidden p-4 md:p-6">
         <main className="flex min-h-0 flex-1 flex-col gap-0">
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
-            <header className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
-              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                <div className="min-w-0">
-                  <div className="text-xs font-medium uppercase tracking-[0.22em] text-zinc-400">
-                    {activeProject?.label ?? cli?.label ?? 'Workspace'}
-                  </div>
-                  <h1 className="mt-1 text-2xl font-semibold">pty-remote</h1>
-                  <p className="mt-2 text-sm text-zinc-500">项目描述 / Raw JSONL 已合并到头部，按需展开查看。</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setHeaderDetailsExpanded((current) => !current)}
-                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-zinc-300 text-zinc-700 transition hover:bg-zinc-50"
-                  aria-expanded={headerDetailsExpanded}
-                  aria-label={headerDetailsExpanded ? '收起详情' : '展开详情'}
-                  title={headerDetailsExpanded ? '收起详情' : '展开详情'}
-                >
-                  <svg
-                    viewBox="0 0 20 20"
-                    fill="none"
-                    aria-hidden="true"
-                    className={[
-                      'h-4 w-4 transition-transform duration-200',
-                      headerDetailsExpanded ? 'rotate-180' : 'rotate-0'
-                    ].join(' ')}
-                  >
-                    <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                  </svg>
-                </button>
+            <header className="rounded-3xl border border-zinc-200 bg-white px-4 py-3 shadow-sm">
+              <div className="flex items-center gap-3 overflow-x-auto whitespace-nowrap text-sm text-zinc-600 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+                <span className="text-base font-semibold text-zinc-900">pty-remote</span>
+                {headerSummary.map((item) => (
+                  <span key={item} className="flex items-center gap-3">
+                    <span className="text-zinc-300">/</span>
+                    <span>{item}</span>
+                  </span>
+                ))}
               </div>
-
-              {headerDetailsExpanded ? (
-                <div className="mt-4 space-y-4 border-t border-zinc-200 pt-4">
-                  <section className="min-w-0 rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
-                    <div className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">项目描述</div>
-                    <p className="mt-3 text-sm leading-6 text-zinc-600">
-                      pty-remote 通过左侧 project / thread 侧边栏驱动当前 Claude session，Messages、Terminal 和 Raw JSONL 会围绕当前 thread 同步展示。
-                    </p>
-                    <div className="mt-3 grid gap-2 text-sm text-zinc-600 md:grid-cols-2">
-                      <div>项目: {activeProject?.label ?? cli?.label ?? '-'}</div>
-                      <div>目录: {activeProject?.cwd ?? cli?.cwd ?? '-'}</div>
-                      <div>线程: {activeThread?.title ?? '-'}</div>
-                      <div>会话: {activeThread?.sessionId ?? snapshot.sessionId ?? '-'}</div>
-                    </div>
-                  </section>
-
-                  <section className="min-w-0 rounded-2xl border border-zinc-200 bg-white p-4">
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">Raw JSONL</div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void handleLoadRawJsonl();
-                        }}
-                        className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
-                        disabled={!connected || rawJsonlLoading}
-                      >
-                        {rawJsonlLoading ? '加载中...' : '刷新 JSONL'}
-                      </button>
-                    </div>
-                    <p className="mt-2 text-xs text-zinc-500">当前 thread 的完整调试数据按需拉取。</p>
-                    <div className="mt-3">
-                      {rawJsonl ? (
-                        <div className="space-y-3">
-                          {rawJsonlTruncated ? (
-                            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                              仅展示最近一部分 JSONL 内容。
-                            </div>
-                          ) : null}
-                          <pre className="max-h-[18rem] min-h-[12rem] overflow-auto rounded-2xl border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-100 sm:max-h-[22rem] sm:min-h-[14rem]">
-                            {rawJsonl}
-                          </pre>
-                        </div>
-                      ) : (
-                        <div className="flex min-h-[12rem] items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500 sm:min-h-[14rem]">
-                          {connected ? '点击“刷新 JSONL”加载当前 thread 的调试内容。' : '等待 CLI 连接后再加载 JSONL。'}
-                        </div>
-                      )}
-                    </div>
-                  </section>
-                </div>
-              ) : null}
             </header>
 
             <nav className="rounded-2xl border border-zinc-200 bg-white p-1 shadow-sm lg:hidden" aria-label="Mobile panels">
@@ -2473,10 +2446,11 @@ export function App() {
                       <div className="pointer-events-auto flex flex-col overflow-hidden rounded-2xl border border-zinc-200/80 bg-white/65 shadow-[0_10px_24px_rgba(0,0,0,0.08)] backdrop-blur-sm">
                         <button
                           type="button"
-                          onClick={() => handleJumpToQuestion('up')}
+                          onClick={() => handleQuestionJumpButtonClick('up')}
+                          onDoubleClick={() => handleQuestionJumpButtonDoubleClick('up')}
                           className="flex h-10 w-10 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900"
-                          aria-label="跳到上一条提问"
-                          title="跳到上一条提问"
+                          aria-label="跳到上一条提问，双击直达顶部"
+                          title="跳到上一条提问，双击直达顶部"
                         >
                           <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
                             <path d="M5 12l5-5 5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -2485,10 +2459,11 @@ export function App() {
                         <div className="h-px bg-zinc-200/80" />
                         <button
                           type="button"
-                          onClick={() => handleJumpToQuestion('down')}
+                          onClick={() => handleQuestionJumpButtonClick('down')}
+                          onDoubleClick={() => handleQuestionJumpButtonDoubleClick('down')}
                           className="flex h-10 w-10 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900"
-                          aria-label="跳到下一条提问"
-                          title="跳到下一条提问"
+                          aria-label="跳到下一条提问，双击直达底部"
+                          title="跳到下一条提问，双击直达底部"
                         >
                           <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
                             <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
@@ -2510,7 +2485,9 @@ export function App() {
                   <h2 className="text-lg font-semibold">Terminal</h2>
                 </div>
                 <div className="terminal-shell min-w-0 flex-1 overflow-hidden rounded-b-3xl bg-white p-2 sm:p-3">
-                  <div ref={terminalHostRef} className="h-full min-w-0 w-full overflow-hidden bg-white" />
+                  <div ref={terminalViewportRef} className="h-full overflow-x-auto overflow-y-hidden overscroll-x-contain touch-pan-x">
+                    <div ref={terminalHostRef} className="h-full min-w-full overflow-hidden bg-white" />
+                  </div>
                 </div>
               </div>
             </section>
