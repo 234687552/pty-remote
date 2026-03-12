@@ -81,7 +81,15 @@ function getThreadLabel(cwd: string): string {
   return segments[segments.length - 1] || cwd;
 }
 
-const PROJECTS_STORAGE_KEY = 'hapi-tmux.projects.v1';
+const PROJECTS_STORAGE_KEY = 'pty-remote.projects.v1';
+const SIDEBAR_TOGGLE_MARGIN = 16;
+const SIDEBAR_TOGGLE_SIZE = 72;
+
+function clampSidebarToggleTop(value: number, viewportHeight: number): number {
+  const minTop = SIDEBAR_TOGGLE_MARGIN;
+  const maxTop = Math.max(minTop, viewportHeight - SIDEBAR_TOGGLE_SIZE - SIDEBAR_TOGGLE_MARGIN);
+  return Math.min(maxTop, Math.max(minTop, Math.round(value)));
+}
 
 interface ProjectThreadEntry {
   id: string;
@@ -105,6 +113,7 @@ interface PersistedWorkspaceState {
   activeThreadId: string | null;
   projects: ProjectEntry[];
   sidebarCollapsed: boolean;
+  sidebarToggleTop: number;
 }
 
 function createEmptyWorkspaceState(): PersistedWorkspaceState {
@@ -112,7 +121,8 @@ function createEmptyWorkspaceState(): PersistedWorkspaceState {
     activeProjectId: null,
     activeThreadId: null,
     projects: [],
-    sidebarCollapsed: false
+    sidebarCollapsed: false,
+    sidebarToggleTop: SIDEBAR_TOGGLE_MARGIN
   };
 }
 
@@ -139,7 +149,11 @@ function loadWorkspaceState(): PersistedWorkspaceState {
           label: project.label,
           threads: Array.isArray(project.threads) ? project.threads : []
         })),
-      sidebarCollapsed: Boolean(parsed.sidebarCollapsed)
+      sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
+      sidebarToggleTop: clampSidebarToggleTop(
+        typeof parsed.sidebarToggleTop === 'number' ? parsed.sidebarToggleTop : SIDEBAR_TOGGLE_MARGIN,
+        window.innerHeight
+      )
     };
   } catch {
     return createEmptyWorkspaceState();
@@ -920,7 +934,7 @@ interface ToolCallMeta {
   resultStatus?: MessageStatus;
 }
 
-type MobilePane = 'chat' | 'terminal' | 'jsonl';
+type MobilePane = 'chat' | 'terminal';
 
 function createToolCallIndex(messages: ChatMessage[]): Map<string, ToolCallMeta> {
   const index = new Map<string, ToolCallMeta>();
@@ -1181,12 +1195,14 @@ export function App() {
   const [cli, setCli] = useState<CliDescriptor | null>(null);
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot>(createEmptySnapshot());
   const [workspaceState, setWorkspaceState] = useState<PersistedWorkspaceState>(() => loadWorkspaceState());
+  const [sidebarToggleTop, setSidebarToggleTop] = useState(() => workspaceState.sidebarToggleTop);
   const [olderMessages, setOlderMessages] = useState<ChatMessage[]>([]);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [error, setError] = useState('');
   const [mobilePane, setMobilePane] = useState<MobilePane>('chat');
+  const [headerDetailsExpanded, setHeaderDetailsExpanded] = useState(false);
   const [rawJsonl, setRawJsonl] = useState('');
   const [rawJsonlLoading, setRawJsonlLoading] = useState(false);
   const [rawJsonlTruncated, setRawJsonlTruncated] = useState(false);
@@ -1206,6 +1222,8 @@ export function App() {
   const bufferedTerminalChunksRef = useRef<TerminalChunkPayload[]>([]);
   const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const requestedThreadKeyRef = useRef<string | null>(null);
+  const sidebarToggleDragRef = useRef<{ pointerId: number; startY: number; startTop: number; moved: boolean } | null>(null);
+  const suppressSidebarToggleClickRef = useRef(false);
 
   function applyTerminalReplay(sessionId: string | null, replay: string, replayOffset: number): void {
     const terminal = terminalInstanceRef.current;
@@ -1546,8 +1564,17 @@ export function App() {
   }, [workspaceState.sidebarCollapsed]);
 
   useEffect(() => {
+    setSidebarToggleTop(workspaceState.sidebarToggleTop);
+  }, [workspaceState.sidebarToggleTop]);
+
+  useEffect(() => {
     const handleResize = () => {
       scheduleTerminalResize();
+      setSidebarToggleTop((current) => clampSidebarToggleTop(current, window.innerHeight));
+      setWorkspaceState((current) => {
+        const nextTop = clampSidebarToggleTop(current.sidebarToggleTop, window.innerHeight);
+        return current.sidebarToggleTop === nextTop ? current : { ...current, sidebarToggleTop: nextTop };
+      });
     };
 
     window.addEventListener('resize', handleResize);
@@ -1738,6 +1765,60 @@ export function App() {
     setWorkspaceState((current) => updater(current));
   }
 
+  function handleOpenSidebarButtonClick(event: React.MouseEvent<HTMLButtonElement>): void {
+    if (suppressSidebarToggleClickRef.current) {
+      suppressSidebarToggleClickRef.current = false;
+      event.preventDefault();
+      return;
+    }
+    patchWorkspace((current) => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed }));
+  }
+
+  function handleSidebarTogglePointerDown(event: React.PointerEvent<HTMLButtonElement>): void {
+    if (event.button !== 0) {
+      return;
+    }
+    sidebarToggleDragRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startTop: sidebarToggleTop,
+      moved: false
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handleSidebarTogglePointerMove(event: React.PointerEvent<HTMLButtonElement>): void {
+    const dragState = sidebarToggleDragRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const nextTop = clampSidebarToggleTop(dragState.startTop + (event.clientY - dragState.startY), window.innerHeight);
+    if (Math.abs(nextTop - dragState.startTop) > 3) {
+      dragState.moved = true;
+    }
+    setSidebarToggleTop(nextTop);
+  }
+
+  function handleSidebarTogglePointerRelease(event: React.PointerEvent<HTMLButtonElement>): void {
+    const dragState = sidebarToggleDragRef.current;
+    if (!dragState || dragState.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    const nextTop = clampSidebarToggleTop(dragState.startTop + (event.clientY - dragState.startY), window.innerHeight);
+    setSidebarToggleTop(nextTop);
+    if (dragState.moved) {
+      suppressSidebarToggleClickRef.current = true;
+    }
+    patchWorkspace((current) => (current.sidebarToggleTop === nextTop ? current : { ...current, sidebarToggleTop: nextTop }));
+    sidebarToggleDragRef.current = null;
+  }
+
   async function refreshProjectThreads(cwd: string, projectId?: string): Promise<ListProjectSessionsResultPayload> {
     setProjectLoadingCwd(cwd);
 
@@ -1920,16 +2001,6 @@ export function App() {
     }
   }
 
-  async function handleReset() {
-    if (!activeProject) {
-      setError('请先选择一个 project');
-      return;
-    }
-
-    handleCreateThread(activeProject.id);
-    setMobilePane('chat');
-  }
-
   async function handleLoadRawJsonl() {
     try {
       setError('');
@@ -1938,7 +2009,7 @@ export function App() {
       const payload = result.payload as GetRawJsonlResultPayload | undefined;
       setRawJsonl(payload?.rawJsonl ?? '');
       setRawJsonlTruncated(Boolean(payload?.truncated));
-      setMobilePane('jsonl');
+      setMobilePane('chat');
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : '加载 JSONL 失败');
     } finally {
@@ -1987,10 +2058,18 @@ export function App() {
     <div className="h-dvh overflow-hidden bg-zinc-100 text-zinc-900">
       <button
         type="button"
-        onClick={() => patchWorkspace((current) => ({ ...current, sidebarCollapsed: false }))}
-        className="fixed top-4 left-4 z-30 flex h-18 w-18 items-center justify-center rounded-[1.6rem] border border-zinc-200 bg-white/95 text-zinc-700 shadow-[0_18px_40px_rgba(0,0,0,0.12)] backdrop-blur transition hover:bg-white"
+        onClick={handleOpenSidebarButtonClick}
+        onPointerDown={handleSidebarTogglePointerDown}
+        onPointerMove={handleSidebarTogglePointerMove}
+        onPointerUp={handleSidebarTogglePointerRelease}
+        onPointerCancel={handleSidebarTogglePointerRelease}
+        className={[
+          'fixed left-4 z-50 flex h-18 w-18 cursor-grab touch-none items-center justify-center rounded-[1.6rem] border border-zinc-200 bg-white/95 text-zinc-700 shadow-[0_18px_40px_rgba(0,0,0,0.12)] backdrop-blur transition hover:bg-white active:cursor-grabbing',
+          workspaceState.sidebarCollapsed ? 'opacity-100' : 'pointer-events-none opacity-0'
+        ].join(' ')}
         aria-label="打开边栏"
-        title="打开边栏"
+        title="打开边栏，支持上下拖动"
+        style={{ top: sidebarToggleTop }}
       >
         <span className="relative block h-8 w-8 rounded-xl border-2 border-current">
           <span className="absolute top-0 bottom-0 left-1/2 border-l-2 border-current" />
@@ -2154,33 +2233,95 @@ export function App() {
         <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
             <header className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <h1 className="text-2xl font-semibold">hapi-tmux</h1>
-                  <p className="text-sm text-zinc-500">project / thread 侧边栏驱动当前 Claude session，右侧继续看对话、terminal、jsonl</p>
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                <div className="min-w-0">
+                  <div className="text-xs font-medium uppercase tracking-[0.22em] text-zinc-400">
+                    {activeProject?.label ?? cli?.label ?? 'Workspace'}
+                  </div>
+                  <h1 className="mt-1 text-2xl font-semibold">pty-remote</h1>
+                  <p className="mt-2 text-sm text-zinc-500">项目描述 / Raw JSONL 已合并到头部，按需展开查看。</p>
                 </div>
-                <div className="flex flex-wrap gap-2 text-xs font-medium">
-                  <span className="rounded-full bg-zinc-900 px-3 py-1 text-white">socket: {socketConnected ? 'online' : 'offline'}</span>
-                  <span className="rounded-full bg-zinc-200 px-3 py-1 text-zinc-800">cli: {cli?.connected ? 'online' : 'offline'}</span>
-                  <span className="rounded-full bg-zinc-200 px-3 py-1 text-zinc-800">status: {headerText}</span>
-                  <span className="rounded-full bg-zinc-200 px-3 py-1 text-zinc-800">session: {snapshot.sessionId ?? '-'}</span>
+                <button
+                  type="button"
+                  onClick={() => setHeaderDetailsExpanded((current) => !current)}
+                  className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-zinc-300 text-zinc-700 transition hover:bg-zinc-50"
+                  aria-expanded={headerDetailsExpanded}
+                  aria-label={headerDetailsExpanded ? '收起详情' : '展开详情'}
+                  title={headerDetailsExpanded ? '收起详情' : '展开详情'}
+                >
+                  <svg
+                    viewBox="0 0 20 20"
+                    fill="none"
+                    aria-hidden="true"
+                    className={[
+                      'h-4 w-4 transition-transform duration-200',
+                      headerDetailsExpanded ? 'rotate-180' : 'rotate-0'
+                    ].join(' ')}
+                  >
+                    <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </div>
+
+              {headerDetailsExpanded ? (
+                <div className="mt-4 space-y-4 border-t border-zinc-200 pt-4">
+                  <section className="min-w-0 rounded-2xl border border-zinc-200 bg-zinc-50 p-4">
+                    <div className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">项目描述</div>
+                    <p className="mt-3 text-sm leading-6 text-zinc-600">
+                      pty-remote 通过左侧 project / thread 侧边栏驱动当前 Claude session，Messages、Terminal 和 Raw JSONL 会围绕当前 thread 同步展示。
+                    </p>
+                    <div className="mt-3 grid gap-2 text-sm text-zinc-600 md:grid-cols-2">
+                      <div>项目: {activeProject?.label ?? cli?.label ?? '-'}</div>
+                      <div>目录: {activeProject?.cwd ?? cli?.cwd ?? '-'}</div>
+                      <div>线程: {activeThread?.title ?? '-'}</div>
+                      <div>会话: {activeThread?.sessionId ?? snapshot.sessionId ?? '-'}</div>
+                    </div>
+                  </section>
+
+                  <section className="min-w-0 rounded-2xl border border-zinc-200 bg-white p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-xs font-semibold uppercase tracking-[0.2em] text-zinc-500">Raw JSONL</div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleLoadRawJsonl();
+                        }}
+                        className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={!connected || rawJsonlLoading}
+                      >
+                        {rawJsonlLoading ? '加载中...' : '刷新 JSONL'}
+                      </button>
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-500">当前 thread 的完整调试数据按需拉取。</p>
+                    <div className="mt-3">
+                      {rawJsonl ? (
+                        <div className="space-y-3">
+                          {rawJsonlTruncated ? (
+                            <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                              仅展示最近一部分 JSONL 内容。
+                            </div>
+                          ) : null}
+                          <pre className="max-h-[18rem] min-h-[12rem] overflow-auto rounded-2xl border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-100 sm:max-h-[22rem] sm:min-h-[14rem]">
+                            {rawJsonl}
+                          </pre>
+                        </div>
+                      ) : (
+                        <div className="flex min-h-[12rem] items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500 sm:min-h-[14rem]">
+                          {connected ? '点击“刷新 JSONL”加载当前 thread 的调试内容。' : '等待 CLI 连接后再加载 JSONL。'}
+                        </div>
+                      )}
+                    </div>
+                  </section>
                 </div>
-              </div>
-              <div className="mt-3 grid gap-2 text-sm text-zinc-600 md:grid-cols-2">
-                <div>project: {activeProject?.label ?? cli?.label ?? '-'}</div>
-                <div>cwd: {activeProject?.cwd ?? cli?.cwd ?? '-'}</div>
-                <div>thread: {activeThread?.title ?? '-'}</div>
-                <div>active session: {activeThread?.sessionId ?? snapshot.sessionId ?? '-'}</div>
-              </div>
+              ) : null}
             </header>
 
             <nav className="rounded-2xl border border-zinc-200 bg-white p-1 shadow-sm lg:hidden" aria-label="Mobile panels">
-              <div className="grid grid-cols-3 gap-1">
+              <div className="grid grid-cols-2 gap-1">
                 {(
                   [
                     ['chat', 'Chat'],
-                    ['terminal', 'Terminal'],
-                    ['jsonl', 'JSONL']
+                    ['terminal', 'Terminal']
                   ] as const satisfies ReadonlyArray<readonly [MobilePane, string]>
                 ).map(([pane, label]) => (
                   <button
@@ -2199,127 +2340,72 @@ export function App() {
               </div>
             </nav>
 
-            <section
-              className={[
-                'min-h-0 flex-col gap-4 lg:grid lg:grid-cols-[1fr,1.2fr]',
-                mobilePane === 'jsonl' ? 'hidden lg:grid' : 'flex'
-              ].join(' ')}
-            >
+            <section className="min-h-0 flex flex-col gap-4 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
               <div
                 className={[
-                  'min-h-[22rem] flex-col rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:flex lg:min-h-[28rem]',
-                  mobilePane === 'chat' ? 'flex' : 'hidden'
+                  'min-h-0 min-w-0 flex-col',
+                  mobilePane === 'chat' ? 'flex' : 'hidden lg:flex'
                 ].join(' ')}
               >
-                <div className="border-b border-zinc-200 px-4 py-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <h2 className="text-lg font-semibold">Messages</h2>
-                      <p className="text-xs text-zinc-500">当前 thread 的最近消息实时同步，旧消息按需补拉。</p>
+                <div className="min-h-[22rem] min-w-0 flex-1 flex-col rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:flex lg:min-h-[28rem]">
+                  <div className="border-b border-zinc-200 px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div>
+                        <h2 className="text-lg font-semibold">Messages</h2>
+                        <p className="text-xs text-zinc-500">当前 thread 的最近消息实时同步，旧消息按需补拉。</p>
+                      </div>
+                      {hasOlderMessages ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleLoadOlderMessages();
+                          }}
+                          className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                          disabled={!connected || olderMessagesLoading}
+                        >
+                          {olderMessagesLoading ? '加载中...' : '加载更早消息'}
+                        </button>
+                      ) : null}
                     </div>
-                    {hasOlderMessages ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          void handleLoadOlderMessages();
-                        }}
-                        className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
-                        disabled={!connected || olderMessagesLoading}
-                      >
-                        {olderMessagesLoading ? '加载中...' : '加载更早消息'}
-                      </button>
-                    ) : null}
                   </div>
-                </div>
-                <div ref={messagesRef} className="flex-1 space-y-2 overflow-auto px-4 py-4">
-                  {renderableMessages.length === 0 ? (
-                    <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
-                      {activeThread?.draft ? '这是一个新 thread，发送第一条消息后会创建 Claude session。' : '等待这个 thread 的 Claude jsonl 写入会话内容。'}
-                    </div>
-                  ) : (
-                    renderableMessages.map((message) => (
-                      <MessageShell key={message.id} message={message}>
-                        <MessageContent message={message} toolCallIndex={toolCallIndex} />
-                      </MessageShell>
-                    ))
-                  )}
+                  <div ref={messagesRef} className="min-w-0 flex-1 space-y-2 overflow-auto px-4 py-4">
+                    {renderableMessages.length === 0 ? (
+                      <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
+                        {activeThread?.draft ? '这是一个新 thread，发送第一条消息后会创建 Claude session。' : '等待这个 thread 的 Claude jsonl 写入会话内容。'}
+                      </div>
+                    ) : (
+                      renderableMessages.map((message) => (
+                        <MessageShell key={message.id} message={message}>
+                          <MessageContent message={message} toolCallIndex={toolCallIndex} />
+                        </MessageShell>
+                      ))
+                    )}
+                  </div>
                 </div>
               </div>
 
               <div
                 className={[
-                  'min-h-[22rem] flex-col rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:flex lg:min-h-[28rem]',
-                  mobilePane === 'terminal' ? 'flex' : 'hidden'
+                  'min-h-[22rem] min-w-0 flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:flex lg:min-h-[28rem]',
+                  mobilePane === 'terminal' ? 'flex' : 'hidden lg:flex'
                 ].join(' ')}
               >
                 <div className="border-b border-zinc-200 px-4 py-3">
                   <h2 className="text-lg font-semibold">Terminal</h2>
                 </div>
-                <div className="terminal-shell flex-1 overflow-hidden rounded-b-3xl bg-white p-2 sm:p-3">
-                  <div ref={terminalHostRef} className="h-full w-full overflow-hidden bg-white" />
+                <div className="terminal-shell min-w-0 flex-1 overflow-hidden rounded-b-3xl bg-white p-2 sm:p-3">
+                  <div ref={terminalHostRef} className="h-full min-w-0 w-full overflow-hidden bg-white" />
                 </div>
-              </div>
-            </section>
-
-            <section
-              className={[
-                'rounded-3xl border border-zinc-200 bg-white shadow-sm lg:block',
-                mobilePane === 'jsonl' ? 'block' : 'hidden'
-              ].join(' ')}
-            >
-              <div className="flex items-center justify-between gap-3 border-b border-zinc-200 px-4 py-3">
-                <div>
-                  <h2 className="text-lg font-semibold">Raw JSONL</h2>
-                  <p className="text-xs text-zinc-500">当前 thread 的完整调试数据按需拉取，不在侧边栏缓存。</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void handleLoadRawJsonl();
-                  }}
-                  className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={!connected || rawJsonlLoading}
-                >
-                  {rawJsonlLoading ? '加载中...' : '刷新 JSONL'}
-                </button>
-              </div>
-              <div className="p-4">
-                {rawJsonl ? (
-                  <div className="space-y-3">
-                    {rawJsonlTruncated ? (
-                      <div className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
-                        仅展示最近一部分 JSONL 内容。
-                      </div>
-                    ) : null}
-                    <pre className="max-h-[18rem] min-h-[12rem] overflow-auto rounded-2xl border border-zinc-200 bg-zinc-950 p-4 text-xs leading-5 whitespace-pre-wrap break-all text-zinc-100 sm:max-h-[22rem] sm:min-h-[14rem]">
-                      {rawJsonl}
-                    </pre>
-                  </div>
-                ) : (
-                  <div className="flex min-h-[12rem] items-center justify-center rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500 sm:min-h-[14rem]">
-                    {connected ? '点击“刷新 JSONL”加载当前 thread 的调试内容。' : '等待 CLI 连接后再加载 JSONL。'}
-                  </div>
-                )}
               </div>
             </section>
           </div>
 
           <form onSubmit={handleSubmit} className="shrink-0 rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold">Composer</h2>
-                <p className="text-xs text-zinc-500">{activeProject ? `${activeProject.label} / ${activeThread?.title ?? 'thread'}` : '请先添加一个 project'}</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  void handleReset();
-                }}
-                className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!activeProject}
-              >
-                新线程
-              </button>
+            <div className="mb-3 flex flex-wrap gap-2 text-xs font-medium">
+                <span className="rounded-full bg-zinc-900 px-3 py-1 text-white">socket: {socketConnected ? 'online' : 'offline'}</span>
+                <span className="rounded-full bg-zinc-200 px-3 py-1 text-zinc-800">cli: {cli?.connected ? 'online' : 'offline'}</span>
+                <span className="rounded-full bg-zinc-200 px-3 py-1 text-zinc-800">status: {headerText}</span>
+                <span className="rounded-full bg-zinc-200 px-3 py-1 text-zinc-800">session: {snapshot.sessionId ?? '-'}</span>
             </div>
 
             <textarea
@@ -2341,7 +2427,7 @@ export function App() {
                             ? '这是一个新 thread，第一条消息会创建新 session。'
                             : '输入消息，继续这个 thread。'
               }
-              className="min-h-28 w-full rounded-2xl border border-zinc-300 bg-zinc-50 px-4 py-3 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500 md:min-h-32"
+              className="min-h-32 w-full rounded-2xl border border-zinc-300 bg-zinc-50 px-4 py-3 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500 md:min-h-36"
               disabled={!canCompose}
             />
 

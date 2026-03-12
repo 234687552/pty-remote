@@ -42,7 +42,7 @@ const __dirname = path.dirname(__filename);
 const DEFAULT_ROOT_DIR = path.resolve(__dirname, '../..');
 
 const SOCKET_URL = process.env.SOCKET_URL ?? `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? '3001'}`;
-const CLI_ID = (process.env.HAPI_TMUX_CLI_ID ?? `${path.basename(DEFAULT_ROOT_DIR)}-${randomUUID().slice(0, 8)}`)
+const CLI_ID = (process.env.PTY_REMOTE_CLI_ID ?? `${path.basename(DEFAULT_ROOT_DIR)}-${randomUUID().slice(0, 8)}`)
   .trim()
   .replace(/[^a-zA-Z0-9._-]+/g, '-');
 const PTY_BACKEND_NAME = 'node-pty';
@@ -91,7 +91,7 @@ let jsonlPendingLine = '';
 let awaitingJsonlTurn = false;
 let activeThreadTarget: ActiveThreadTarget = {
   cwd: DEFAULT_ROOT_DIR,
-  label: (process.env.HAPI_TMUX_CLI_LABEL ?? path.basename(DEFAULT_ROOT_DIR) ?? 'claude-cli').trim(),
+  label: (process.env.PTY_REMOTE_CLI_LABEL ?? path.basename(DEFAULT_ROOT_DIR) ?? 'claude-cli').trim(),
   resumeSessionId: null
 };
 let terminalSize = {

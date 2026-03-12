@@ -1,5 +1,5 @@
 {
-  "name": "hapi-tmux",
+  "name": "pty-remote",
   "version": "0.1.0",
   "private": true,
   "type": "module",
