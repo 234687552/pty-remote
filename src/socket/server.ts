@@ -383,8 +383,14 @@ export async function startSocketServer(): Promise<void> {
       const cliId = payload.cliId?.trim() || randomUUID();
       const previous = cliRecords.get(cliId);
 
-      if (previous && previous.socket.id !== socket.id) {
-        previous.socket.disconnect(true);
+      if (previous?.descriptor.connected && previous.socket.id !== socket.id) {
+        callback?.({
+          ok: false,
+          cliId,
+          error: `CLI ${cliId} is already connected`
+        });
+        socket.disconnect(true);
+        return;
       }
 
       (socket.data as { cliId?: string }).cliId = cliId;
@@ -401,7 +407,10 @@ export async function startSocketServer(): Promise<void> {
       cliRecords.set(cliId, record);
       updateDescriptorFromSnapshot(record);
       emitCliStatus(io);
-      callback?.({ cliId });
+      callback?.({
+        ok: true,
+        cliId
+      });
     });
 
     socket.on('cli:snapshot', (payload: RuntimeSnapshotPayload) => {

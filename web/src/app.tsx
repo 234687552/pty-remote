@@ -1214,6 +1214,7 @@ export function App() {
   const [olderMessages, setOlderMessages] = useState<ChatMessage[]>([]);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
   const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
+  const [projectsRefreshing, setProjectsRefreshing] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [error, setError] = useState('');
   const [mobilePane, setMobilePane] = useState<MobilePane>('chat');
@@ -1239,6 +1240,8 @@ export function App() {
   const sidebarToggleDragRef = useRef<{ pointerId: number; startY: number; startTop: number; moved: boolean } | null>(null);
   const suppressSidebarToggleClickRef = useRef(false);
   const questionJumpClickTimeoutRef = useRef<number | null>(null);
+  const sidebarRefreshTriggeredRef = useRef(false);
+  const previousSidebarCollapsedRef = useRef(workspaceState.sidebarCollapsed);
 
   function applyTerminalReplay(sessionId: string | null, replay: string, replayOffset: number): void {
     const terminal = terminalInstanceRef.current;
@@ -1835,7 +1838,7 @@ export function App() {
   }, [activeCliId, socketConnected]);
 
   useEffect(() => {
-    if (!socketConnected) {
+    if (!socketConnected || !workspaceState.sidebarCollapsed || projectsRefreshing) {
       return;
     }
 
@@ -1847,7 +1850,23 @@ export function App() {
     }
 
     void refreshProjectThreads(nextProjectToLoad);
-  }, [projectLoadingId, projectThreadsById, socketConnected, workspaceState.projects]);
+  }, [projectLoadingId, projectThreadsById, projectsRefreshing, socketConnected, workspaceState.projects]);
+
+  useEffect(() => {
+    const wasCollapsed = previousSidebarCollapsedRef.current;
+    previousSidebarCollapsedRef.current = workspaceState.sidebarCollapsed;
+
+    if (workspaceState.sidebarCollapsed || workspaceState.projects.length === 0 || projectLoadingId || projectsRefreshing) {
+      return;
+    }
+
+    if (!wasCollapsed && sidebarRefreshTriggeredRef.current) {
+      return;
+    }
+
+    sidebarRefreshTriggeredRef.current = true;
+    void refreshAllProjectThreads();
+  }, [projectLoadingId, projectsRefreshing, workspaceState.sidebarCollapsed, workspaceState.projects.length]);
 
   useEffect(() => {
     if (!socketConnected || !activeCli?.connected || !activeProject || !activeThread) {
@@ -2138,6 +2157,58 @@ export function App() {
     }
   }
 
+  async function refreshAllProjectThreads(): Promise<void> {
+    if (projectsRefreshing || workspaceState.projects.length === 0) {
+      return;
+    }
+
+    setProjectsRefreshing(true);
+
+    try {
+      setError('');
+      const latestThreadsByProject = new Map<string, ProjectThreadEntry[]>(
+        Object.entries(projectThreadsById).map(([projectId, threads]) => [projectId, threads])
+      );
+      let nextActiveThreadId: string | null | undefined;
+      let refreshErrorMessage = '';
+
+      for (const project of workspaceState.projects) {
+        if (!project.cliId) {
+          continue;
+        }
+
+        try {
+          const history = await refreshProjectThreads(project);
+          const mergedThreads = mergeProjectThreads(latestThreadsByProject.get(project.id) ?? [], history.sessions);
+          latestThreadsByProject.set(project.id, mergedThreads);
+
+          if (project.id === workspaceState.activeProjectId) {
+            const activeCandidate =
+              mergedThreads.find((thread) => thread.id === workspaceState.activeThreadId) ??
+              mergedThreads.find((thread) => thread.sessionId === history.sessions[0]?.sessionId) ??
+              mergedThreads[0] ??
+              null;
+            nextActiveThreadId = activeCandidate?.id ?? null;
+          }
+        } catch (refreshError) {
+          refreshErrorMessage ||= refreshError instanceof Error ? refreshError.message : `刷新项目 ${project.label} 失败`;
+        }
+      }
+
+      if (nextActiveThreadId !== undefined) {
+        patchWorkspace((current) =>
+          current.activeThreadId === nextActiveThreadId ? current : { ...current, activeThreadId: nextActiveThreadId }
+        );
+      }
+
+      if (refreshErrorMessage) {
+        setError(refreshErrorMessage);
+      }
+    } finally {
+      setProjectsRefreshing(false);
+    }
+  }
+
   async function activateThread(project: ProjectEntry, thread: ProjectThreadEntry): Promise<void> {
     try {
       setError('');
@@ -2224,27 +2295,6 @@ export function App() {
       }
     } catch (addProjectError) {
       setError(addProjectError instanceof Error ? addProjectError.message : '添加项目失败');
-    }
-  }
-
-  async function handleRefreshProject(project: ProjectEntry): Promise<void> {
-    try {
-      setError('');
-      const history = await refreshProjectThreads(project);
-      const nextThreads = mergeProjectThreads(projectThreadsById[project.id] ?? [], history.sessions);
-      const activeCandidate =
-        nextThreads.find((thread) => thread.id === workspaceState.activeThreadId) ??
-        nextThreads.find((thread) => thread.sessionId === history.sessions[0]?.sessionId) ??
-        nextThreads[0];
-
-      patchWorkspace((current) => ({
-        ...current,
-        activeCliId: project.cliId,
-        activeProjectId: project.id,
-        activeThreadId: activeCandidate?.id ?? current.activeThreadId
-      }));
-    } catch (refreshError) {
-      setError(refreshError instanceof Error ? refreshError.message : '刷新项目历史失败');
     }
   }
 
@@ -2349,9 +2399,10 @@ export function App() {
         title="打开边栏，支持上下拖动"
         style={{ top: sidebarToggleTop }}
       >
-        <span className="relative block h-6 w-6 rounded-lg border border-current">
-          <span className="absolute top-0 bottom-0 left-1/2 border-l border-current" />
-        </span>
+        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+          <rect x="3" y="4" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" />
+          <path d="M8 4v12M10.5 7.5l2 2.5-2 2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
       </button>
 
       <div
@@ -2384,7 +2435,6 @@ export function App() {
             ) : (
               workspaceState.projects.map((project) => {
                 const isActiveProject = project.id === workspaceState.activeProjectId;
-                const isLoading = projectLoadingId === project.id;
                 const projectThreads = projectThreadsById[project.id] ?? [];
                 const projectCli = clis.find((entry) => entry.cliId === project.cliId) ?? null;
                 return (
@@ -2415,35 +2465,6 @@ export function App() {
                         </div>
                       </button>
                       <div className="flex items-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void handleRefreshProject(project);
-                          }}
-                          className={[
-                            'flex h-8 w-8 items-center justify-center rounded-lg border transition',
-                            isActiveProject ? 'border-white/10 text-white hover:bg-white/10' : 'border-zinc-200 text-zinc-700 hover:bg-zinc-100'
-                          ].join(' ')}
-                          disabled={isLoading}
-                          aria-label={isLoading ? '刷新中' : '刷新项目'}
-                          title={isLoading ? '刷新中' : '刷新项目'}
-                        >
-                          <svg
-                            viewBox="0 0 20 20"
-                            fill="none"
-                            aria-hidden="true"
-                            className={['h-4 w-4', isLoading ? 'animate-spin' : ''].join(' ')}
-                          >
-                            <path
-                              d="M16 10a6 6 0 1 1-1.66-4.14"
-                              stroke="currentColor"
-                              strokeWidth="1.8"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                            <path d="M16 4.5v3.8h-3.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        </button>
                         <button
                           type="button"
                           onClick={() => handleCreateThread(project.id)}
@@ -2546,6 +2567,28 @@ export function App() {
               >
                 <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
                   <path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  void refreshAllProjectThreads();
+                }}
+                className="flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-300 text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label={projectsRefreshing ? '刷新中' : '刷新全部项目'}
+                title={projectsRefreshing ? '刷新中' : '刷新全部项目'}
+                disabled={projectsRefreshing}
+              >
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className={['h-4 w-4', projectsRefreshing ? 'animate-spin' : ''].join(' ')}>
+                  <path
+                    d="M16 10a6 6 0 1 1-1.66-4.14"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                  <path d="M16 4.5v3.8h-3.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
 

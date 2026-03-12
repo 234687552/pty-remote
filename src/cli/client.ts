@@ -292,6 +292,13 @@ function connectSocketClient(): void {
         runtimeBackend: PTY_BACKEND_NAME
       },
       (result: CliRegisterResult) => {
+        if (!result.ok) {
+          const message = result.error || `CLI ${CLI_ID} registration was rejected`;
+          console.error(message);
+          void shutdownCliClient(message, 1);
+          return;
+        }
+
         console.log(`cli registered as ${result.cliId}`);
         void manager.replayActiveState();
       }

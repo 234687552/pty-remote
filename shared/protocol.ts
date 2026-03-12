@@ -10,7 +10,9 @@ export interface CliRegisterPayload {
 }
 
 export interface CliRegisterResult {
+  ok: boolean;
   cliId: string;
+  error?: string;
 }
 
 export interface ProjectSessionSummary {
