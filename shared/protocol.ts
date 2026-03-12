@@ -117,17 +117,20 @@ export interface CliCommandResult<TName extends CliCommandName = CliCommandName>
 }
 
 export interface TerminalChunkPayload {
+  cliId: string;
   data: string;
   offset: number;
   sessionId: string | null;
 }
 
 export interface TerminalResumeRequestPayload {
+  targetCliId: string | null;
   lastOffset: number;
   sessionId: string | null;
 }
 
 export interface TerminalResizePayload {
+  targetCliId: string | null;
   cols: number;
   rows: number;
 }
@@ -140,10 +143,12 @@ export interface TerminalResumeResultPayload {
 }
 
 export interface RuntimeSnapshotPayload {
+  cliId: string;
   snapshot: RuntimeSnapshot;
 }
 
 export interface MessagesUpsertPayload {
+  cliId: string;
   threadKey: string | null;
   sessionId: string | null;
   upserts: ChatMessage[];
@@ -152,18 +157,15 @@ export interface MessagesUpsertPayload {
 }
 
 export interface WebInitPayload {
-  cli: CliDescriptor | null;
-  snapshot: RuntimeSnapshot | null;
-  terminalReplayEndOffset: number;
-  terminalReplayStartOffset: number;
-  terminalSessionId: string | null;
+  clis: CliDescriptor[];
 }
 
 export interface CliStatusPayload {
-  cli: CliDescriptor | null;
+  clis: CliDescriptor[];
 }
 
 export interface WebCommandEnvelope<TName extends CliCommandName = CliCommandName> {
+  targetCliId: string | null;
   name: TName;
   payload: CliCommandPayloadMap[TName];
 }

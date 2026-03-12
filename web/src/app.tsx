@@ -13,6 +13,7 @@ import type {
   CliCommandResult,
   CliStatusPayload,
   GetOlderMessagesResultPayload,
+  GetRuntimeSnapshotResultPayload,
   ListProjectSessionsResultPayload,
   MessagesUpsertPayload,
   PickProjectDirectoryResultPayload,
@@ -64,6 +65,10 @@ function getRuntimeStatusLabel(status: RuntimeStatus): string {
   }
 }
 
+function isCliOfflineMessage(message: string | null | undefined): boolean {
+  return (message ?? '').trim() === 'CLI is offline';
+}
+
 function getSocketBaseUrl(): string {
   const envValue = import.meta.env.VITE_SOCKET_URL;
   if (typeof envValue === 'string' && envValue.trim()) {
@@ -106,12 +111,13 @@ interface ProjectThreadEntry {
 
 interface ProjectEntry {
   id: string;
+  cliId: string;
   cwd: string;
   label: string;
-  threads: ProjectThreadEntry[];
 }
 
 interface PersistedWorkspaceState {
+  activeCliId: string | null;
   activeProjectId: string | null;
   activeThreadId: string | null;
   projects: ProjectEntry[];
@@ -121,6 +127,7 @@ interface PersistedWorkspaceState {
 
 function createEmptyWorkspaceState(): PersistedWorkspaceState {
   return {
+    activeCliId: null,
     activeProjectId: null,
     activeThreadId: null,
     projects: [],
@@ -142,22 +149,16 @@ function loadWorkspaceState(): PersistedWorkspaceState {
     }
 
     return {
+      activeCliId: parsed.activeCliId ?? null,
       activeProjectId: parsed.activeProjectId ?? null,
       activeThreadId: parsed.activeThreadId ?? null,
       projects: parsed.projects
         .filter((project) => project && typeof project.cwd === 'string')
         .map((project) => ({
           id: project.id,
+          cliId: typeof project.cliId === 'string' ? project.cliId : '',
           cwd: project.cwd,
-          label: project.label,
-          threads: Array.isArray(project.threads)
-            ? project.threads
-                .filter((thread) => thread && typeof thread.id === 'string')
-                .map((thread) => ({
-                  ...thread,
-                  threadKey: typeof thread.threadKey === 'string' && thread.threadKey ? thread.threadKey : thread.id
-                }))
-            : []
+          label: project.label
         })),
       sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
       sidebarToggleTop: clampSidebarToggleTop(
@@ -1205,9 +1206,10 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
 
 export function App() {
   const [socketConnected, setSocketConnected] = useState(false);
-  const [cli, setCli] = useState<CliDescriptor | null>(null);
+  const [clis, setClis] = useState<CliDescriptor[]>([]);
   const [snapshot, setSnapshot] = useState<RuntimeSnapshot>(createEmptySnapshot());
   const [workspaceState, setWorkspaceState] = useState<PersistedWorkspaceState>(() => loadWorkspaceState());
+  const [projectThreadsById, setProjectThreadsById] = useState<Record<string, ProjectThreadEntry[]>>({});
   const [sidebarToggleTop, setSidebarToggleTop] = useState(() => workspaceState.sidebarToggleTop);
   const [olderMessages, setOlderMessages] = useState<ChatMessage[]>([]);
   const [hasOlderMessages, setHasOlderMessages] = useState(false);
@@ -1215,7 +1217,7 @@ export function App() {
   const [prompt, setPrompt] = useState('');
   const [error, setError] = useState('');
   const [mobilePane, setMobilePane] = useState<MobilePane>('chat');
-  const [projectLoadingCwd, setProjectLoadingCwd] = useState<string | null>(null);
+  const [projectLoadingId, setProjectLoadingId] = useState<string | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
@@ -1231,6 +1233,7 @@ export function App() {
   const terminalResumePendingRef = useRef(false);
   const terminalResyncRequestedRef = useRef(false);
   const bufferedTerminalChunksRef = useRef<TerminalChunkPayload[]>([]);
+  const activeCliIdRef = useRef<string | null>(null);
   const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const requestedThreadKeyRef = useRef<string | null>(null);
   const sidebarToggleDragRef = useRef<{ pointerId: number; startY: number; startTop: number; moved: boolean } | null>(null);
@@ -1244,12 +1247,33 @@ export function App() {
     }
 
     terminal.reset();
-    if (replay) {
-      terminal.write(replay);
+
+    const finalizeReplay = () => {
+      appliedSessionIdRef.current = sessionId;
+      appliedTerminalOffsetRef.current = replayOffset + getUtf8ByteLength(replay);
+      terminal.scrollToBottom();
+      scheduleTerminalRedraw();
+    };
+
+    if (!replay) {
+      finalizeReplay();
+      return;
     }
-    appliedSessionIdRef.current = sessionId;
-    appliedTerminalOffsetRef.current = replayOffset + getUtf8ByteLength(replay);
-    scheduleTerminalResize();
+
+    terminal.write(replay, finalizeReplay);
+  }
+
+  function scheduleTerminalRedraw(): void {
+    requestAnimationFrame(() => {
+      scheduleTerminalResize();
+      requestAnimationFrame(() => {
+        const terminal = terminalInstanceRef.current;
+        if (!terminal || terminal.rows <= 0) {
+          return;
+        }
+        terminal.refresh(0, terminal.rows - 1);
+      });
+    });
   }
 
   function emitTerminalResize(): void {
@@ -1297,7 +1321,10 @@ export function App() {
     }
 
     lastTerminalSizeRef.current = nextSize;
-    socket.emit('web:terminal-resize', nextSize satisfies TerminalResizePayload);
+    socket.emit('web:terminal-resize', {
+      targetCliId: activeCliId,
+      ...nextSize
+    } satisfies TerminalResizePayload);
   }
 
   function scheduleTerminalResize(): void {
@@ -1367,10 +1394,12 @@ export function App() {
     const payload: TerminalResumeRequestPayload =
       appliedSessionIdRef.current === targetSessionId
         ? {
+            targetCliId: activeCliId,
             sessionId: appliedSessionIdRef.current,
             lastOffset: appliedTerminalOffsetRef.current
           }
         : {
+            targetCliId: activeCliId,
             sessionId: null,
             lastOffset: 0
           };
@@ -1392,6 +1421,7 @@ export function App() {
       applyTerminalReplay(result.sessionId, result.data, result.offset);
     } else {
       applyTerminalChunk({
+        cliId: activeCliId ?? '',
         data: result.data,
         offset: result.offset,
         sessionId: result.sessionId
@@ -1420,14 +1450,27 @@ export function App() {
     () => workspaceState.projects.find((project) => project.id === workspaceState.activeProjectId) ?? null,
     [workspaceState.activeProjectId, workspaceState.projects]
   );
-  const activeThread = useMemo(
-    () => activeProject?.threads.find((thread) => thread.id === workspaceState.activeThreadId) ?? null,
-    [activeProject, workspaceState.activeThreadId]
+  const activeCliId = activeProject?.cliId ?? workspaceState.activeCliId;
+  const activeCli = useMemo(
+    () => clis.find((cli) => cli.cliId === activeCliId) ?? null,
+    [activeCliId, clis]
   );
-  const connected = Boolean(socketConnected && cli?.connected);
+  const activeProjectThreads = useMemo(
+    () => (activeProject ? projectThreadsById[activeProject.id] ?? [] : []),
+    [activeProject, projectThreadsById]
+  );
+  const activeThread = useMemo(
+    () => activeProjectThreads.find((thread) => thread.id === workspaceState.activeThreadId) ?? activeProjectThreads[0] ?? null,
+    [activeProjectThreads, workspaceState.activeThreadId]
+  );
+  const connected = Boolean(socketConnected && activeCli?.connected);
   const busy = isBusyStatus(snapshot.status);
   const canSend = connected && !busy && Boolean(activeProject && activeThread);
   const canStop = connected && busy && Boolean(activeProject && activeThread);
+
+  useEffect(() => {
+    activeCliIdRef.current = activeCliId ?? null;
+  }, [activeCliId]);
 
   useEffect(() => {
     if (!terminalHostRef.current || !terminalViewportRef.current || terminalInstanceRef.current) {
@@ -1505,20 +1548,26 @@ export function App() {
     });
 
     socket.on('web:init', (payload: WebInitPayload) => {
-      setCli(payload.cli);
-      setSnapshot(payload.snapshot ?? createEmptySnapshot());
-      void requestTerminalResume(payload.terminalSessionId ?? payload.snapshot?.sessionId ?? null);
+      setClis(payload.clis);
     });
 
     socket.on('cli:update', (payload: CliStatusPayload) => {
-      setCli(payload.cli);
+      setClis(payload.clis);
     });
 
     socket.on('runtime:snapshot', (payload: RuntimeSnapshotPayload) => {
+      if (payload.cliId !== activeCliIdRef.current) {
+        return;
+      }
+
       setSnapshot(payload.snapshot);
     });
 
     socket.on('runtime:messages-upsert', (payload: MessagesUpsertPayload) => {
+      if (payload.cliId !== activeCliIdRef.current) {
+        return;
+      }
+
       setSnapshot((current) => {
         const isSameThread = current.threadKey === payload.threadKey;
         const baseSnapshot = isSameThread
@@ -1547,6 +1596,10 @@ export function App() {
     });
 
     socket.on('terminal:chunk', (payload: TerminalChunkPayload) => {
+      if (payload.cliId !== activeCliIdRef.current) {
+        return;
+      }
+
       if (terminalResumePendingRef.current) {
         bufferedTerminalChunksRef.current.push(payload);
         return;
@@ -1648,40 +1701,61 @@ export function App() {
   }, [workspaceState]);
 
   useEffect(() => {
-    if (workspaceState.projects.length > 0 || !cli?.cwd) {
+    if (clis.length !== 1 && workspaceState.activeCliId) {
       return;
     }
 
-    const initialThread = createDraftThread(snapshot.sessionId ? `Session ${snapshot.sessionId.slice(0, 8)}` : 'New thread');
-    const initialProject: ProjectEntry = {
-      id: crypto.randomUUID(),
-      cwd: cli.cwd,
-      label: cli.label || getThreadLabel(cli.cwd),
-      threads: [
-        {
-          ...initialThread,
-          threadKey: snapshot.threadKey ?? initialThread.threadKey,
-          sessionId: snapshot.sessionId,
-          draft: !snapshot.sessionId
-        }
-      ]
-    };
+    const soleCliId = clis[0]?.cliId ?? null;
+    const hasUnassignedProjects = workspaceState.projects.some((project) => !project.cliId);
+    if (!soleCliId && !hasUnassignedProjects) {
+      return;
+    }
 
-    setWorkspaceState({
-      activeProjectId: initialProject.id,
-      activeThreadId: initialProject.threads[0]?.id ?? null,
-      projects: [initialProject],
-      sidebarCollapsed: false,
-      sidebarToggleTop: SIDEBAR_TOGGLE_MARGIN
+    patchWorkspace((current) => {
+      const nextCliId = current.activeCliId ?? soleCliId;
+      const nextProjects = current.projects.map((project) => (project.cliId ? project : { ...project, cliId: soleCliId ?? project.cliId }));
+      const changed =
+        nextCliId !== current.activeCliId ||
+        nextProjects.some((project, index) => project.cliId !== current.projects[index]?.cliId);
+      return changed ? { ...current, activeCliId: nextCliId, projects: nextProjects } : current;
     });
-  }, [cli?.cwd, cli?.label, snapshot.sessionId, snapshot.threadKey, workspaceState.projects.length]);
+  }, [clis, workspaceState.activeCliId, workspaceState.projects]);
 
   useEffect(() => {
-    if (!activeProject || !activeThread) {
+    if (activeProject && workspaceState.activeCliId !== activeProject.cliId) {
+      patchWorkspace((current) =>
+        current.activeProjectId === activeProject.id && current.activeCliId !== activeProject.cliId
+          ? { ...current, activeCliId: activeProject.cliId }
+          : current
+      );
       return;
     }
 
-    const backendMatchesProject = (cli?.cwd ?? '') === activeProject.cwd;
+    if (workspaceState.activeCliId || clis.length === 0) {
+      return;
+    }
+
+    patchWorkspace((current) => (current.activeCliId ? current : { ...current, activeCliId: clis[0]?.cliId ?? null }));
+  }, [activeProject, clis, workspaceState.activeCliId]);
+
+  useEffect(() => {
+    if (!activeProject || activeProjectThreads.length === 0 || activeThread) {
+      return;
+    }
+
+    patchWorkspace((current) =>
+      current.activeProjectId === activeProject.id && current.activeThreadId !== activeProjectThreads[0]?.id
+        ? { ...current, activeThreadId: activeProjectThreads[0]?.id ?? null }
+        : current
+    );
+  }, [activeProject, activeProjectThreads, activeThread]);
+
+  useEffect(() => {
+    if (!activeProject || !activeThread || !activeCli) {
+      return;
+    }
+
+    const backendMatchesProject = activeCli.cwd === activeProject.cwd;
     const canHydrateFromSnapshot = backendMatchesProject && snapshot.threadKey === activeThread.threadKey;
 
     if (!canHydrateFromSnapshot) {
@@ -1697,112 +1771,169 @@ export function App() {
     const nextSessionId = snapshot.sessionId;
     const nextUpdatedAt = visibleMessages.length > 0 ? visibleMessages[visibleMessages.length - 1]?.createdAt ?? activeThread.updatedAt : activeThread.updatedAt;
 
-    patchWorkspace((current) => {
+    setProjectThreadsById((current) => {
+      const threads = current[activeProject.id] ?? [];
       let changed = false;
-
-      const projects = current.projects.map((project) => {
-        if (project.id !== activeProject.id) {
-          return project;
+      const nextThreads = threads.map((thread) => {
+        if (thread.id !== activeThread.id) {
+          return thread;
         }
 
-        const threads = project.threads.map((thread) => {
-          if (thread.id !== activeThread.id) {
-            return thread;
-          }
+        const shouldUpdate =
+          thread.sessionId !== nextSessionId ||
+          thread.title !== nextTitle ||
+          thread.preview !== nextPreview ||
+          thread.updatedAt !== nextUpdatedAt ||
+          thread.messageCount !== nextMessageCount ||
+          thread.draft !== !nextSessionId;
 
-          const shouldUpdate =
-            thread.sessionId !== nextSessionId ||
-            thread.title !== nextTitle ||
-            thread.preview !== nextPreview ||
-            thread.updatedAt !== nextUpdatedAt ||
-            thread.messageCount !== nextMessageCount ||
-            thread.draft !== !nextSessionId;
+        if (!shouldUpdate) {
+          return thread;
+        }
 
-          if (!shouldUpdate) {
-            return thread;
-          }
-
-          changed = true;
-          return {
-            ...thread,
-            sessionId: nextSessionId,
-            title: nextTitle,
-            preview: nextPreview,
-            updatedAt: nextUpdatedAt,
-            messageCount: nextMessageCount,
-            draft: !nextSessionId
-          };
-        });
-
-        return changed ? { ...project, threads: sortThreads(threads) } : project;
+        changed = true;
+        return {
+          ...thread,
+          sessionId: nextSessionId,
+          title: nextTitle,
+          preview: nextPreview,
+          updatedAt: nextUpdatedAt,
+          messageCount: nextMessageCount,
+          draft: !nextSessionId
+        };
       });
 
-      if (!changed) {
-        return current;
-      }
-
-      return {
-        ...current,
-        projects
-      };
+      return changed ? { ...current, [activeProject.id]: sortThreads(nextThreads) } : current;
     });
-  }, [activeProject, activeThread, cli?.cwd, snapshot.sessionId, snapshot.threadKey, visibleMessages]);
+  }, [activeCli, activeProject, activeThread, snapshot.sessionId, snapshot.threadKey, visibleMessages]);
 
   useEffect(() => {
-    if (!socketConnected || !cli?.connected || !activeProject || !activeThread) {
+    if (!socketConnected || !activeCliId) {
+      setSnapshot(createEmptySnapshot());
+      applyTerminalReplay(null, '', 0);
+      return;
+    }
+
+    terminalResumePendingRef.current = true;
+    bufferedTerminalChunksRef.current = [];
+    setSnapshot(createEmptySnapshot());
+    setOlderMessages([]);
+    setHasOlderMessages(false);
+    setOlderMessagesLoading(false);
+
+    void sendCommand('get-runtime-snapshot', {}, activeCliId)
+      .then((result) => {
+        const nextSnapshot = (result.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
+        setSnapshot(nextSnapshot);
+        void requestTerminalResume(nextSnapshot.sessionId);
+      })
+      .catch((runtimeError) => {
+        terminalResumePendingRef.current = false;
+        applyTerminalReplay(null, '', 0);
+        setError(runtimeError instanceof Error ? runtimeError.message : '加载 CLI 运行态失败');
+      });
+  }, [activeCliId, socketConnected]);
+
+  useEffect(() => {
+    if (!socketConnected) {
+      return;
+    }
+
+    const nextProjectToLoad = workspaceState.projects.find(
+      (project) => project.cliId && !projectThreadsById[project.id] && projectLoadingId !== project.id
+    );
+    if (!nextProjectToLoad) {
+      return;
+    }
+
+    void refreshProjectThreads(nextProjectToLoad);
+  }, [projectLoadingId, projectThreadsById, socketConnected, workspaceState.projects]);
+
+  useEffect(() => {
+    if (!socketConnected || !activeCli?.connected || !activeProject || !activeThread) {
       return;
     }
 
     const threadKey = activeThread.threadKey;
-    const backendMatchesProject = (cli.cwd ?? '') === activeProject.cwd;
-    const backendMatchesThread = (snapshot.threadKey ?? cli.threadKey ?? null) === threadKey;
+    const requestKey = `${activeProject.cliId}:${threadKey}:${activeThread.sessionId ?? 'draft'}`;
+    const backendMatchesProject = activeCli.cwd === activeProject.cwd;
+    const backendMatchesThread = (snapshot.threadKey ?? activeCli.threadKey ?? null) === threadKey;
 
     if (backendMatchesProject && backendMatchesThread) {
-      requestedThreadKeyRef.current = threadKey;
+      requestedThreadKeyRef.current = requestKey;
       return;
     }
 
-    if (requestedThreadKeyRef.current === threadKey) {
+    if (requestedThreadKeyRef.current === requestKey) {
       return;
     }
 
-    requestedThreadKeyRef.current = threadKey;
+    requestedThreadKeyRef.current = requestKey;
     void activateThread(activeProject, activeThread);
-  }, [activeProject, activeThread, cli?.connected, cli?.cwd, cli?.threadKey, snapshot.threadKey, socketConnected]);
+  }, [activeCli, activeProject, activeThread, snapshot.threadKey, socketConnected]);
 
   const headerText = useMemo(() => {
     if (!socketConnected) {
       return 'waiting for socket';
     }
-    if (!cli?.connected) {
+    if (!activeCli?.connected) {
       return 'waiting for cli';
     }
     return getRuntimeStatusLabel(snapshot.status);
-  }, [cli?.connected, snapshot.status, socketConnected]);
+  }, [activeCli?.connected, snapshot.status, socketConnected]);
+
+  const statusBadgeClassName = useMemo(() => {
+    if (!socketConnected || !activeCli?.connected || snapshot.status === 'error') {
+      return 'bg-red-100 text-red-700';
+    }
+    if (busy) {
+      return 'bg-zinc-900 text-white';
+    }
+    return 'bg-white/85 text-zinc-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]';
+  }, [activeCli?.connected, busy, snapshot.status, socketConnected]);
+
+  const footerErrorText = useMemo(() => {
+    if (error && !isCliOfflineMessage(error)) {
+      return error;
+    }
+    if (snapshot.lastError && !isCliOfflineMessage(snapshot.lastError)) {
+      return snapshot.lastError;
+    }
+    return '';
+  }, [error, snapshot.lastError]);
 
   const headerSummary = useMemo(
     () => [
-      `项目 ${compactPreview(activeProject?.label ?? cli?.label ?? 'Workspace', 28)}`,
-      `目录 ${compactPreview(activeProject?.cwd ?? cli?.cwd ?? '-', 56)}`,
+      `CLI ${compactPreview(activeCli?.label ?? 'unselected', 28)}`,
+      `项目 ${compactPreview(activeProject?.label ?? activeCli?.label ?? 'Workspace', 28)}`,
+      `目录 ${compactPreview(activeProject?.cwd ?? activeCli?.cwd ?? '-', 56)}`,
       `线程 ${compactPreview(activeThread?.title ?? '-', 36)}`,
       `会话 ${compactPreview(activeThread?.sessionId ?? snapshot.sessionId ?? '-', 24)}`
     ],
-    [activeProject?.cwd, activeProject?.label, activeThread?.sessionId, activeThread?.title, cli?.cwd, cli?.label, snapshot.sessionId]
+    [activeCli?.cwd, activeCli?.label, activeProject?.cwd, activeProject?.label, activeThread?.sessionId, activeThread?.title, snapshot.sessionId]
   );
 
   async function sendCommand<TName extends CliCommandName>(
     name: TName,
-    payload: CliCommandPayloadMap[TName]
+    payload: CliCommandPayloadMap[TName],
+    targetCliId = activeCliId
   ): Promise<CliCommandResult<TName>> {
     const socket = socketRef.current;
     if (!socket?.connected) {
       throw new Error('Socket is not connected');
     }
+    if (!targetCliId) {
+      throw new Error('CLI is not selected');
+    }
 
     const result = await new Promise<CliCommandResult<TName>>((resolve) => {
-      socket.emit('web:command', { name, payload } satisfies WebCommandEnvelope<TName>, (ack?: CliCommandResult<TName>) => {
-        resolve(ack ?? { ok: false, error: 'No response from server' });
-      });
+      socket.emit(
+        'web:command',
+        { targetCliId, name, payload } satisfies WebCommandEnvelope<TName>,
+        (ack?: CliCommandResult<TName>) => {
+          resolve(ack ?? { ok: false, error: 'No response from server' });
+        }
+      );
     });
 
     if (!result.ok) {
@@ -1814,6 +1945,13 @@ export function App() {
 
   function patchWorkspace(updater: (current: PersistedWorkspaceState) => PersistedWorkspaceState): void {
     setWorkspaceState((current) => updater(current));
+  }
+
+  function setProjectThreads(projectId: string, updater: (threads: ProjectThreadEntry[]) => ProjectThreadEntry[]): void {
+    setProjectThreadsById((current) => ({
+      ...current,
+      [projectId]: updater(current[projectId] ?? [])
+    }));
   }
 
   function setQuestionMessageRef(messageId: string, node: HTMLDivElement | null): void {
@@ -1899,6 +2037,20 @@ export function App() {
     handleJumpToMessagesEdge(direction);
   }
 
+  function handleTerminalJumpToEdge(direction: QuestionJumpDirection): void {
+    const terminal = terminalInstanceRef.current;
+    if (!terminal) {
+      return;
+    }
+
+    if (direction === 'up') {
+      terminal.scrollToTop();
+      return;
+    }
+
+    terminal.scrollToBottom();
+  }
+
   function handleOpenSidebarButtonClick(event: React.MouseEvent<HTMLButtonElement>): void {
     if (suppressSidebarToggleClickRef.current) {
       suppressSidebarToggleClickRef.current = false;
@@ -1953,42 +2105,43 @@ export function App() {
     sidebarToggleDragRef.current = null;
   }
 
-  async function refreshProjectThreads(cwd: string, projectId?: string): Promise<ListProjectSessionsResultPayload> {
-    setProjectLoadingCwd(cwd);
+  async function refreshProjectThreads(project: ProjectEntry): Promise<ListProjectSessionsResultPayload> {
+    setProjectLoadingId(project.id);
 
     try {
-      const result = await sendCommand('list-project-sessions', { cwd, maxSessions: 16 });
+      const result = await sendCommand('list-project-sessions', { cwd: project.cwd, maxSessions: 16 }, project.cliId);
       const payload = result.payload as ListProjectSessionsResultPayload | undefined;
       const normalizedPayload = payload ?? {
-        cwd,
-        label: cwd,
+        cwd: project.cwd,
+        label: project.label,
         sessions: []
       };
 
       patchWorkspace((current) => ({
         ...current,
-        projects: current.projects.map((project) =>
-          project.cwd !== cwd && project.id !== projectId
-            ? project
+        projects: current.projects.map((entry) =>
+          entry.id !== project.id
+            ? entry
             : {
-                ...project,
+                ...entry,
                 cwd: normalizedPayload.cwd,
-                label: normalizedPayload.label,
-                threads: mergeProjectThreads(project.threads, normalizedPayload.sessions)
+                label: normalizedPayload.label
               }
         )
       }));
 
+      setProjectThreads(project.id, (threads) => mergeProjectThreads(threads, normalizedPayload.sessions));
+
       return normalizedPayload;
     } finally {
-      setProjectLoadingCwd((current) => (current === cwd ? null : current));
+      setProjectLoadingId((current) => (current === project.id ? null : current));
     }
   }
 
   async function activateThread(project: ProjectEntry, thread: ProjectThreadEntry): Promise<void> {
     try {
       setError('');
-      requestedThreadKeyRef.current = `${project.id}:${thread.id}:${thread.sessionId ?? 'draft'}`;
+      requestedThreadKeyRef.current = `${project.cliId}:${thread.threadKey}:${thread.sessionId ?? 'draft'}`;
       if (thread.sessionId === null) {
         setSnapshot(createEmptySnapshot());
         setOlderMessages([]);
@@ -1996,15 +2149,20 @@ export function App() {
       }
       patchWorkspace((current) => ({
         ...current,
+        activeCliId: project.cliId,
         activeProjectId: project.id,
         activeThreadId: thread.id
       }));
 
-      await sendCommand('select-thread', {
-        cwd: project.cwd,
-        threadKey: thread.threadKey,
-        sessionId: thread.sessionId
-      });
+      await sendCommand(
+        'select-thread',
+        {
+          cwd: project.cwd,
+          threadKey: thread.threadKey,
+          sessionId: thread.sessionId
+        },
+        project.cliId
+      );
       setMobilePane('chat');
     } catch (activateError) {
       requestedThreadKeyRef.current = null;
@@ -2015,7 +2173,12 @@ export function App() {
   async function handleAddProject() {
     try {
       setError('');
-      const result = await sendCommand('pick-project-directory', {});
+      const targetCliId = activeCliId ?? clis[0]?.cliId ?? null;
+      if (!targetCliId) {
+        throw new Error('请先选择一个在线 CLI');
+      }
+
+      const result = await sendCommand('pick-project-directory', {}, targetCliId);
       const payload = result.payload as PickProjectDirectoryResultPayload | undefined;
       if (!payload?.cwd) {
         return;
@@ -2023,42 +2186,41 @@ export function App() {
 
       let selectedProject: ProjectEntry = {
         id: crypto.randomUUID(),
+        cliId: targetCliId,
         cwd: payload.cwd,
-        label: payload.label,
-        threads: [createDraftThread()]
+        label: payload.label
       };
 
       patchWorkspace((current) => {
-        const existingProject = current.projects.find((project) => project.cwd === payload.cwd);
+        const existingProject = current.projects.find((project) => project.cliId === targetCliId && project.cwd === payload.cwd);
         if (existingProject) {
           selectedProject = existingProject;
           return {
             ...current,
+            activeCliId: existingProject.cliId,
             activeProjectId: existingProject.id,
-            activeThreadId: existingProject.threads[0]?.id ?? current.activeThreadId
+            activeThreadId: current.activeThreadId
           };
         }
 
         return {
           ...current,
+          activeCliId: targetCliId,
           activeProjectId: selectedProject.id,
-          activeThreadId: selectedProject.threads[0]?.id ?? null,
+          activeThreadId: null,
           projects: sortProjects([...current.projects, selectedProject])
         };
       });
 
-      const history = await refreshProjectThreads(payload.cwd, selectedProject.id);
-      const nextThreads = mergeProjectThreads(selectedProject.threads, history.sessions);
-      const nextProject = {
-        ...selectedProject,
-        cwd: history.cwd,
-        label: history.label,
-        threads: nextThreads
-      };
-      const nextThread = nextThreads.find((thread) => thread.sessionId === history.sessions[0]?.sessionId) ?? nextThreads[0];
+      const history = await refreshProjectThreads(selectedProject);
+      const draftThread = createDraftThread();
+      const nextThreads = mergeProjectThreads(projectThreadsById[selectedProject.id] ?? [], history.sessions);
+      const resolvedThreads = nextThreads.length > 0 ? nextThreads : [draftThread];
+      const nextThread = resolvedThreads.find((thread) => thread.sessionId === history.sessions[0]?.sessionId) ?? resolvedThreads[0];
+      setProjectThreads(selectedProject.id, () => resolvedThreads);
 
       if (nextThread) {
-        await activateThread(nextProject, nextThread);
+        await activateThread(selectedProject, nextThread);
       }
     } catch (addProjectError) {
       setError(addProjectError instanceof Error ? addProjectError.message : '添加项目失败');
@@ -2068,8 +2230,8 @@ export function App() {
   async function handleRefreshProject(project: ProjectEntry): Promise<void> {
     try {
       setError('');
-      const history = await refreshProjectThreads(project.cwd, project.id);
-      const nextThreads = mergeProjectThreads(project.threads, history.sessions);
+      const history = await refreshProjectThreads(project);
+      const nextThreads = mergeProjectThreads(projectThreadsById[project.id] ?? [], history.sessions);
       const activeCandidate =
         nextThreads.find((thread) => thread.id === workspaceState.activeThreadId) ??
         nextThreads.find((thread) => thread.sessionId === history.sessions[0]?.sessionId) ??
@@ -2077,6 +2239,7 @@ export function App() {
 
       patchWorkspace((current) => ({
         ...current,
+        activeCliId: project.cliId,
         activeProjectId: project.id,
         activeThreadId: activeCandidate?.id ?? current.activeThreadId
       }));
@@ -2086,24 +2249,13 @@ export function App() {
   }
 
   function handleCreateThread(projectId: string): void {
-    let nextProject: ProjectEntry | null = null;
-    let nextThread: ProjectThreadEntry | null = null;
-
+    const nextProject = workspaceState.projects.find((project) => project.id === projectId) ?? null;
+    const nextThread = createDraftThread();
+    setProjectThreads(projectId, (threads) => sortThreads([nextThread, ...threads]));
     patchWorkspace((current) => ({
       ...current,
+      activeCliId: nextProject?.cliId ?? current.activeCliId,
       activeProjectId: projectId,
-      projects: current.projects.map((project) => {
-        if (project.id !== projectId) {
-          return project;
-        }
-
-        nextThread = createDraftThread();
-        nextProject = {
-          ...project,
-          threads: sortThreads([nextThread, ...project.threads])
-        };
-        return nextProject;
-      }),
       activeThreadId: nextThread?.id ?? current.activeThreadId
     }));
 
@@ -2181,7 +2333,7 @@ export function App() {
   }
 
   return (
-    <div className="h-dvh overflow-hidden bg-zinc-100 text-zinc-900">
+    <div className="h-dvh overflow-hidden bg-white text-zinc-900 lg:bg-zinc-100">
       <button
         type="button"
         onClick={handleOpenSidebarButtonClick}
@@ -2224,32 +2376,7 @@ export function App() {
             workspaceState.sidebarCollapsed ? '-translate-x-full' : 'translate-x-0'
           ].join(' ')}
         >
-          <div className="flex items-center justify-between gap-2 border-b border-zinc-200 px-4 py-4">
-            <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.22em] text-zinc-400">Workspace</div>
-              <div className="mt-1 text-lg font-semibold text-zinc-950">Projects</div>
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => patchWorkspace((current) => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed }))}
-                className="rounded-xl border border-zinc-300 px-3 py-2 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50"
-              >
-                收起
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void handleAddProject();
-                }}
-                className="rounded-xl bg-zinc-900 px-3 py-2 text-xs font-medium text-white transition hover:bg-zinc-700"
-              >
-                添加
-              </button>
-            </div>
-          </div>
-
-          <div className="flex-1 space-y-3 overflow-auto p-3">
+          <div className="flex-1 space-y-2.5 overflow-auto p-2.5 pt-3">
             {workspaceState.projects.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
                 先添加一个项目目录，再在目录下切换历史 thread 或创建新 thread。
@@ -2257,13 +2384,15 @@ export function App() {
             ) : (
               workspaceState.projects.map((project) => {
                 const isActiveProject = project.id === workspaceState.activeProjectId;
-                const isLoading = projectLoadingCwd === project.cwd;
+                const isLoading = projectLoadingId === project.id;
+                const projectThreads = projectThreadsById[project.id] ?? [];
+                const projectCli = clis.find((entry) => entry.cliId === project.cliId) ?? null;
                 return (
                   <section
                     key={project.id}
                     className={[
-                      'rounded-2xl border p-3 transition',
-                      isActiveProject ? 'border-zinc-900 bg-zinc-950 text-white' : 'border-zinc-200 bg-zinc-50'
+                      'rounded-2xl border px-2.5 py-2.5 transition',
+                      isActiveProject ? 'border-zinc-900 bg-zinc-950 text-white shadow-[0_10px_24px_rgba(0,0,0,0.12)]' : 'border-zinc-200 bg-transparent'
                     ].join(' ')}
                   >
                     <div className="flex items-start justify-between gap-2">
@@ -2272,14 +2401,18 @@ export function App() {
                         onClick={() =>
                           patchWorkspace((current) => ({
                             ...current,
+                            activeCliId: project.cliId,
                             activeProjectId: project.id,
-                            activeThreadId: project.threads[0]?.id ?? current.activeThreadId
+                            activeThreadId: projectThreads[0]?.id ?? current.activeThreadId
                           }))
                         }
                         className="min-w-0 text-left"
                       >
-                        <div className="truncate text-sm font-semibold">{project.label}</div>
-                        <div className={['mt-1 text-xs', isActiveProject ? 'text-zinc-300' : 'text-zinc-500'].join(' ')}>{project.cwd}</div>
+                        <div className="truncate text-[13px] font-semibold">{project.label}</div>
+                        <div className={['mt-0.5 line-clamp-1 text-[11px]', isActiveProject ? 'text-zinc-300' : 'text-zinc-500'].join(' ')}>{project.cwd}</div>
+                        <div className={['mt-0.5 text-[10px]', isActiveProject ? 'text-zinc-400' : 'text-zinc-500'].join(' ')}>
+                          {projectCli?.label ?? project.cliId}
+                        </div>
                       </button>
                       <div className="flex items-center gap-1">
                         <button
@@ -2288,33 +2421,54 @@ export function App() {
                             void handleRefreshProject(project);
                           }}
                           className={[
-                            'rounded-lg px-2 py-1 text-xs font-medium transition',
-                            isActiveProject ? 'bg-white/10 text-white hover:bg-white/15' : 'bg-white text-zinc-700 hover:bg-zinc-100'
+                            'flex h-8 w-8 items-center justify-center rounded-lg border transition',
+                            isActiveProject ? 'border-white/10 text-white hover:bg-white/10' : 'border-zinc-200 text-zinc-700 hover:bg-zinc-100'
                           ].join(' ')}
                           disabled={isLoading}
+                          aria-label={isLoading ? '刷新中' : '刷新项目'}
+                          title={isLoading ? '刷新中' : '刷新项目'}
                         >
-                          {isLoading ? '刷新中' : '刷新'}
+                          <svg
+                            viewBox="0 0 20 20"
+                            fill="none"
+                            aria-hidden="true"
+                            className={['h-4 w-4', isLoading ? 'animate-spin' : ''].join(' ')}
+                          >
+                            <path
+                              d="M16 10a6 6 0 1 1-1.66-4.14"
+                              stroke="currentColor"
+                              strokeWidth="1.8"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                            />
+                            <path d="M16 4.5v3.8h-3.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
                         </button>
                         <button
                           type="button"
                           onClick={() => handleCreateThread(project.id)}
                           className={[
-                            'rounded-lg px-2 py-1 text-xs font-medium transition',
-                            isActiveProject ? 'bg-sky-300 text-zinc-950 hover:bg-sky-200' : 'bg-zinc-900 text-white hover:bg-zinc-700'
+                            'flex h-8 w-8 items-center justify-center rounded-lg border transition',
+                            isActiveProject ? 'border-sky-200 bg-sky-300 text-zinc-950 hover:bg-sky-200' : 'border-zinc-900 bg-zinc-900 text-white hover:bg-zinc-700'
                           ].join(' ')}
+                          aria-label="新线程"
+                          title="新线程"
                         >
-                          新线程
+                          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                            <path d="M10 4v12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                            <path d="M4 10h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                          </svg>
                         </button>
                       </div>
                     </div>
 
-                    <div className="mt-3 space-y-2">
-                      {project.threads.length === 0 ? (
-                        <div className={['rounded-xl border px-3 py-2 text-xs', isActiveProject ? 'border-white/10 text-zinc-300' : 'border-zinc-200 text-zinc-500'].join(' ')}>
+                    <div className="mt-2 space-y-1">
+                      {projectThreads.length === 0 ? (
+                        <div className={['rounded-xl border px-2.5 py-2 text-[11px]', isActiveProject ? 'border-white/10 text-zinc-300' : 'border-zinc-200 text-zinc-500'].join(' ')}>
                           这个 project 还没有可用 thread。
                         </div>
                       ) : (
-                        project.threads.map((thread) => {
+                        projectThreads.map((thread) => {
                           const isActiveThread = isActiveProject && thread.id === workspaceState.activeThreadId;
                           return (
                             <button
@@ -2324,22 +2478,24 @@ export function App() {
                                 void activateThread(project, thread);
                               }}
                               className={[
-                                'block w-full rounded-xl border px-3 py-2 text-left transition',
+                                'block w-full rounded-xl border px-2.5 py-2 text-left transition',
                                 isActiveThread
-                                  ? 'border-sky-300 bg-sky-200 text-zinc-950'
+                                  ? isActiveProject
+                                    ? 'border-white/10 bg-white/10 text-white'
+                                    : 'border-sky-200 bg-sky-100 text-zinc-950'
                                   : isActiveProject
-                                    ? 'border-white/10 bg-white/5 text-white hover:bg-white/10'
-                                    : 'border-zinc-200 bg-white text-zinc-800 hover:bg-zinc-100'
+                                    ? 'border-transparent bg-transparent text-white hover:bg-white/6'
+                                    : 'border-transparent bg-transparent text-zinc-800 hover:bg-zinc-100'
                               ].join(' ')}
                             >
                               <div className="flex items-center justify-between gap-2">
-                                <span className="truncate text-sm font-medium">{thread.title}</span>
-                                <span className="shrink-0 text-[10px] uppercase tracking-[0.2em] opacity-70">{thread.draft ? 'draft' : 'resume'}</span>
+                                <span className="truncate text-[13px] font-medium">{thread.title}</span>
+                                <span className="shrink-0 text-[9px] uppercase tracking-[0.18em] opacity-70">{thread.draft ? 'draft' : 'resume'}</span>
                               </div>
-                              <div className={['mt-1 line-clamp-2 text-xs', isActiveThread ? 'text-zinc-800' : isActiveProject ? 'text-zinc-300' : 'text-zinc-500'].join(' ')}>
+                              <div className={['mt-0.5 line-clamp-1 text-[11px]', isActiveThread ? (isActiveProject ? 'text-zinc-100' : 'text-zinc-700') : isActiveProject ? 'text-zinc-300' : 'text-zinc-500'].join(' ')}>
                                 {thread.preview}
                               </div>
-                              <div className={['mt-2 text-[11px]', isActiveThread ? 'text-zinc-700' : isActiveProject ? 'text-zinc-400' : 'text-zinc-500'].join(' ')}>
+                              <div className={['mt-1 text-[10px]', isActiveThread ? (isActiveProject ? 'text-zinc-300' : 'text-zinc-700') : isActiveProject ? 'text-zinc-400' : 'text-zinc-500'].join(' ')}>
                                 {thread.sessionId ? thread.sessionId.slice(0, 8) : 'new'} · {new Date(thread.updatedAt).toLocaleString()}
                               </div>
                             </button>
@@ -2352,13 +2508,68 @@ export function App() {
               })
             )}
           </div>
+
+          <div className="border-t border-zinc-200 bg-white/95 px-3 py-3 backdrop-blur-sm">
+            <div className="flex items-center gap-2">
+              <select
+                value={workspaceState.activeCliId ?? ''}
+                onChange={(event) =>
+                  patchWorkspace((current) => ({
+                    ...current,
+                    activeCliId: event.target.value || null,
+                    activeProjectId:
+                      current.activeProjectId &&
+                      current.projects.find((project) => project.id === current.activeProjectId)?.cliId === (event.target.value || null)
+                        ? current.activeProjectId
+                        : current.projects.find((project) => project.cliId === (event.target.value || null))?.id ?? null,
+                    activeThreadId: null
+                  }))
+                }
+                className="min-w-0 flex-1 rounded-xl border border-zinc-300 bg-white px-3 py-2 text-xs font-medium text-zinc-700"
+              >
+                <option value="">选择 CLI</option>
+                {clis.map((entry) => (
+                  <option key={entry.cliId} value={entry.cliId}>
+                    {entry.label}
+                  </option>
+                ))}
+              </select>
+
+              <button
+                type="button"
+                onClick={() => {
+                  void handleAddProject();
+                }}
+                className="flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-900 text-white transition hover:bg-zinc-700"
+                aria-label="添加项目"
+                title="添加项目"
+              >
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                  <path d="M10 4v12M4 10h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => patchWorkspace((current) => ({ ...current, sidebarCollapsed: !current.sidebarCollapsed }))}
+                className="flex h-10 w-10 items-center justify-center rounded-xl border border-zinc-300 text-zinc-700 transition hover:bg-zinc-50"
+                aria-label="收起边栏"
+                title="收起边栏"
+              >
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                  <rect x="3" y="4" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" />
+                  <path d="M8 4v12M12.5 7.5l-2 2.5 2 2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>
+          </div>
         </aside>
       </div>
 
-      <div className="mx-auto flex h-full max-w-[1600px] flex-col gap-4 overflow-hidden p-4 md:p-6">
+      <div className="mx-auto flex h-full max-w-[1600px] flex-col gap-3 overflow-hidden px-0 pt-3 pb-0 md:gap-4 md:p-6">
         <main className="flex min-h-0 flex-1 flex-col gap-0">
-          <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
-            <header className="rounded-3xl border border-zinc-200 bg-white px-4 py-3 shadow-sm">
+          <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-0 md:gap-4 md:pr-1">
+            <header className="mx-4 rounded-3xl border border-zinc-200 bg-white px-4 py-3 shadow-sm lg:mx-0">
               <div className="flex items-center gap-3 overflow-x-auto whitespace-nowrap text-sm text-zinc-600 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
                 <span className="text-base font-semibold text-zinc-900">pty-remote</span>
                 {headerSummary.map((item) => (
@@ -2370,7 +2581,7 @@ export function App() {
               </div>
             </header>
 
-            <nav className="rounded-2xl border border-zinc-200 bg-white p-1 shadow-sm lg:hidden" aria-label="Mobile panels">
+            <nav className="mx-4 rounded-2xl border border-zinc-200 bg-white p-1 shadow-sm lg:hidden" aria-label="Mobile panels">
               <div className="grid grid-cols-2 gap-1">
                 {(
                   [
@@ -2394,19 +2605,18 @@ export function App() {
               </div>
             </nav>
 
-            <section className="min-h-0 flex flex-1 flex-col gap-4 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+            <section className="min-h-0 flex flex-1 flex-col gap-0 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] lg:gap-4">
               <div
                 className={[
                   'min-h-0 min-w-0 flex-1 flex-col',
                   mobilePane === 'chat' ? 'flex' : 'hidden lg:flex'
                 ].join(' ')}
               >
-                <div className="relative flex min-h-[22rem] min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:min-h-[28rem]">
-                  <div className="border-b border-zinc-200 px-4 py-3">
+                <div className="relative flex min-h-[22rem] min-w-0 flex-1 flex-col overflow-hidden bg-transparent sm:min-h-[24rem] lg:min-h-[28rem] lg:rounded-3xl lg:border lg:border-zinc-200 lg:bg-white lg:shadow-sm">
+                  <div className="hidden px-3 py-3 sm:px-4 lg:block lg:border-b lg:border-zinc-200">
                     <div className="flex items-center justify-between gap-3">
                       <div>
                         <h2 className="text-lg font-semibold">Messages</h2>
-                        <p className="text-xs text-zinc-500">当前 thread 的最近消息实时同步，旧消息按需补拉。</p>
                       </div>
                       {hasOlderMessages ? (
                         <button
@@ -2422,12 +2632,22 @@ export function App() {
                       ) : null}
                     </div>
                   </div>
-                  <div ref={messagesRef} className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-4 py-4">
-                    {renderableMessages.length === 0 ? (
-                      <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
-                        {activeThread?.draft ? '这是一个新 thread，发送第一条消息后会创建 Claude session。' : '等待这个 thread 的 Claude jsonl 写入会话内容。'}
-                      </div>
-                    ) : (
+                  {hasOlderMessages ? (
+                    <div className="px-1 pb-2 lg:hidden">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void handleLoadOlderMessages();
+                        }}
+                        className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={!connected || olderMessagesLoading}
+                      >
+                        {olderMessagesLoading ? '加载中...' : '加载更早消息'}
+                      </button>
+                    </div>
+                  ) : null}
+                  <div ref={messagesRef} className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-1 py-4 sm:px-3 lg:px-4">
+                    {renderableMessages.length === 0 ? null : (
                       renderableMessages.map((message) => (
                         <div
                           key={message.id}
@@ -2477,27 +2697,54 @@ export function App() {
 
               <div
                 className={[
-                  'flex min-h-[22rem] min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:min-h-[28rem]',
+                  'relative flex min-h-[22rem] min-w-0 flex-1 flex-col overflow-hidden bg-transparent sm:min-h-[24rem] lg:min-h-[28rem] lg:rounded-3xl lg:border lg:border-zinc-200 lg:bg-white lg:shadow-sm',
                   mobilePane === 'terminal' ? 'flex' : 'hidden lg:flex'
                 ].join(' ')}
               >
-                <div className="border-b border-zinc-200 px-4 py-3">
+                <div className="hidden px-3 py-3 sm:px-4 lg:block lg:border-b lg:border-zinc-200">
                   <h2 className="text-lg font-semibold">Terminal</h2>
                 </div>
-                <div className="terminal-shell min-w-0 flex-1 overflow-hidden rounded-b-3xl bg-white p-2 sm:p-3">
+                <div className="terminal-shell min-w-0 flex-1 overflow-hidden bg-transparent p-0 sm:p-2 lg:rounded-b-3xl lg:bg-white lg:p-3">
                   <div ref={terminalViewportRef} className="h-full overflow-x-auto overflow-y-hidden overscroll-x-contain touch-pan-x">
-                    <div ref={terminalHostRef} className="h-full min-w-full overflow-hidden bg-white" />
+                    <div ref={terminalHostRef} className="h-full min-w-full overflow-hidden bg-transparent lg:bg-white" />
+                  </div>
+                </div>
+
+                <div className="pointer-events-none absolute right-4 bottom-4 z-10">
+                  <div className="pointer-events-auto flex flex-col overflow-hidden rounded-2xl border border-zinc-200/80 bg-white/65 shadow-[0_10px_24px_rgba(0,0,0,0.08)] backdrop-blur-sm">
+                    <button
+                      type="button"
+                      onClick={() => handleTerminalJumpToEdge('up')}
+                      className="flex h-10 w-10 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900"
+                      aria-label="终端直达顶部"
+                      title="终端直达顶部"
+                    >
+                      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                        <path d="M5 12l5-5 5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
+                    <div className="h-px bg-zinc-200/80" />
+                    <button
+                      type="button"
+                      onClick={() => handleTerminalJumpToEdge('down')}
+                      className="flex h-10 w-10 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900"
+                      aria-label="终端直达底部"
+                      title="终端直达底部"
+                    >
+                      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                        <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </button>
                   </div>
                 </div>
               </div>
             </section>
           </div>
 
-          <form onSubmit={handleSubmit} className="shrink-0 -mx-4 -mb-4 px-2 py-2 md:-mx-6 md:-mb-6 md:px-3">
-            <div className="mb-1.5 flex flex-wrap gap-2 px-1 text-xs font-medium">
+          <form onSubmit={handleSubmit} className="shrink-0 px-1 py-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] md:-mx-6 md:-mb-6 md:px-3 md:py-2 md:pb-2">
+            <div className="mb-1.5 flex flex-wrap gap-2 text-xs font-medium">
               <span className="rounded-full bg-zinc-900 px-3 py-1 text-white">socket: {socketConnected ? 'online' : 'offline'}</span>
-              <span className="rounded-full bg-white/85 px-3 py-1 text-zinc-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">cli: {cli?.connected ? 'online' : 'offline'}</span>
-              <span className="rounded-full bg-white/85 px-3 py-1 text-zinc-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">status: {headerText}</span>
+              <span className={['rounded-full px-3 py-1', statusBadgeClassName].join(' ')}>status: {headerText}</span>
             </div>
 
             <div className="relative">
@@ -2553,7 +2800,7 @@ export function App() {
                   /
                 </button>
               </div>
-              <div className="text-sm text-red-600 sm:text-right">{error || snapshot.lastError || ''}</div>
+              <div className="text-sm text-red-600 sm:text-right">{footerErrorText}</div>
             </div>
           </form>
         </main>

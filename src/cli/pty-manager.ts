@@ -53,9 +53,9 @@ export interface PtyManagerOptions {
 }
 
 interface PtyManagerCallbacks {
-  emitMessagesUpsert(payload: MessagesUpsertPayload): void;
+  emitMessagesUpsert(payload: Omit<MessagesUpsertPayload, 'cliId'>): void;
   emitSnapshot(snapshot: RuntimeSnapshot): void;
-  emitTerminalChunk(payload: TerminalChunkPayload): void;
+  emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId'>): void;
 }
 
 export interface PtyManagerSelection {
@@ -187,8 +187,8 @@ export class PtyManager {
 
   async replayActiveState(): Promise<void> {
     await this.refreshActiveMessages();
+    this.emitActiveTerminalReplay(this.getActiveHandle());
     this.emitSnapshotNow();
-    this.emitActiveTerminalReplay();
   }
 
   updateTerminalSize(cols: number, rows: number): void {
@@ -232,8 +232,8 @@ export class PtyManager {
     }
 
     await this.refreshMessagesFromJsonl(handle);
+    this.emitActiveTerminalReplay(handle);
     this.emitSnapshotNow();
-    this.emitActiveTerminalReplay();
 
     return {
       cwd: handle.cwd,
@@ -462,6 +462,18 @@ export class PtyManager {
     };
   }
 
+  private emitActiveTerminalReplay(handle: PtyHandle | null): void {
+    if (!handle?.sessionId) {
+      return;
+    }
+
+    this.callbacks.emitTerminalChunk({
+      data: handle.runtime.terminalReplay,
+      offset: 0,
+      sessionId: handle.sessionId
+    });
+  }
+
   private createRuntimeSnapshot(handle: PtyHandle | null): RuntimeSnapshot {
     if (!handle) {
       return {
@@ -670,7 +682,7 @@ export class PtyManager {
     nextMessages: ChatMessage[],
     previousHasOlderMessages: boolean,
     hasOlderMessages: boolean
-  ): MessagesUpsertPayload | null {
+  ): Omit<MessagesUpsertPayload, 'cliId'> | null {
     const previousIds = previousMessages.map((message) => message.id);
     const nextIds = nextMessages.map((message) => message.id);
     const idsChanged =
@@ -871,21 +883,6 @@ export class PtyManager {
 
   private emitSnapshotNow(): void {
     this.callbacks.emitSnapshot(this.createRuntimeSnapshot(this.getActiveHandle()));
-  }
-
-  private emitActiveTerminalReplay(): void {
-    const handle = this.getActiveHandle();
-    if (!handle || !handle.sessionId || !handle.runtime.terminalReplay) {
-      return;
-    }
-
-    const replayBytes = Buffer.byteLength(handle.runtime.terminalReplay, 'utf8');
-    const replayStartOffset = Math.max(0, handle.runtime.terminalOffset - replayBytes);
-    this.callbacks.emitTerminalChunk({
-      data: handle.runtime.terminalReplay,
-      offset: replayStartOffset,
-      sessionId: handle.sessionId
-    });
   }
 
   private setStatus(handle: PtyHandle, nextStatus: RuntimeStatus, immediate = false): void {

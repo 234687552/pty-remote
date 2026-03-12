@@ -1,5 +1,9 @@
+import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { io, type Socket } from 'socket.io-client';
@@ -8,18 +12,23 @@ import type {
   CliCommandResult,
   CliRegisterResult,
   GetRuntimeSnapshotResultPayload,
+  ListProjectSessionsResultPayload,
+  PickProjectDirectoryResultPayload,
   RuntimeSnapshotPayload
 } from '../../shared/protocol.ts';
+import { listProjectSessions } from '../project-history.ts';
 import { PtyManager } from './pty-manager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DEFAULT_ROOT_DIR = path.resolve(__dirname, '../..');
+const CONFIG_DIR = path.join(os.homedir(), '.pty-remote');
+const CLI_ID_FILE = path.join(CONFIG_DIR, 'cli-id');
 
 const SOCKET_URL = process.env.SOCKET_URL ?? `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? '3001'}`;
-const CLI_ID = (process.env.PTY_REMOTE_CLI_ID ?? `${path.basename(DEFAULT_ROOT_DIR)}-${randomUUID().slice(0, 8)}`)
-  .trim()
-  .replace(/[^a-zA-Z0-9._-]+/g, '-');
+const execFileAsync = promisify(execFile);
+const CLI_ID = resolveCliId();
+const DEFAULT_CLI_LABEL = resolveDefaultCliLabel();
 const PTY_BACKEND_NAME = 'node-pty';
 const TERMINAL_REPLAY_MAX_BYTES = 1024 * 1024;
 const RECENT_OUTPUT_MAX_CHARS = 12_000;
@@ -48,7 +57,7 @@ const manager = new PtyManager(
     claudeBin: process.env.CLAUDE_BIN ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude'),
     permissionMode: CLAUDE_PERMISSION_MODE,
     defaultCwd: DEFAULT_ROOT_DIR,
-    defaultLabel: (process.env.PTY_REMOTE_CLI_LABEL ?? path.basename(DEFAULT_ROOT_DIR) ?? 'claude-cli').trim(),
+    defaultLabel: (process.env.PTY_REMOTE_CLI_LABEL ?? DEFAULT_CLI_LABEL).trim(),
     terminalCols: TERMINAL_COLS,
     terminalRows: TERMINAL_ROWS,
     terminalReplayMaxBytes: TERMINAL_REPLAY_MAX_BYTES,
@@ -71,13 +80,17 @@ const manager = new PtyManager(
       if (!socketClient?.connected) {
         return;
       }
-      socketClient.emit('cli:messages-upsert', payload);
+      socketClient.emit('cli:messages-upsert', {
+        ...payload,
+        cliId: CLI_ID
+      });
     },
     emitSnapshot(snapshot) {
       if (!socketClient?.connected) {
         return;
       }
       socketClient.emit('cli:snapshot', {
+        cliId: CLI_ID,
         snapshot
       } satisfies RuntimeSnapshotPayload);
     },
@@ -85,10 +98,57 @@ const manager = new PtyManager(
       if (!socketClient?.connected) {
         return;
       }
-      socketClient.emit('cli:terminal-chunk', payload);
+      socketClient.emit('cli:terminal-chunk', {
+        ...payload,
+        cliId: CLI_ID
+      });
     }
   }
 );
+
+function sanitizeIdentifier(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-');
+}
+
+function resolveCliId(): string {
+  const explicit = process.env.PTY_REMOTE_CLI_ID?.trim();
+  if (explicit) {
+    return sanitizeIdentifier(explicit);
+  }
+
+  try {
+    const persisted = readFileSync(CLI_ID_FILE, 'utf8').trim();
+    if (persisted) {
+      return sanitizeIdentifier(persisted);
+    }
+  } catch {
+    // Fall back to generating a local persistent id.
+  }
+
+  const generated = sanitizeIdentifier(`cli-${randomUUID()}`);
+  mkdirSync(CONFIG_DIR, { recursive: true });
+  writeFileSync(CLI_ID_FILE, `${generated}\n`, 'utf8');
+  return generated;
+}
+
+function resolveDefaultCliLabel(): string {
+  if (process.platform === 'darwin') {
+    try {
+      const computerName = execFileSyncSafe('scutil', ['--get', 'ComputerName']);
+      if (computerName) {
+        return computerName;
+      }
+    } catch {
+      // Fall back to hostname.
+    }
+  }
+
+  return os.hostname() || path.basename(DEFAULT_ROOT_DIR) || 'claude-cli';
+}
+
+function execFileSyncSafe(command: string, args: string[]): string {
+  return `${execFileSync(command, args, { encoding: 'utf8' })}`.trim();
+}
 
 function sanitizePermissionMode(value: string | undefined): string {
   const allowed = new Set(['default', 'acceptEdits', 'dontAsk', 'plan', 'bypassPermissions']);
@@ -153,6 +213,25 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
       };
     }
 
+    if (envelope.name === 'list-project-sessions') {
+      const payload = envelope.payload as { cwd: string; maxSessions?: number };
+      return {
+        ok: true,
+        payload: {
+          cwd: payload.cwd,
+          label: path.basename(payload.cwd) || payload.cwd,
+          sessions: await listProjectSessions(payload.cwd, payload.maxSessions)
+        } satisfies ListProjectSessionsResultPayload
+      };
+    }
+
+    if (envelope.name === 'pick-project-directory') {
+      return {
+        ok: true,
+        payload: await pickProjectDirectory()
+      };
+    }
+
     return { ok: false, error: `Unsupported command: ${envelope.name}` };
   } catch (error) {
     return {
@@ -160,6 +239,33 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
       error: error instanceof Error ? error.message : 'CLI command failed'
     };
   }
+}
+
+async function pickProjectDirectory(): Promise<PickProjectDirectoryResultPayload> {
+  if (process.platform === 'darwin') {
+    let stdout = '';
+    try {
+      ({ stdout } = await execFileAsync('osascript', [
+        '-e',
+        'POSIX path of (choose folder with prompt "Select a project directory")'
+      ]));
+    } catch (error) {
+      const commandError = error as NodeJS.ErrnoException & { stderr?: string };
+      const stderr = `${commandError.stderr ?? ''}`.trim();
+      if (stderr.includes('用户已取消') || stderr.includes('User canceled') || stderr.includes('(-128)')) {
+        throw new Error('已取消选择目录');
+      }
+      throw error;
+    }
+
+    const cwd = stdout.trim().replace(/\/+$/, '') || '/';
+    return {
+      cwd,
+      label: path.basename(cwd) || cwd
+    };
+  }
+
+  throw new Error(`Directory picker is not implemented for ${process.platform}`);
 }
 
 function connectSocketClient(): void {
