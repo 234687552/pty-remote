@@ -4,6 +4,8 @@ export interface CliRegisterPayload {
   cliId?: string;
   label?: string;
   cwd: string;
+  threadKey?: string | null;
+  sessionId?: string | null;
   runtimeBackend: string;
 }
 
@@ -21,6 +23,7 @@ export interface ProjectSessionSummary {
 
 export type CliCommandName =
   | 'send-message'
+  | 'stop-message'
   | 'reset-session'
   | 'get-runtime-snapshot'
   | 'get-raw-jsonl'
@@ -31,6 +34,7 @@ export type CliCommandName =
 
 export interface CliCommandPayloadMap {
   'send-message': { content: string };
+  'stop-message': Record<string, never>;
   'reset-session': Record<string, never>;
   'get-runtime-snapshot': Record<string, never>;
   'get-raw-jsonl': {
@@ -47,12 +51,14 @@ export interface CliCommandPayloadMap {
   };
   'select-thread': {
     cwd: string;
+    threadKey: string;
     sessionId: string | null;
   };
 }
 
 export interface GetRawJsonlResultPayload {
   rawJsonl: string;
+  threadKey: string | null;
   sessionId: string | null;
   truncated: boolean;
 }
@@ -63,6 +69,7 @@ export interface GetRuntimeSnapshotResultPayload {
 
 export interface GetOlderMessagesResultPayload {
   messages: ChatMessage[];
+  threadKey: string | null;
   sessionId: string | null;
   hasOlderMessages: boolean;
 }
@@ -81,11 +88,13 @@ export interface ListProjectSessionsResultPayload {
 export interface SelectThreadResultPayload {
   cwd: string;
   label: string;
+  threadKey: string;
   sessionId: string | null;
 }
 
 export interface CliCommandResultPayloadMap {
   'send-message': null;
+  'stop-message': null;
   'reset-session': null;
   'get-runtime-snapshot': GetRuntimeSnapshotResultPayload;
   'get-raw-jsonl': GetRawJsonlResultPayload;
@@ -135,6 +144,7 @@ export interface RuntimeSnapshotPayload {
 }
 
 export interface MessagesUpsertPayload {
+  threadKey: string | null;
   sessionId: string | null;
   upserts: ChatMessage[];
   recentMessageIds: string[];

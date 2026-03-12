@@ -35,6 +35,7 @@ export interface ChatMessage {
 }
 
 export interface RuntimeSnapshot {
+  threadKey: string | null;
   status: RuntimeStatus;
   sessionId: string | null;
   messages: ChatMessage[];
@@ -46,6 +47,7 @@ export interface CliDescriptor {
   cliId: string;
   label: string;
   cwd: string;
+  threadKey: string | null;
   runtimeBackend: string;
   connected: boolean;
   status: RuntimeStatus;

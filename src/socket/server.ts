@@ -123,10 +123,11 @@ function createCliDescriptor(cliId: string, payload: CliRegisterPayload): CliDes
     cliId,
     label: payload.label?.trim() || path.basename(payload.cwd) || cliId,
     cwd: payload.cwd,
+    threadKey: payload.threadKey ?? null,
     runtimeBackend: payload.runtimeBackend,
     connected: true,
     status: 'idle',
-    sessionId: null,
+    sessionId: payload.sessionId ?? null,
     connectedAt: now,
     lastSeenAt: now
   };
@@ -139,6 +140,7 @@ function updateDescriptorFromSnapshot(record: CliRuntimeRecord): void {
 
   record.descriptor = {
     ...record.descriptor,
+    threadKey: record.snapshot.threadKey,
     status: record.snapshot.status,
     sessionId: record.snapshot.sessionId,
     lastSeenAt: new Date().toISOString()
@@ -369,12 +371,14 @@ async function routeWebCommand(command: WebCommandEnvelope, io: SocketIOServer):
   } satisfies CliCommandEnvelope);
 
   if (result.ok && command.name === 'select-thread') {
+    const payload = result.payload as SelectThreadResultPayload | undefined;
     const cwd = path.resolve((command.payload as { cwd: string }).cwd);
     cliRecord.descriptor = {
       ...cliRecord.descriptor,
       cwd,
       label: path.basename(cwd) || cwd,
-      sessionId: (result.payload as SelectThreadResultPayload | undefined)?.sessionId ?? null,
+      threadKey: payload?.threadKey ?? (command.payload as { threadKey?: string }).threadKey ?? null,
+      sessionId: payload?.sessionId ?? null,
       lastSeenAt: new Date().toISOString()
     };
     emitCliStatus(io);

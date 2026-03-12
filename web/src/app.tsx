@@ -39,6 +39,7 @@ import type {
 
 function createEmptySnapshot(): RuntimeSnapshot {
   return {
+    threadKey: null,
     status: 'idle',
     sessionId: null,
     messages: [],
@@ -93,6 +94,7 @@ function clampSidebarToggleTop(value: number, viewportHeight: number): number {
 
 interface ProjectThreadEntry {
   id: string;
+  threadKey: string;
   sessionId: string | null;
   title: string;
   preview: string;
@@ -147,7 +149,14 @@ function loadWorkspaceState(): PersistedWorkspaceState {
           id: project.id,
           cwd: project.cwd,
           label: project.label,
-          threads: Array.isArray(project.threads) ? project.threads : []
+          threads: Array.isArray(project.threads)
+            ? project.threads
+                .filter((thread) => thread && typeof thread.id === 'string')
+                .map((thread) => ({
+                  ...thread,
+                  threadKey: typeof thread.threadKey === 'string' && thread.threadKey ? thread.threadKey : thread.id
+                }))
+            : []
         })),
       sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
       sidebarToggleTop: clampSidebarToggleTop(
@@ -199,6 +208,7 @@ function createDraftThread(label = 'New thread'): ProjectThreadEntry {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
+    threadKey: crypto.randomUUID(),
     sessionId: null,
     title: label,
     preview: 'Start a new Claude session in this project.',
@@ -211,6 +221,7 @@ function createDraftThread(label = 'New thread'): ProjectThreadEntry {
 function createThreadFromSession(session: ProjectSessionSummary): ProjectThreadEntry {
   return {
     id: session.sessionId,
+    threadKey: session.sessionId,
     sessionId: session.sessionId,
     title: session.title,
     preview: session.preview,
@@ -935,6 +946,7 @@ interface ToolCallMeta {
 }
 
 type MobilePane = 'chat' | 'terminal';
+type QuestionJumpDirection = 'up' | 'down';
 
 function createToolCallIndex(messages: ChatMessage[]): Map<string, ToolCallMeta> {
   const index = new Map<string, ToolCallMeta>();
@@ -1210,6 +1222,7 @@ export function App() {
 
   const socketRef = useRef<Socket | null>(null);
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const questionMessageRefs = useRef(new Map<string, HTMLDivElement>());
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalInstanceRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -1380,6 +1393,10 @@ export function App() {
     () => visibleMessages.filter((message) => hasRenderableMessageContent(message)),
     [visibleMessages]
   );
+  const questionMessageIds = useMemo(
+    () => renderableMessages.filter((message) => message.role === 'user').map((message) => message.id),
+    [renderableMessages]
+  );
   const activeProject = useMemo(
     () => workspaceState.projects.find((project) => project.id === workspaceState.activeProjectId) ?? null,
     [workspaceState.activeProjectId, workspaceState.projects]
@@ -1389,7 +1406,9 @@ export function App() {
     [activeProject, workspaceState.activeThreadId]
   );
   const connected = Boolean(socketConnected && cli?.connected);
-  const canCompose = connected && !isBusyStatus(snapshot.status) && Boolean(activeProject && activeThread);
+  const busy = isBusyStatus(snapshot.status);
+  const canSend = connected && !busy && Boolean(activeProject && activeThread);
+  const canStop = connected && busy && Boolean(activeProject && activeThread);
 
   useEffect(() => {
     if (!terminalHostRef.current || terminalInstanceRef.current) {
@@ -1482,11 +1501,12 @@ export function App() {
 
     socket.on('runtime:messages-upsert', (payload: MessagesUpsertPayload) => {
       setSnapshot((current) => {
-        const isSameSession = current.sessionId === payload.sessionId;
-        const baseSnapshot = isSameSession
+        const isSameThread = current.threadKey === payload.threadKey;
+        const baseSnapshot = isSameThread
           ? current
           : {
               ...current,
+              threadKey: payload.threadKey,
               sessionId: payload.sessionId,
               messages: [],
               hasOlderMessages: false
@@ -1616,6 +1636,7 @@ export function App() {
       threads: [
         {
           ...initialThread,
+          threadKey: snapshot.threadKey ?? initialThread.threadKey,
           sessionId: snapshot.sessionId,
           draft: !snapshot.sessionId
         }
@@ -1626,9 +1647,10 @@ export function App() {
       activeProjectId: initialProject.id,
       activeThreadId: initialProject.threads[0]?.id ?? null,
       projects: [initialProject],
-      sidebarCollapsed: false
+      sidebarCollapsed: false,
+      sidebarToggleTop: SIDEBAR_TOGGLE_MARGIN
     });
-  }, [cli?.cwd, cli?.label, snapshot.sessionId, workspaceState.projects.length]);
+  }, [cli?.cwd, cli?.label, snapshot.sessionId, snapshot.threadKey, workspaceState.projects.length]);
 
   useEffect(() => {
     if (!activeProject || !activeThread) {
@@ -1636,12 +1658,7 @@ export function App() {
     }
 
     const backendMatchesProject = (cli?.cwd ?? '') === activeProject.cwd;
-    const canHydrateFromSnapshot =
-      backendMatchesProject && (
-        (activeThread.sessionId !== null && snapshot.sessionId === activeThread.sessionId) ||
-        (activeThread.sessionId === null && snapshot.sessionId === null) ||
-        (activeThread.sessionId === null && snapshot.sessionId !== null && visibleMessages.length > 0)
-      );
+    const canHydrateFromSnapshot = backendMatchesProject && snapshot.threadKey === activeThread.threadKey;
 
     if (!canHydrateFromSnapshot) {
       return;
@@ -1705,16 +1722,16 @@ export function App() {
         projects
       };
     });
-  }, [activeProject, activeThread, cli?.cwd, snapshot.sessionId, visibleMessages]);
+  }, [activeProject, activeThread, cli?.cwd, snapshot.sessionId, snapshot.threadKey, visibleMessages]);
 
   useEffect(() => {
     if (!socketConnected || !cli?.connected || !activeProject || !activeThread) {
       return;
     }
 
-    const threadKey = `${activeProject.id}:${activeThread.id}:${activeThread.sessionId ?? 'draft'}`;
+    const threadKey = activeThread.threadKey;
     const backendMatchesProject = (cli.cwd ?? '') === activeProject.cwd;
-    const backendMatchesThread = (snapshot.sessionId ?? null) === (activeThread.sessionId ?? null);
+    const backendMatchesThread = (snapshot.threadKey ?? cli.threadKey ?? null) === threadKey;
 
     if (backendMatchesProject && backendMatchesThread) {
       requestedThreadKeyRef.current = threadKey;
@@ -1727,7 +1744,7 @@ export function App() {
 
     requestedThreadKeyRef.current = threadKey;
     void activateThread(activeProject, activeThread);
-  }, [activeProject, activeThread, cli?.connected, cli?.cwd, snapshot.sessionId, socketConnected]);
+  }, [activeProject, activeThread, cli?.connected, cli?.cwd, cli?.threadKey, snapshot.threadKey, socketConnected]);
 
   const headerText = useMemo(() => {
     if (!socketConnected) {
@@ -1763,6 +1780,57 @@ export function App() {
 
   function patchWorkspace(updater: (current: PersistedWorkspaceState) => PersistedWorkspaceState): void {
     setWorkspaceState((current) => updater(current));
+  }
+
+  function setQuestionMessageRef(messageId: string, node: HTMLDivElement | null): void {
+    if (node) {
+      questionMessageRefs.current.set(messageId, node);
+      return;
+    }
+    questionMessageRefs.current.delete(messageId);
+  }
+
+  function handleJumpToQuestion(direction: QuestionJumpDirection): void {
+    const container = messagesRef.current;
+    if (!container) {
+      return;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const questionAnchors = questionMessageIds
+      .map((messageId) => {
+        const node = questionMessageRefs.current.get(messageId);
+        return node
+          ? {
+              messageId,
+              node,
+              top: node.getBoundingClientRect().top - containerRect.top + container.scrollTop
+            }
+          : null;
+      })
+      .filter(Boolean) as Array<{ messageId: string; node: HTMLDivElement; top: number }>;
+
+    if (questionAnchors.length === 0) {
+      return;
+    }
+
+    const currentTop = container.scrollTop;
+    const currentIndex = questionAnchors.findLastIndex((anchor) => anchor.top <= currentTop + 24);
+    const normalizedCurrentIndex = currentIndex >= 0 ? currentIndex : 0;
+    const currentAnchor = questionAnchors[normalizedCurrentIndex];
+    const isAwayFromCurrentQuestionTop = currentAnchor ? currentTop > currentAnchor.top + 24 : false;
+    const targetIndex =
+      direction === 'up'
+        ? isAwayFromCurrentQuestionTop
+          ? normalizedCurrentIndex
+          : Math.max(0, normalizedCurrentIndex - 1)
+        : Math.min(questionAnchors.length - 1, normalizedCurrentIndex + 1);
+    const target = questionAnchors[targetIndex];
+
+    target.node.scrollIntoView({
+      behavior: 'smooth',
+      block: 'start'
+    });
   }
 
   function handleOpenSidebarButtonClick(event: React.MouseEvent<HTMLButtonElement>): void {
@@ -1870,6 +1938,7 @@ export function App() {
 
       await sendCommand('select-thread', {
         cwd: project.cwd,
+        threadKey: thread.threadKey,
         sessionId: thread.sessionId
       });
       setMobilePane('chat');
@@ -2001,12 +2070,24 @@ export function App() {
     }
   }
 
+  async function handleStop(): Promise<void> {
+    try {
+      setError('');
+      await sendCommand('stop-message', {});
+    } catch (stopError) {
+      setError(stopError instanceof Error ? stopError.message : '结束失败');
+    }
+  }
+
   async function handleLoadRawJsonl() {
     try {
       setError('');
       setRawJsonlLoading(true);
       const result = await sendCommand('get-raw-jsonl', { maxChars: 200_000 });
       const payload = result.payload as GetRawJsonlResultPayload | undefined;
+      if ((payload?.threadKey ?? null) !== snapshot.threadKey) {
+        return;
+      }
       setRawJsonl(payload?.rawJsonl ?? '');
       setRawJsonlTruncated(Boolean(payload?.truncated));
       setMobilePane('chat');
@@ -2035,7 +2116,7 @@ export function App() {
       });
       const payload = result.payload as GetOlderMessagesResultPayload | undefined;
 
-      if ((payload?.sessionId ?? null) !== snapshot.sessionId) {
+      if ((payload?.threadKey ?? null) !== snapshot.threadKey) {
         preserveMessagesScrollRef.current = null;
         return;
       }
@@ -2064,15 +2145,15 @@ export function App() {
         onPointerUp={handleSidebarTogglePointerRelease}
         onPointerCancel={handleSidebarTogglePointerRelease}
         className={[
-          'fixed left-4 z-50 flex h-18 w-18 cursor-grab touch-none items-center justify-center rounded-[1.6rem] border border-zinc-200 bg-white/95 text-zinc-700 shadow-[0_18px_40px_rgba(0,0,0,0.12)] backdrop-blur transition hover:bg-white active:cursor-grabbing',
-          workspaceState.sidebarCollapsed ? 'opacity-100' : 'pointer-events-none opacity-0'
+          'fixed left-4 z-50 flex h-14 w-14 cursor-grab touch-none items-center justify-center rounded-[1.2rem] border border-zinc-200/90 bg-white/80 text-zinc-500 shadow-[0_10px_24px_rgba(0,0,0,0.08)] backdrop-blur-sm transition duration-200 hover:bg-white/95 hover:text-zinc-700 hover:shadow-[0_14px_28px_rgba(0,0,0,0.1)] active:cursor-grabbing',
+          workspaceState.sidebarCollapsed ? 'opacity-85' : 'pointer-events-none opacity-0'
         ].join(' ')}
         aria-label="打开边栏"
         title="打开边栏，支持上下拖动"
         style={{ top: sidebarToggleTop }}
       >
-        <span className="relative block h-8 w-8 rounded-xl border-2 border-current">
-          <span className="absolute top-0 bottom-0 left-1/2 border-l-2 border-current" />
+        <span className="relative block h-6 w-6 rounded-lg border border-current">
+          <span className="absolute top-0 bottom-0 left-1/2 border-l border-current" />
         </span>
       </button>
 
@@ -2230,7 +2311,7 @@ export function App() {
       </div>
 
       <div className="mx-auto flex h-full max-w-[1600px] flex-col gap-4 overflow-hidden p-4 md:p-6">
-        <main className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden">
+        <main className="flex min-h-0 flex-1 flex-col gap-0">
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
             <header className="rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
               <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
@@ -2340,14 +2421,14 @@ export function App() {
               </div>
             </nav>
 
-            <section className="min-h-0 flex flex-col gap-4 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+            <section className="min-h-0 flex flex-1 flex-col gap-4 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
               <div
                 className={[
-                  'min-h-0 min-w-0 flex-col',
+                  'min-h-0 min-w-0 flex-1 flex-col',
                   mobilePane === 'chat' ? 'flex' : 'hidden lg:flex'
                 ].join(' ')}
               >
-                <div className="min-h-[22rem] min-w-0 flex-1 flex-col rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:flex lg:min-h-[28rem]">
+                <div className="relative flex min-h-[22rem] min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:min-h-[28rem]">
                   <div className="border-b border-zinc-200 px-4 py-3">
                     <div className="flex items-center justify-between gap-3">
                       <div>
@@ -2368,25 +2449,60 @@ export function App() {
                       ) : null}
                     </div>
                   </div>
-                  <div ref={messagesRef} className="min-w-0 flex-1 space-y-2 overflow-auto px-4 py-4">
+                  <div ref={messagesRef} className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-4 py-4">
                     {renderableMessages.length === 0 ? (
                       <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
                         {activeThread?.draft ? '这是一个新 thread，发送第一条消息后会创建 Claude session。' : '等待这个 thread 的 Claude jsonl 写入会话内容。'}
                       </div>
                     ) : (
                       renderableMessages.map((message) => (
-                        <MessageShell key={message.id} message={message}>
-                          <MessageContent message={message} toolCallIndex={toolCallIndex} />
-                        </MessageShell>
+                        <div
+                          key={message.id}
+                          ref={message.role === 'user' ? (node) => setQuestionMessageRef(message.id, node) : undefined}
+                        >
+                          <MessageShell message={message}>
+                            <MessageContent message={message} toolCallIndex={toolCallIndex} />
+                          </MessageShell>
+                        </div>
                       ))
                     )}
                   </div>
+
+                  {questionMessageIds.length > 0 ? (
+                    <div className="pointer-events-none absolute right-4 bottom-4 z-10">
+                      <div className="pointer-events-auto flex flex-col overflow-hidden rounded-2xl border border-zinc-200/80 bg-white/65 shadow-[0_10px_24px_rgba(0,0,0,0.08)] backdrop-blur-sm">
+                        <button
+                          type="button"
+                          onClick={() => handleJumpToQuestion('up')}
+                          className="flex h-10 w-10 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900"
+                          aria-label="跳到上一条提问"
+                          title="跳到上一条提问"
+                        >
+                          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                            <path d="M5 12l5-5 5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        </button>
+                        <div className="h-px bg-zinc-200/80" />
+                        <button
+                          type="button"
+                          onClick={() => handleJumpToQuestion('down')}
+                          className="flex h-10 w-10 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900"
+                          aria-label="跳到下一条提问"
+                          title="跳到下一条提问"
+                        >
+                          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                            <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
               <div
                 className={[
-                  'min-h-[22rem] min-w-0 flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:flex lg:min-h-[28rem]',
+                  'flex min-h-[22rem] min-w-0 flex-1 flex-col overflow-hidden rounded-3xl border border-zinc-200 bg-white shadow-sm sm:min-h-[24rem] lg:min-h-[28rem]',
                   mobilePane === 'terminal' ? 'flex' : 'hidden lg:flex'
                 ].join(' ')}
               >
@@ -2400,46 +2516,67 @@ export function App() {
             </section>
           </div>
 
-          <form onSubmit={handleSubmit} className="shrink-0 rounded-3xl border border-zinc-200 bg-white p-4 shadow-sm">
-            <div className="mb-3 flex flex-wrap gap-2 text-xs font-medium">
-                <span className="rounded-full bg-zinc-900 px-3 py-1 text-white">socket: {socketConnected ? 'online' : 'offline'}</span>
-                <span className="rounded-full bg-zinc-200 px-3 py-1 text-zinc-800">cli: {cli?.connected ? 'online' : 'offline'}</span>
-                <span className="rounded-full bg-zinc-200 px-3 py-1 text-zinc-800">status: {headerText}</span>
-                <span className="rounded-full bg-zinc-200 px-3 py-1 text-zinc-800">session: {snapshot.sessionId ?? '-'}</span>
+          <form onSubmit={handleSubmit} className="shrink-0 -mx-4 -mb-4 px-2 py-2 md:-mx-6 md:-mb-6 md:px-3">
+            <div className="mb-1.5 flex flex-wrap gap-2 px-1 text-xs font-medium">
+              <span className="rounded-full bg-zinc-900 px-3 py-1 text-white">socket: {socketConnected ? 'online' : 'offline'}</span>
+              <span className="rounded-full bg-white/85 px-3 py-1 text-zinc-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">cli: {cli?.connected ? 'online' : 'offline'}</span>
+              <span className="rounded-full bg-white/85 px-3 py-1 text-zinc-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]">status: {headerText}</span>
             </div>
 
-            <textarea
-              value={prompt}
-              onChange={(event) => setPrompt(event.target.value)}
-              rows={5}
-              placeholder={
-                !activeProject
-                  ? '先从左侧添加并选择一个 project / thread。'
-                  : !connected
-                    ? '等待 CLI 连接...'
-                    : snapshot.status === 'starting'
-                      ? 'Claude 正在启动...'
-                      : snapshot.status === 'running'
-                        ? 'Claude 正在运行...'
-                        : snapshot.status === 'error'
-                          ? '上次运行出错，可继续输入或切到别的 thread。'
-                          : activeThread?.draft
-                            ? '这是一个新 thread，第一条消息会创建新 session。'
-                            : '输入消息，继续这个 thread。'
-              }
-              className="min-h-32 w-full rounded-2xl border border-zinc-300 bg-zinc-50 px-4 py-3 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500 md:min-h-36"
-              disabled={!canCompose}
-            />
-
-            <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div className="text-sm text-red-600">{error || snapshot.lastError || ''}</div>
+            <div className="relative">
+              <input
+                type="text"
+                value={prompt}
+                onChange={(event) => setPrompt(event.target.value)}
+                placeholder={
+                  !activeProject
+                    ? '先从左侧添加并选择一个 project / thread。'
+                    : !connected
+                      ? '等待 CLI 连接...'
+                      : snapshot.status === 'starting'
+                        ? 'Claude 正在启动...'
+                        : snapshot.status === 'running'
+                          ? 'Claude 正在运行...'
+                          : snapshot.status === 'error'
+                            ? '上次运行出错，可继续输入或切到别的 thread。'
+                            : activeThread?.draft
+                              ? '这是一个新 thread，第一条消息会创建新 session。'
+                              : '输入消息，继续这个 thread。'
+                }
+                className="h-14 w-full rounded-xl border border-zinc-300 bg-white px-5 pr-28 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500"
+                disabled={!canSend}
+              />
               <button
-                type="submit"
-                className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!canCompose}
+                type={busy ? 'button' : 'submit'}
+                onClick={busy ? () => void handleStop() : undefined}
+                className="absolute top-1/2 right-2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-zinc-900 text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={busy ? !canStop : !canSend}
+                aria-label={busy ? '结束当前运行' : '发送消息'}
+                title={busy ? '结束当前运行' : '发送消息'}
               >
-                {isBusyStatus(snapshot.status) ? '处理中...' : activeThread?.draft ? '创建并发送' : '发送'}
+                {busy ? (
+                  <span className="block h-3.5 w-3.5 rounded-[0.2rem] bg-current" aria-hidden="true" />
+                ) : (
+                  <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                    <path d="M10 14V6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+                    <path d="M6.5 9.5 10 6l3.5 3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
               </button>
+            </div>
+
+            <div className="mt-1.5 flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg border border-zinc-300 bg-white text-xs font-medium text-zinc-700 transition hover:bg-zinc-50"
+                  aria-label="Slash tool"
+                  title="Slash tool"
+                >
+                  /
+                </button>
+              </div>
+              <div className="text-sm text-red-600 sm:text-right">{error || snapshot.lastError || ''}</div>
             </div>
           </form>
         </main>
