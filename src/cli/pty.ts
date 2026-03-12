@@ -17,16 +17,29 @@ interface StartClaudePtySessionOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   permissionMode: string;
+  resumeSessionId?: string | null;
   rows: number;
   onData: (chunk: string) => void;
   onExit: () => void;
 }
 
-export function createClaudeLaunchConfig(claudeBin: string, permissionMode: string): {
+export function createClaudeLaunchConfig(
+  claudeBin: string,
+  permissionMode: string,
+  resumeSessionId?: string | null
+): {
   command: string;
   args: string[];
   sessionId: string;
 } {
+  if (resumeSessionId) {
+    return {
+      command: claudeBin,
+      args: ['--permission-mode', permissionMode, '--resume', resumeSessionId],
+      sessionId: resumeSessionId
+    };
+  }
+
   const sessionId = randomUUID();
   return {
     command: claudeBin,
@@ -39,7 +52,7 @@ export function startClaudePtySession(options: StartClaudePtySessionOptions): {
   session: ClaudePtySession;
   sessionId: string;
 } {
-  const launch = createClaudeLaunchConfig(options.claudeBin, options.permissionMode);
+  const launch = createClaudeLaunchConfig(options.claudeBin, options.permissionMode, options.resumeSessionId);
   const pty = spawnPty(launch.command, launch.args, {
     cols: options.cols,
     rows: options.rows,
@@ -78,6 +91,18 @@ export function stopClaudePtySession(session: ClaudePtySession | null): void {
     session.pty.kill();
   } catch {
     // ignore
+  }
+}
+
+export function resizeClaudePtySession(session: ClaudePtySession | null, cols: number, rows: number): void {
+  if (!session) {
+    return;
+  }
+
+  try {
+    session.pty.resize(cols, rows);
+  } catch {
+    // ignore resize failures during session transitions
   }
 }
 

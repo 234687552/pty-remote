@@ -10,9 +10,11 @@ import type {
   CliCommandResult,
   GetOlderMessagesResultPayload,
   GetRawJsonlResultPayload,
+  GetRuntimeSnapshotResultPayload,
   CliRegisterResult,
   MessagesUpsertPayload,
   RuntimeSnapshotPayload,
+  SelectThreadResultPayload,
   TerminalChunkPayload
 } from '../../shared/protocol.ts';
 import type { ChatMessage, RuntimeSnapshot, RuntimeStatus } from '../../shared/runtime-types.ts';
@@ -21,28 +23,28 @@ import {
   createClaudeJsonlMessagesState,
   materializeClaudeJsonlMessages,
   resolveClaudeJsonlFilePath,
+  type ClaudeJsonlRuntimePhase,
   type ClaudeJsonlMessagesState
 } from './jsonl.ts';
 import {
   appendRecentOutput,
   appendReplayChunk,
   type ClaudePtySession,
-  getClaudePtyLifecycle,
   looksLikeBypassPrompt,
   looksReadyForInput,
+  resizeClaudePtySession,
   startClaudePtySession,
   stopClaudePtySession
 } from './pty.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const ROOT_DIR = path.resolve(__dirname, '../..');
+const DEFAULT_ROOT_DIR = path.resolve(__dirname, '../..');
 
 const SOCKET_URL = process.env.SOCKET_URL ?? `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? '3001'}`;
-const CLI_ID = (process.env.HAPI_TMUX_CLI_ID ?? `${path.basename(ROOT_DIR)}-${randomUUID().slice(0, 8)}`)
+const CLI_ID = (process.env.HAPI_TMUX_CLI_ID ?? `${path.basename(DEFAULT_ROOT_DIR)}-${randomUUID().slice(0, 8)}`)
   .trim()
   .replace(/[^a-zA-Z0-9._-]+/g, '-');
-const CLI_LABEL = (process.env.HAPI_TMUX_CLI_LABEL ?? path.basename(ROOT_DIR) ?? 'claude-cli').trim();
 const PTY_BACKEND_NAME = 'node-pty';
 const TERMINAL_REPLAY_MAX_BYTES = 1024 * 1024;
 const RECENT_OUTPUT_MAX_CHARS = 12_000;
@@ -65,8 +67,15 @@ interface AgentRuntimeState extends RuntimeSnapshot {
   terminalOffset: number;
 }
 
+interface ActiveThreadTarget {
+  cwd: string;
+  label: string;
+  resumeSessionId: string | null;
+}
+
 let state: AgentRuntimeState = createFreshState();
 let claudePty: ClaudePtySession | null = null;
+let claudePtyToken = 0;
 let socketClient: Socket | null = null;
 let jsonlRefreshTimer: NodeJS.Timeout | null = null;
 let snapshotEmitTimer: NodeJS.Timeout | null = null;
@@ -79,6 +88,16 @@ let jsonlMessagesState: ClaudeJsonlMessagesState = createClaudeJsonlMessagesStat
 let parsedJsonlSessionId: string | null = null;
 let jsonlReadOffset = 0;
 let jsonlPendingLine = '';
+let awaitingJsonlTurn = false;
+let activeThreadTarget: ActiveThreadTarget = {
+  cwd: DEFAULT_ROOT_DIR,
+  label: (process.env.HAPI_TMUX_CLI_LABEL ?? path.basename(DEFAULT_ROOT_DIR) ?? 'claude-cli').trim(),
+  resumeSessionId: null
+};
+let terminalSize = {
+  cols: TERMINAL_COLS,
+  rows: TERMINAL_ROWS
+};
 
 function sanitizePermissionMode(value: string | undefined): string {
   const allowed = new Set(['default', 'acceptEdits', 'dontAsk', 'plan', 'bypassPermissions']);
@@ -111,6 +130,48 @@ function resetJsonlParsingState(sessionId: string | null): void {
   parsedJsonlSessionId = sessionId;
   jsonlReadOffset = 0;
   jsonlPendingLine = '';
+}
+
+function getThreadLabel(cwd: string): string {
+  return path.basename(cwd) || cwd;
+}
+
+function normalizeThreadTarget(cwd: string, sessionId: string | null): ActiveThreadTarget {
+  const normalizedCwd = path.resolve(cwd);
+  return {
+    cwd: normalizedCwd,
+    label: getThreadLabel(normalizedCwd),
+    resumeSessionId: sessionId
+  };
+}
+
+function resetRuntimeState(sessionId: string | null = null): void {
+  state = createFreshState();
+  state.sessionId = sessionId;
+  awaitingJsonlTurn = false;
+  resetJsonlParsingState(sessionId);
+}
+
+function stopActivePty(): void {
+  const currentPty = claudePty;
+  if (!currentPty) {
+    return;
+  }
+
+  claudePtyToken += 1;
+  claudePty = null;
+  suppressNextPtyExitError = true;
+  stopClaudePtySession(currentPty);
+}
+
+function updateTerminalSize(cols: number, rows: number): void {
+  const nextCols = Number.isFinite(cols) ? Math.max(20, Math.min(Math.floor(cols), 400)) : terminalSize.cols;
+  const nextRows = Number.isFinite(rows) ? Math.max(8, Math.min(Math.floor(rows), 200)) : terminalSize.rows;
+  terminalSize = {
+    cols: nextCols,
+    rows: nextRows
+  };
+  resizeClaudePtySession(claudePty, nextCols, nextRows);
 }
 
 function createRuntimeSnapshot(): RuntimeSnapshot {
@@ -156,17 +217,6 @@ function isActiveStatus(status: RuntimeStatus): boolean {
   return status === 'starting' || status === 'running';
 }
 
-function resolveRuntimeStatusFromPtyOutput(output: string): RuntimeStatus {
-  const lifecycle = getClaudePtyLifecycle(output);
-  if (lifecycle === 'running') {
-    return 'running';
-  }
-  if (lifecycle === 'idle') {
-    return 'idle';
-  }
-  return 'starting';
-}
-
 function setStatus(nextStatus: RuntimeStatus, immediate = false): void {
   if (state.status === nextStatus) {
     return;
@@ -188,7 +238,7 @@ function clearLastError(): void {
 
   state.lastError = null;
   if (state.status === 'error') {
-    state.status = claudePty ? resolveRuntimeStatusFromPtyOutput(claudePty.recentOutput) : 'idle';
+    state.status = resolveRuntimeStatusFromJsonl(jsonlMessagesState.runtimePhase);
   }
   emitSnapshot();
 }
@@ -230,7 +280,7 @@ function closeJsonlWatcher(): void {
 }
 
 function resolveSessionJsonlFilePath(sessionId: string): string {
-  return resolveClaudeJsonlFilePath(ROOT_DIR, sessionId, os.homedir());
+  return resolveClaudeJsonlFilePath(activeThreadTarget.cwd, sessionId, os.homedir());
 }
 
 function ensureJsonlWatcher(sessionId: string | null): void {
@@ -280,12 +330,24 @@ function ensureJsonlWatcher(sessionId: string | null): void {
   }
 }
 
-function syncStatusFromPtyOutput(output: string): void {
-  setStatus(resolveRuntimeStatusFromPtyOutput(output));
+function resolveRuntimeStatusFromJsonl(runtimePhase: ClaudeJsonlRuntimePhase): RuntimeStatus {
+  if (state.lastError !== null && state.status === 'error') {
+    return 'error';
+  }
+
+  if (runtimePhase === 'running' || awaitingJsonlTurn) {
+    return 'running';
+  }
+
+  if (claudePty && state.status === 'starting' && state.allMessages.length === 0) {
+    return 'starting';
+  }
+
+  return 'idle';
 }
 
-function applyStreamingStatus(messages: ChatMessage[], status: RuntimeStatus): ChatMessage[] {
-  if (status !== 'running') {
+function applyStreamingStatus(messages: ChatMessage[], isRunning: boolean): ChatMessage[] {
+  if (!isRunning) {
     return messages;
   }
 
@@ -357,17 +419,19 @@ function createMessagesUpsertPayload(
   previousMessages: ChatMessage[],
   nextMessages: ChatMessage[],
   sessionId: string | null,
+  previousHasOlderMessages: boolean,
   hasOlderMessages: boolean
 ): MessagesUpsertPayload | null {
   const previousIds = previousMessages.map((message) => message.id);
   const nextIds = nextMessages.map((message) => message.id);
   const idsChanged =
     previousIds.length !== nextIds.length || previousIds.some((messageId, index) => messageId !== nextIds[index]);
+  const olderFlagChanged = previousHasOlderMessages !== hasOlderMessages;
 
   const previousById = new Map(previousMessages.map((message) => [message.id, message]));
   const upserts = nextMessages.filter((message) => !messageEqual(previousById.get(message.id), message));
 
-  if (!idsChanged && upserts.length === 0) {
+  if (!idsChanged && upserts.length === 0 && !olderFlagChanged) {
     return null;
   }
 
@@ -432,6 +496,8 @@ async function refreshMessagesFromJsonl(): Promise<void> {
   const filePath = resolveSessionJsonlFilePath(sessionId);
   const previousMessages = state.messages;
   const previousHasOlderMessages = state.hasOlderMessages;
+  const previousStatus = state.status;
+  const previousActivityRevision = jsonlMessagesState.activityRevision;
 
   try {
     if (parsedJsonlSessionId !== sessionId) {
@@ -469,12 +535,21 @@ async function refreshMessagesFromJsonl(): Promise<void> {
     }
 
     jsonlReadOffset = size;
+    const sawJsonlActivity = jsonlMessagesState.activityRevision !== previousActivityRevision;
+    if (sawJsonlActivity) {
+      awaitingJsonlTurn = false;
+    }
 
-    const nextAllMessages = applyStreamingStatus(materializeClaudeJsonlMessages(jsonlMessagesState), state.status);
+    const nextRuntimeStatus = resolveRuntimeStatusFromJsonl(jsonlMessagesState.runtimePhase);
+    const nextAllMessages = applyStreamingStatus(
+      materializeClaudeJsonlMessages(jsonlMessagesState),
+      jsonlMessagesState.runtimePhase === 'running'
+    );
     const nextMessages = selectRecentMessages(nextAllMessages);
     const allMessagesChanged = !messagesEqual(state.allMessages, nextAllMessages);
     const messagesChanged = !messagesEqual(state.messages, nextMessages);
     const hasOlderMessagesChanged = state.hasOlderMessages !== (nextAllMessages.length > nextMessages.length);
+    const statusChanged = previousStatus !== nextRuntimeStatus;
 
     if (allMessagesChanged) {
       state.allMessages = nextAllMessages;
@@ -485,18 +560,22 @@ async function refreshMessagesFromJsonl(): Promise<void> {
     if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
       state.hasOlderMessages = nextAllMessages.length > nextMessages.length;
     }
+    if (statusChanged) {
+      state.status = nextRuntimeStatus;
+    }
 
-    if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
+    if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged || statusChanged) {
       const upsertPayload = createMessagesUpsertPayload(
         previousMessages,
         nextMessages,
         sessionId,
+        previousHasOlderMessages,
         nextAllMessages.length > nextMessages.length
       );
       if (upsertPayload) {
         emitMessagesUpsert(upsertPayload);
       }
-      scheduleSnapshotEmit(0);
+      scheduleSnapshotEmit(statusChanged ? 0 : SNAPSHOT_EMIT_DEBOUNCE_MS);
     }
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
@@ -542,8 +621,7 @@ function handlePtyData(chunk: string): void {
   const chunkOffset = state.terminalOffset;
   state.terminalReplay = appendReplayChunk(session, chunk, TERMINAL_REPLAY_MAX_BYTES);
   state.terminalOffset += Buffer.byteLength(chunk, 'utf8');
-  const recentOutput = appendRecentOutput(session, chunk, RECENT_OUTPUT_MAX_CHARS);
-  syncStatusFromPtyOutput(recentOutput);
+  appendRecentOutput(session, chunk, RECENT_OUTPUT_MAX_CHARS);
   emitTerminalChunk(chunk, chunkOffset);
   scheduleJsonlRefresh();
 }
@@ -552,6 +630,7 @@ async function handlePtyExit(): Promise<void> {
   const expectedExit = suppressNextPtyExitError;
   suppressNextPtyExitError = false;
   claudePty = null;
+  awaitingJsonlTurn = false;
   scheduleJsonlRefresh(0);
   if (expectedExit) {
     setStatus('idle', true);
@@ -595,44 +674,52 @@ async function waitForClaudeReady(timeoutMs = CLAUDE_READY_TIMEOUT_MS): Promise<
   throw new Error('Claude CLI startup timed out');
 }
 
+function startActiveThreadSession(): void {
+  const token = ++claudePtyToken;
+  const started = startClaudePtySession({
+    claudeBin: CLAUDE_BIN,
+    cols: terminalSize.cols,
+    cwd: activeThreadTarget.cwd,
+    env: {
+      ...process.env,
+      TERM: 'xterm-256color'
+    },
+    permissionMode: CLAUDE_PERMISSION_MODE,
+    resumeSessionId: activeThreadTarget.resumeSessionId,
+    rows: terminalSize.rows,
+    onData(chunk) {
+      if (token !== claudePtyToken) {
+        return;
+      }
+      handlePtyData(chunk);
+    },
+    onExit() {
+      if (token !== claudePtyToken) {
+        return;
+      }
+      void handlePtyExit();
+    }
+  });
+
+  claudePty = started.session;
+  activeThreadTarget = {
+    ...activeThreadTarget,
+    resumeSessionId: started.sessionId
+  };
+  state.sessionId = started.sessionId;
+  state.status = 'starting';
+  ensureJsonlWatcher(started.sessionId);
+  emitSnapshot();
+  scheduleJsonlRefresh(0);
+}
+
 async function ensureClaudePtySession(): Promise<void> {
   if (claudePty) {
     return;
   }
 
   clearLastError();
-  stopClaudePtySession(claudePty);
-  claudePty = null;
-
-  const hadPreviousContext = state.messages.length > 0 || state.sessionId !== null || state.terminalReplay.length > 0;
-  if (hadPreviousContext) {
-    state = createFreshState();
-  }
-
-  const started = startClaudePtySession({
-    claudeBin: CLAUDE_BIN,
-    cols: TERMINAL_COLS,
-    cwd: ROOT_DIR,
-    env: {
-      ...process.env,
-      TERM: 'xterm-256color'
-    },
-    permissionMode: CLAUDE_PERMISSION_MODE,
-    rows: TERMINAL_ROWS,
-    onData(chunk) {
-      handlePtyData(chunk);
-    },
-    onExit() {
-      void handlePtyExit();
-    }
-  });
-
-  claudePty = started.session;
-  state.sessionId = started.sessionId;
-  state.status = 'starting';
-  ensureJsonlWatcher(started.sessionId);
-  emitSnapshot();
-  scheduleJsonlRefresh(0);
+  startActiveThreadSession();
 }
 
 async function sendPromptToClaudePty(content: string): Promise<void> {
@@ -667,6 +754,7 @@ async function dispatchClaudeMessage(content: string): Promise<void> {
 
   try {
     await waitForClaudeReady();
+    awaitingJsonlTurn = true;
     setStatus('running', true);
     await sendPromptToClaudePty(trimmedContent);
     scheduleJsonlRefresh(0);
@@ -676,12 +764,36 @@ async function dispatchClaudeMessage(content: string): Promise<void> {
   }
 }
 
+async function activateThread(cwd: string, sessionId: string | null): Promise<SelectThreadResultPayload> {
+  activeThreadTarget = normalizeThreadTarget(cwd, sessionId);
+  const stat = await fs.stat(activeThreadTarget.cwd);
+  if (!stat.isDirectory()) {
+    throw new Error('Selected project is not a directory');
+  }
+  closeJsonlWatcher();
+  stopActivePty();
+  resetRuntimeState(sessionId);
+  emitSnapshot();
+
+  if (sessionId) {
+    startActiveThreadSession();
+  }
+
+  return {
+    cwd: activeThreadTarget.cwd,
+    label: activeThreadTarget.label,
+    sessionId: state.sessionId
+  };
+}
+
 async function resetConversation(): Promise<void> {
   closeJsonlWatcher();
-  suppressNextPtyExitError = true;
-  stopClaudePtySession(claudePty);
-  claudePty = null;
-  state = createFreshState();
+  stopActivePty();
+  activeThreadTarget = {
+    ...activeThreadTarget,
+    resumeSessionId: null
+  };
+  resetRuntimeState(null);
   emitSnapshot();
 }
 
@@ -695,6 +807,16 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
     if (envelope.name === 'reset-session') {
       await resetConversation();
       return { ok: true, payload: null };
+    }
+
+    if (envelope.name === 'get-runtime-snapshot') {
+      await refreshMessagesFromJsonl();
+      return {
+        ok: true,
+        payload: {
+          snapshot: createRuntimeSnapshot()
+        } satisfies GetRuntimeSnapshotResultPayload
+      };
     }
 
     if (envelope.name === 'get-raw-jsonl') {
@@ -713,6 +835,14 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
           (envelope.payload as { beforeMessageId?: string; maxMessages?: number }).beforeMessageId,
           (envelope.payload as { beforeMessageId?: string; maxMessages?: number }).maxMessages
         )
+      };
+    }
+
+    if (envelope.name === 'select-thread') {
+      const payload = envelope.payload as { cwd: string; sessionId: string | null };
+      return {
+        ok: true,
+        payload: await activateThread(payload.cwd, payload.sessionId ?? null)
       };
     }
 
@@ -740,8 +870,8 @@ function connectSocketClient(): void {
       'cli:register',
       {
         cliId: CLI_ID,
-        label: CLI_LABEL,
-        cwd: ROOT_DIR,
+        label: activeThreadTarget.label,
+        cwd: activeThreadTarget.cwd,
         runtimeBackend: PTY_BACKEND_NAME
       },
       (result: CliRegisterResult) => {
@@ -753,6 +883,10 @@ function connectSocketClient(): void {
 
   socket.on('cli:command', async (envelope: CliCommandEnvelope, callback?: (result: CliCommandResult) => void) => {
     callback?.(await handleSocketCommand(envelope));
+  });
+
+  socket.on('cli:terminal-resize', (payload: { cols: number; rows: number }) => {
+    updateTerminalSize(payload.cols, payload.rows);
   });
 
   socket.on('disconnect', (reason) => {
@@ -784,9 +918,7 @@ async function shutdownCliClient(reason: string, exitCode = 0): Promise<void> {
       snapshotEmitTimer = null;
     }
     closeJsonlWatcher();
-    suppressNextPtyExitError = true;
-    stopClaudePtySession(claudePty);
-    claudePty = null;
+    stopActivePty();
     socketClient?.removeAllListeners();
     socketClient?.disconnect();
     socketClient = null;

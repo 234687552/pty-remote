@@ -31,6 +31,8 @@ type ClaudeContentBlock = ClaudeTextContentBlock | ClaudeToolUseContentBlock | C
 
 interface ClaudeJsonlRecord {
   type?: string;
+  subtype?: string;
+  operation?: string;
   uuid?: string;
   timestamp?: string;
   sessionId?: string;
@@ -42,20 +44,30 @@ interface ClaudeJsonlRecord {
   };
 }
 
+export type ClaudeJsonlRuntimePhase = 'idle' | 'running';
+
 export interface ClaudeJsonlMessagesState {
   orderedIds: string[];
   messagesById: Map<string, ChatMessage>;
+  runtimePhase: ClaudeJsonlRuntimePhase;
+  activityRevision: number;
+}
+
+export function resolveClaudeProjectFilesPath(projectRoot: string, homeDir: string): string {
+  const projectSlug = projectRoot.replace(/[\\/]/g, '-');
+  return path.join(homeDir, '.claude', 'projects', projectSlug);
 }
 
 export function resolveClaudeJsonlFilePath(projectRoot: string, sessionId: string, homeDir: string): string {
-  const projectSlug = projectRoot.replace(/[\\/]/g, '-');
-  return path.join(homeDir, '.claude', 'projects', projectSlug, `${sessionId}.jsonl`);
+  return path.join(resolveClaudeProjectFilesPath(projectRoot, homeDir), `${sessionId}.jsonl`);
 }
 
 export function createClaudeJsonlMessagesState(): ClaudeJsonlMessagesState {
   return {
     orderedIds: [],
-    messagesById: new Map<string, ChatMessage>()
+    messagesById: new Map<string, ChatMessage>(),
+    runtimePhase: 'idle',
+    activityRevision: 0
   };
 }
 
@@ -296,6 +308,52 @@ function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessa
   messagesById.set(nextMessage.id, mergedMessage);
 }
 
+function updateRuntimePhase(
+  state: ClaudeJsonlMessagesState,
+  record: ClaudeJsonlRecord,
+  role: 'user' | 'assistant' | null,
+  blocks: ChatMessageBlock[]
+): void {
+  const markActivity = (nextPhase: ClaudeJsonlRuntimePhase): void => {
+    state.runtimePhase = nextPhase;
+    state.activityRevision += 1;
+  };
+
+  switch (record.type) {
+    case 'progress':
+      markActivity('running');
+      return;
+    case 'queue-operation':
+      markActivity('running');
+      return;
+    case 'system':
+      if (record.subtype === 'stop_hook_summary' || record.subtype === 'turn_duration') {
+        markActivity('idle');
+        return;
+      }
+      if (record.subtype === 'api_error' || record.subtype === 'local_command') {
+        markActivity('running');
+      }
+      return;
+    case 'last-prompt':
+      markActivity('idle');
+      return;
+    default:
+      break;
+  }
+
+  if (role === 'user') {
+    markActivity('running');
+    return;
+  }
+
+  if (role !== 'assistant') {
+    return;
+  }
+
+  markActivity(blocks.some((block) => block.type === 'tool_use') ? 'running' : 'idle');
+}
+
 export function applyClaudeJsonlLine(state: ClaudeJsonlMessagesState, line: string): boolean {
   const trimmed = line.trim();
   if (!trimmed) {
@@ -309,24 +367,24 @@ export function applyClaudeJsonlLine(state: ClaudeJsonlMessagesState, line: stri
     return false;
   }
 
-  const role = record.message?.role;
-  if (role !== 'user' && role !== 'assistant') {
-    return false;
+  const role = record.message?.role === 'user' || record.message?.role === 'assistant' ? record.message.role : null;
+  let blocks: ChatMessageBlock[] = [];
+
+  if (role) {
+    const messageId = resolveRecordMessageId(record, role);
+    if (messageId) {
+      blocks = extractMessageBlocks(record, messageId);
+      upsertMessage(state.orderedIds, state.messagesById, {
+        id: messageId,
+        role,
+        blocks,
+        status: deriveMessageStatus(blocks),
+        createdAt: record.timestamp ?? new Date().toISOString()
+      });
+    }
   }
 
-  const messageId = resolveRecordMessageId(record, role);
-  if (!messageId) {
-    return false;
-  }
-
-  const blocks = extractMessageBlocks(record, messageId);
-  upsertMessage(state.orderedIds, state.messagesById, {
-    id: messageId,
-    role,
-    blocks,
-    status: deriveMessageStatus(blocks),
-    createdAt: record.timestamp ?? new Date().toISOString()
-  });
+  updateRuntimePhase(state, record, role, blocks);
 
   return true;
 }

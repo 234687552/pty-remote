@@ -11,17 +11,43 @@ export interface CliRegisterResult {
   cliId: string;
 }
 
-export type CliCommandName = 'send-message' | 'reset-session' | 'get-raw-jsonl' | 'get-older-messages';
+export interface ProjectSessionSummary {
+  sessionId: string;
+  title: string;
+  preview: string;
+  updatedAt: string;
+  messageCount: number;
+}
+
+export type CliCommandName =
+  | 'send-message'
+  | 'reset-session'
+  | 'get-runtime-snapshot'
+  | 'get-raw-jsonl'
+  | 'get-older-messages'
+  | 'pick-project-directory'
+  | 'list-project-sessions'
+  | 'select-thread';
 
 export interface CliCommandPayloadMap {
   'send-message': { content: string };
   'reset-session': Record<string, never>;
+  'get-runtime-snapshot': Record<string, never>;
   'get-raw-jsonl': {
     maxChars?: number;
   };
   'get-older-messages': {
     beforeMessageId?: string;
     maxMessages?: number;
+  };
+  'pick-project-directory': Record<string, never>;
+  'list-project-sessions': {
+    cwd: string;
+    maxSessions?: number;
+  };
+  'select-thread': {
+    cwd: string;
+    sessionId: string | null;
   };
 }
 
@@ -31,17 +57,42 @@ export interface GetRawJsonlResultPayload {
   truncated: boolean;
 }
 
+export interface GetRuntimeSnapshotResultPayload {
+  snapshot: RuntimeSnapshot;
+}
+
 export interface GetOlderMessagesResultPayload {
   messages: ChatMessage[];
   sessionId: string | null;
   hasOlderMessages: boolean;
 }
 
+export interface PickProjectDirectoryResultPayload {
+  cwd: string;
+  label: string;
+}
+
+export interface ListProjectSessionsResultPayload {
+  cwd: string;
+  label: string;
+  sessions: ProjectSessionSummary[];
+}
+
+export interface SelectThreadResultPayload {
+  cwd: string;
+  label: string;
+  sessionId: string | null;
+}
+
 export interface CliCommandResultPayloadMap {
   'send-message': null;
   'reset-session': null;
+  'get-runtime-snapshot': GetRuntimeSnapshotResultPayload;
   'get-raw-jsonl': GetRawJsonlResultPayload;
   'get-older-messages': GetOlderMessagesResultPayload;
+  'pick-project-directory': PickProjectDirectoryResultPayload;
+  'list-project-sessions': ListProjectSessionsResultPayload;
+  'select-thread': SelectThreadResultPayload;
 }
 
 export interface CliCommandEnvelope<TName extends CliCommandName = CliCommandName> {
@@ -65,6 +116,11 @@ export interface TerminalChunkPayload {
 export interface TerminalResumeRequestPayload {
   lastOffset: number;
   sessionId: string | null;
+}
+
+export interface TerminalResizePayload {
+  cols: number;
+  rows: number;
 }
 
 export interface TerminalResumeResultPayload {

@@ -27,7 +27,7 @@ input {
 
 .terminal-shell .xterm {
   height: 100%;
-  padding: 8px;
+  padding: 0;
 }
 
 .terminal-shell .xterm-viewport {

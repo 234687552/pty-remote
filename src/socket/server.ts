@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 
 import { Server as SocketIOServer, type Socket } from 'socket.io';
@@ -11,15 +13,21 @@ import type {
   CliRegisterPayload,
   CliRegisterResult,
   CliStatusPayload,
+  GetRuntimeSnapshotResultPayload,
+  ListProjectSessionsResultPayload,
   MessagesUpsertPayload,
+  PickProjectDirectoryResultPayload,
   RuntimeSnapshotPayload,
+  SelectThreadResultPayload,
   TerminalChunkPayload,
+  TerminalResizePayload,
   TerminalResumeRequestPayload,
   TerminalResumeResultPayload,
   WebCommandEnvelope,
   WebInitPayload
 } from '../../shared/protocol.ts';
 import type { CliDescriptor, RuntimeSnapshot } from '../../shared/runtime-types.ts';
+import { listProjectSessions } from '../project-history.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,6 +39,7 @@ const WEB_BUILD_INDEX_FILE = path.join(WEB_BUILD_DIR, 'index.html');
 const PORT = Number.parseInt(process.env.PORT ?? '3001', 10);
 const HOST = process.env.HOST ?? '127.0.0.1';
 const TERMINAL_REPLAY_MAX_BYTES = 256 * 1024;
+const execFileAsync = promisify(execFile);
 
 const MIME_TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -44,7 +53,7 @@ interface CliRuntimeRecord {
   socket: Socket;
   descriptor: CliDescriptor;
   snapshot: RuntimeSnapshot | null;
-  terminalReplay: string;
+  terminalReplay: Buffer;
   terminalReplayOffset: number;
   terminalReplaySessionId: string | null;
 }
@@ -136,32 +145,22 @@ function updateDescriptorFromSnapshot(record: CliRuntimeRecord): void {
   };
 }
 
-function ensureSnapshot(record: CliRuntimeRecord): RuntimeSnapshot {
-  if (!record.snapshot) {
-    record.snapshot = {
-      status: record.descriptor.status,
-      sessionId: record.descriptor.sessionId,
-      messages: [],
-      hasOlderMessages: false,
-      lastError: null
-    };
-  }
-
-  return record.snapshot;
-}
-
 function clearTerminalReplay(record: CliRuntimeRecord, sessionId: string | null): void {
-  record.terminalReplay = '';
+  record.terminalReplay = Buffer.alloc(0);
   record.terminalReplayOffset = 0;
   record.terminalReplaySessionId = sessionId;
 }
 
-function trimTerminalReplay(value: string): string {
-  const buffer = Buffer.from(value, 'utf8');
-  if (buffer.length <= TERMINAL_REPLAY_MAX_BYTES) {
-    return value;
+function setTerminalReplay(record: CliRuntimeRecord, offset: number, data: Buffer): void {
+  if (data.length <= TERMINAL_REPLAY_MAX_BYTES) {
+    record.terminalReplay = data;
+    record.terminalReplayOffset = offset;
+    return;
   }
-  return buffer.subarray(buffer.length - TERMINAL_REPLAY_MAX_BYTES).toString('utf8');
+
+  const start = data.length - TERMINAL_REPLAY_MAX_BYTES;
+  record.terminalReplay = data.subarray(start);
+  record.terminalReplayOffset = offset + start;
 }
 
 function syncTerminalReplaySession(record: CliRuntimeRecord, sessionId: string | null): void {
@@ -171,34 +170,31 @@ function syncTerminalReplaySession(record: CliRuntimeRecord, sessionId: string |
   clearTerminalReplay(record, sessionId);
 }
 
-function applyMessagesUpsert(record: CliRuntimeRecord, payload: MessagesUpsertPayload): void {
-  const snapshot = ensureSnapshot(record);
-  if (snapshot.sessionId !== payload.sessionId) {
-    snapshot.sessionId = payload.sessionId;
-    snapshot.messages = [];
+function appendTerminalReplay(record: CliRuntimeRecord, chunkOffset: number, chunk: string): void {
+  const chunkBytes = Buffer.from(chunk, 'utf8');
+  const replayEndOffset = getTerminalReplayEndOffset(record);
+
+  if (chunkOffset > replayEndOffset) {
+    setTerminalReplay(record, chunkOffset, chunkBytes);
+    return;
   }
 
-  const messagesById = new Map(snapshot.messages.map((message) => [message.id, message]));
-  for (const message of payload.upserts) {
-    messagesById.set(message.id, cloneValue(message));
+  if (chunkOffset < replayEndOffset) {
+    const overlapBytes = replayEndOffset - chunkOffset;
+    if (overlapBytes >= chunkBytes.length) {
+      return;
+    }
+
+    const suffixBytes = chunkBytes.subarray(overlapBytes);
+    setTerminalReplay(record, record.terminalReplayOffset, Buffer.concat([record.terminalReplay, suffixBytes]));
+    return;
   }
 
-  snapshot.messages = payload.recentMessageIds
-    .map((messageId) => messagesById.get(messageId))
-    .filter(Boolean) as RuntimeSnapshot['messages'];
-  snapshot.hasOlderMessages = payload.hasOlderMessages;
-}
-
-function appendTerminalReplay(record: CliRuntimeRecord, chunk: string): void {
-  const nextReplay = `${record.terminalReplay}${chunk}`;
-  const trimmedReplay = trimTerminalReplay(nextReplay);
-  const removedBytes = Buffer.byteLength(nextReplay, 'utf8') - Buffer.byteLength(trimmedReplay, 'utf8');
-  record.terminalReplay = trimmedReplay;
-  record.terminalReplayOffset += removedBytes;
+  setTerminalReplay(record, record.terminalReplayOffset, Buffer.concat([record.terminalReplay, chunkBytes]));
 }
 
 function getTerminalReplayEndOffset(record: CliRuntimeRecord): number {
-  return record.terminalReplayOffset + Buffer.byteLength(record.terminalReplay, 'utf8');
+  return record.terminalReplayOffset + record.terminalReplay.length;
 }
 
 function getTerminalSessionId(record: CliRuntimeRecord | null): string | null {
@@ -220,13 +216,12 @@ function createTerminalResumeResult(payload: TerminalResumeRequestPayload): Term
   const replayEndOffset = getTerminalReplayEndOffset(cliRecord);
 
   if (payload.sessionId === sessionId && payload.lastOffset >= replayStartOffset && payload.lastOffset <= replayEndOffset) {
-    const replayBytes = Buffer.from(cliRecord.terminalReplay, 'utf8');
     const byteOffset = payload.lastOffset - replayStartOffset;
     return {
       mode: 'delta',
       sessionId,
       offset: payload.lastOffset,
-      data: replayBytes.subarray(byteOffset).toString('utf8')
+      data: cliRecord.terminalReplay.subarray(byteOffset).toString('utf8')
     };
   }
 
@@ -234,7 +229,7 @@ function createTerminalResumeResult(payload: TerminalResumeRequestPayload): Term
     mode: 'reset',
     sessionId,
     offset: replayStartOffset,
-    data: cliRecord.terminalReplay
+    data: cliRecord.terminalReplay.toString('utf8')
   };
 }
 
@@ -298,16 +293,130 @@ function forwardCliCommand(socket: Socket, envelope: CliCommandEnvelope): Promis
   });
 }
 
-async function routeWebCommand(command: WebCommandEnvelope): Promise<CliCommandResult> {
+async function pickProjectDirectory(): Promise<PickProjectDirectoryResultPayload> {
+  if (process.platform === 'darwin') {
+    let stdout = '';
+    try {
+      ({ stdout } = await execFileAsync('osascript', [
+        '-e',
+        'POSIX path of (choose folder with prompt "Select a project directory")'
+      ]));
+    } catch (error) {
+      const commandError = error as NodeJS.ErrnoException & { stderr?: string };
+      const stderr = `${commandError.stderr ?? ''}`.trim();
+      if (stderr.includes('用户已取消') || stderr.includes('User canceled') || stderr.includes('(-128)')) {
+        throw new Error('已取消选择目录');
+      }
+      throw error;
+    }
+    const cwd = stdout.trim().replace(/\/+$/, '') || '/';
+    return {
+      cwd,
+      label: path.basename(cwd) || cwd
+    };
+  }
+
+  throw new Error(`Directory picker is not implemented for ${process.platform}`);
+}
+
+async function validateProjectDirectory(cwd: string): Promise<string> {
+  const normalized = path.resolve(cwd);
+  const stat = await fs.stat(normalized);
+  if (!stat.isDirectory()) {
+    throw new Error('Selected path is not a directory');
+  }
+  return normalized;
+}
+
+async function handleServerSideCommand(command: WebCommandEnvelope): Promise<CliCommandResult | null> {
+  if (command.name === 'pick-project-directory') {
+    return {
+      ok: true,
+      payload: await pickProjectDirectory()
+    };
+  }
+
+  if (command.name === 'list-project-sessions') {
+    const cwd = await validateProjectDirectory((command.payload as { cwd: string }).cwd);
+    const sessions = await listProjectSessions(cwd, (command.payload as { maxSessions?: number }).maxSessions);
+    return {
+      ok: true,
+      payload: {
+        cwd,
+        label: path.basename(cwd) || cwd,
+        sessions
+      } satisfies ListProjectSessionsResultPayload
+    };
+  }
+
+  return null;
+}
+
+async function routeWebCommand(command: WebCommandEnvelope, io: SocketIOServer): Promise<CliCommandResult> {
+  const serverSideResult = await handleServerSideCommand(command);
+  if (serverSideResult) {
+    return serverSideResult;
+  }
+
   if (!cliRecord || !cliRecord.descriptor.connected) {
     return { ok: false, error: 'CLI is offline' };
   }
 
-  return forwardCliCommand(cliRecord.socket, {
+  const result = await forwardCliCommand(cliRecord.socket, {
     requestId: randomUUID(),
     name: command.name,
     payload: command.payload
   } satisfies CliCommandEnvelope);
+
+  if (result.ok && command.name === 'select-thread') {
+    const cwd = path.resolve((command.payload as { cwd: string }).cwd);
+    cliRecord.descriptor = {
+      ...cliRecord.descriptor,
+      cwd,
+      label: path.basename(cwd) || cwd,
+      sessionId: (result.payload as SelectThreadResultPayload | undefined)?.sessionId ?? null,
+      lastSeenAt: new Date().toISOString()
+    };
+    emitCliStatus(io);
+  }
+
+  return result;
+}
+
+async function fetchLatestSnapshot(record: CliRuntimeRecord | null): Promise<RuntimeSnapshot | null> {
+  if (!record || !record.descriptor.connected) {
+    return record?.snapshot ? cloneValue(record.snapshot) : null;
+  }
+
+  const result = await forwardCliCommand(record.socket, {
+    requestId: randomUUID(),
+    name: 'get-runtime-snapshot',
+    payload: {}
+  } satisfies CliCommandEnvelope<'get-runtime-snapshot'>);
+
+  if (!result.ok) {
+    return record.snapshot ? cloneValue(record.snapshot) : null;
+  }
+
+  const snapshot = (result.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? null;
+  if (!snapshot) {
+    return record.snapshot ? cloneValue(record.snapshot) : null;
+  }
+
+  record.snapshot = cloneValue(snapshot);
+  updateDescriptorFromSnapshot(record);
+  return cloneValue(snapshot);
+}
+
+async function buildWebInitPayload(): Promise<WebInitPayload> {
+  const snapshot = await fetchLatestSnapshot(cliRecord);
+  return {
+    cli: cliRecord ? cloneValue(cliRecord.descriptor) : null,
+    snapshot,
+    terminalReplayEndOffset: cliRecord ? getTerminalReplayEndOffset(cliRecord) : 0,
+    terminalReplayStartOffset: cliRecord?.terminalReplayOffset ?? 0,
+    terminalSessionId: getTerminalSessionId(cliRecord)
+  };
 }
 
 export async function startSocketServer(): Promise<void> {
@@ -346,7 +455,7 @@ export async function startSocketServer(): Promise<void> {
         socket,
         descriptor: createCliDescriptor(cliId, payload),
         snapshot: cliRecord?.snapshot ?? null,
-        terminalReplay: cliRecord?.terminalReplay ?? '',
+        terminalReplay: cliRecord?.terminalReplay ?? Buffer.alloc(0),
         terminalReplayOffset: cliRecord?.terminalReplayOffset ?? 0,
         terminalReplaySessionId: cliRecord?.terminalReplaySessionId ?? null
       };
@@ -374,10 +483,8 @@ export async function startSocketServer(): Promise<void> {
       }
 
       cliRecord.descriptor.connected = true;
-      applyMessagesUpsert(cliRecord, payload);
-      updateDescriptorFromSnapshot(cliRecord);
+      cliRecord.descriptor.lastSeenAt = new Date().toISOString();
       io.of('/web').emit('runtime:messages-upsert', cloneValue(payload));
-      emitCliStatus(io);
     });
 
     socket.on('cli:terminal-chunk', (payload: TerminalChunkPayload) => {
@@ -387,7 +494,7 @@ export async function startSocketServer(): Promise<void> {
 
       cliRecord.descriptor.connected = true;
       syncTerminalReplaySession(cliRecord, payload.sessionId);
-      appendTerminalReplay(cliRecord, payload.data);
+      appendTerminalReplay(cliRecord, payload.offset, payload.data);
       cliRecord.descriptor.lastSeenAt = new Date().toISOString();
       io.of('/web').emit('terminal:chunk', cloneValue(payload));
     });
@@ -408,20 +515,42 @@ export async function startSocketServer(): Promise<void> {
   });
 
   io.of('/web').on('connection', (socket) => {
-    socket.emit('web:init', {
-      cli: cliRecord ? cloneValue(cliRecord.descriptor) : null,
-      snapshot: cliRecord?.snapshot ? cloneValue(cliRecord.snapshot) : null,
-      terminalReplayEndOffset: cliRecord ? getTerminalReplayEndOffset(cliRecord) : 0,
-      terminalReplayStartOffset: cliRecord?.terminalReplayOffset ?? 0,
-      terminalSessionId: getTerminalSessionId(cliRecord)
-    } satisfies WebInitPayload);
+    void buildWebInitPayload()
+      .then((payload) => {
+        socket.emit('web:init', payload);
+      })
+      .catch((error) => {
+        console.error('failed to build web init payload:', error);
+        socket.emit('web:init', {
+          cli: cliRecord ? cloneValue(cliRecord.descriptor) : null,
+          snapshot: cliRecord?.snapshot ? cloneValue(cliRecord.snapshot) : null,
+          terminalReplayEndOffset: cliRecord ? getTerminalReplayEndOffset(cliRecord) : 0,
+          terminalReplayStartOffset: cliRecord?.terminalReplayOffset ?? 0,
+          terminalSessionId: getTerminalSessionId(cliRecord)
+        } satisfies WebInitPayload);
+      });
 
     socket.on('web:command', async (command: WebCommandEnvelope, callback?: (result: CliCommandResult) => void) => {
-      callback?.(await routeWebCommand(command));
+      try {
+        callback?.(await routeWebCommand(command, io));
+      } catch (error) {
+        callback?.({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Command failed'
+        });
+      }
     });
 
     socket.on('web:terminal-resume', (payload: TerminalResumeRequestPayload, callback?: (result: TerminalResumeResultPayload) => void) => {
       callback?.(createTerminalResumeResult(payload));
+    });
+
+    socket.on('web:terminal-resize', (payload: TerminalResizePayload) => {
+      if (!cliRecord || !cliRecord.descriptor.connected) {
+        return;
+      }
+
+      cliRecord.socket.emit('cli:terminal-resize', cloneValue(payload));
     });
   });
 
