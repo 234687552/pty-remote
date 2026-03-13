@@ -12,6 +12,27 @@ function normalizePreview(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+function getUserMessageText(message: ChatMessage | undefined): string {
+  if (!message) {
+    return '';
+  }
+
+  return normalizePreview(
+    message.blocks
+      .map((block) => {
+        if (block.type === 'text') {
+          return block.text;
+        }
+        return '';
+      })
+      .join(' ')
+  );
+}
+
+function getLatestUserTextMessage(messages: ChatMessage[]): ChatMessage | undefined {
+  return [...messages].reverse().find((message) => message.role === 'user' && Boolean(getUserMessageText(message)));
+}
+
 function getMessagePreview(message: ChatMessage | undefined): string {
   if (!message) {
     return '';
@@ -40,12 +61,14 @@ function compactTitle(text: string): string {
   return `${text.slice(0, 41)}...`;
 }
 
-async function summarizeSessionFile(filePath: string, updatedAt: string): Promise<ProjectSessionSummary> {
+async function summarizeSessionFile(filePath: string, updatedAt: string): Promise<ProjectSessionSummary | null> {
   const rawJsonl = await fs.readFile(filePath, 'utf8');
   const messages = parseClaudeJsonlMessages(rawJsonl);
-  const lastUserMessage = [...messages].reverse().find((message) => message.role === 'user');
-  const fallbackMessage = messages[messages.length - 1];
-  const preview = getMessagePreview(lastUserMessage ?? fallbackMessage) || 'Empty session';
+  const lastUserMessage = getLatestUserTextMessage(messages);
+  const preview = getUserMessageText(lastUserMessage);
+  if (!preview) {
+    return null;
+  }
 
   return {
     sessionId: path.basename(filePath, '.jsonl'),
@@ -87,5 +110,17 @@ export async function listProjectSessions(projectRoot: string, maxSessions = DEF
 
   files.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
 
-  return Promise.all(files.slice(0, normalizedMax).map((file) => summarizeSessionFile(file.filePath, file.updatedAt)));
+  const sessions: ProjectSessionSummary[] = [];
+  for (const file of files) {
+    if (sessions.length >= normalizedMax) {
+      break;
+    }
+
+    const summary = await summarizeSessionFile(file.filePath, file.updatedAt);
+    if (summary) {
+      sessions.push(summary);
+    }
+  }
+
+  return sessions;
 }

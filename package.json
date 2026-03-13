@@ -13,6 +13,8 @@
     "dev:cli": "node --watch --disable-warning=ExperimentalWarning src/cli-main.ts",
     "build": "npm run build:web",
     "build:web": "vite build",
+    "threads": "node --disable-warning=ExperimentalWarning src/cli-main.ts threads",
+    "threads:json": "node --disable-warning=ExperimentalWarning src/cli-main.ts threads list --json",
     "start": "npm run build:web && concurrently -k \"npm:start:socket\" \"npm:start:cli\"",
     "start:socket": "node --disable-warning=ExperimentalWarning src/socket-main.ts",
     "start:cli": "node --disable-warning=ExperimentalWarning src/cli-main.ts",
