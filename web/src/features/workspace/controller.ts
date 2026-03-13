@@ -29,7 +29,6 @@ import {
 } from '@/lib/workspace.ts';
 
 import {
-  selectActiveCliId,
   selectWorkspaceDerivedState
 } from './selectors.ts';
 import type { WorkspaceStore } from './store.ts';
@@ -53,32 +52,6 @@ interface UseWorkspaceControllerParams {
   socketConnected: boolean;
   store: WorkspaceStore;
   terminal: TerminalBridge;
-}
-
-export function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPayload): RuntimeSnapshot {
-  const isSameThread = current.threadKey === payload.threadKey;
-  const baseSnapshot = isSameThread
-    ? current
-    : {
-        ...current,
-        threadKey: payload.threadKey,
-        sessionId: payload.sessionId,
-        messages: [],
-        hasOlderMessages: false
-      };
-
-  const messagesById = new Map(baseSnapshot.messages.map((message) => [message.id, message]));
-  for (const message of payload.upserts) {
-    messagesById.set(message.id, message);
-  }
-
-  return {
-    ...baseSnapshot,
-    messages: payload.recentMessageIds
-      .map((messageId) => messagesById.get(messageId))
-      .filter(Boolean) as ChatMessage[],
-    hasOlderMessages: payload.hasOlderMessages
-  };
 }
 
 export function useWorkspaceController({
@@ -121,19 +94,6 @@ export function useWorkspaceController({
 
     void terminal.resumeSession(store.snapshot.sessionId);
   }, [socketConnected, store.snapshot.sessionId]);
-
-  useEffect(() => {
-    store.setOlderMessages([]);
-    store.setHasOlderMessages(store.snapshot.hasOlderMessages);
-    store.setOlderMessagesLoading(false);
-  }, [store.snapshot.sessionId]);
-
-  useEffect(() => {
-    if (store.olderMessages.length > 0) {
-      return;
-    }
-    store.setHasOlderMessages(store.snapshot.hasOlderMessages);
-  }, [store.olderMessages.length, store.snapshot.hasOlderMessages]);
 
   useEffect(() => {
     if (store.mobilePane === 'terminal') {
@@ -252,16 +212,13 @@ export function useWorkspaceController({
 
   useEffect(() => {
     if (!socketConnected || !activeCliId) {
-      store.setSnapshot(createEmptySnapshot());
+      store.resetRuntimeForCliChange();
       terminal.clearTerminal();
       return;
     }
 
     terminal.prepareForResume();
-    store.setSnapshot(createEmptySnapshot());
-    store.setOlderMessages([]);
-    store.setHasOlderMessages(false);
-    store.setOlderMessagesLoading(false);
+    store.resetRuntimeForCliChange();
 
     void sendCommand('get-runtime-snapshot', {}, activeCliId)
       .then(async (result) => {
@@ -430,9 +387,7 @@ export function useWorkspaceController({
       store.setError('');
       requestedThreadKeyRef.current = `${project.cliId}:${thread.threadKey}:${thread.sessionId ?? 'draft'}`;
       if (thread.sessionId === null) {
-        store.setSnapshot(createEmptySnapshot());
-        store.setOlderMessages([]);
-        store.setHasOlderMessages(false);
+        store.resetRuntimeForDraftThread();
       }
       store.patchWorkspace((current) => ({
         ...current,
@@ -602,8 +557,7 @@ export function useWorkspaceController({
         return false;
       }
 
-      store.setOlderMessages((current) => mergeChronologicalMessages(payload?.messages ?? [], current));
-      store.setHasOlderMessages(Boolean(payload?.hasOlderMessages));
+      store.mergeOlderMessages(payload?.messages ?? [], Boolean(payload?.hasOlderMessages));
       return Boolean(payload?.messages?.length);
     } catch (loadError) {
       store.setError(loadError instanceof Error ? loadError.message : '加载更早消息失败');

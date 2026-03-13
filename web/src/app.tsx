@@ -8,7 +8,7 @@ import { ComposerFeature } from '@/features/composer/ComposerFeature.tsx';
 import { HeaderFeature } from '@/features/header/HeaderFeature.tsx';
 import { SidebarFeature } from '@/features/sidebar/SidebarFeature.tsx';
 import { TerminalFeature } from '@/features/terminal/TerminalFeature.tsx';
-import { applyMessagesUpsert, useWorkspaceController } from '@/features/workspace/controller.ts';
+import { useWorkspaceController } from '@/features/workspace/controller.ts';
 import { selectActiveCliId } from '@/features/workspace/selectors.ts';
 import { useWorkspaceStore } from '@/features/workspace/store.ts';
 import { useCliSocket } from '@/hooks/useCliSocket.ts';
@@ -32,7 +32,7 @@ export function App() {
     onConnect: () => terminalEventHandlersRef.current.onConnect(),
     onDisconnect: () => terminalEventHandlersRef.current.onDisconnect(),
     onMessagesUpsert: (payload) => {
-      store.setSnapshot((current) => applyMessagesUpsert(current, payload));
+      store.applyMessagesUpsert(payload);
     },
     onSnapshot: (nextSnapshot) => {
       store.setSnapshot(nextSnapshot);
