@@ -1,4 +1,4 @@
-export type WorkspacePane = 'chat' | 'terminal';
+import type { WorkspacePane } from '@/features/workspace/types.ts';
 
 interface MobilePaneTabsProps {
   activePane: WorkspacePane;
