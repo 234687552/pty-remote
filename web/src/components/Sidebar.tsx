@@ -179,7 +179,9 @@ export function Sidebar({
                 key={project.id}
                 className={[
                   'rounded-2xl border px-2.5 py-2.5 transition',
-                  isActiveProject ? 'border-zinc-900 bg-zinc-950 text-white shadow-[0_10px_24px_rgba(0,0,0,0.12)]' : 'border-zinc-200 bg-transparent'
+                  isActiveProject
+                    ? 'border-zinc-300 bg-zinc-100/90 text-zinc-900 shadow-[0_10px_24px_rgba(24,24,27,0.08)]'
+                    : 'border-zinc-200 bg-transparent'
                 ].join(' ')}
               >
                 <div className="flex items-start justify-between gap-2">
@@ -189,10 +191,10 @@ export function Sidebar({
                     className="min-w-0 text-left"
                   >
                     <div className="truncate text-[13px] font-semibold">{project.label}</div>
-                    <div className={['mt-0.5 line-clamp-1 text-[11px]', isActiveProject ? 'text-zinc-300' : 'text-zinc-500'].join(' ')}>
+                    <div className={['mt-0.5 line-clamp-1 text-[11px]', isActiveProject ? 'text-zinc-600' : 'text-zinc-500'].join(' ')}>
                       {project.cwd}
                     </div>
-                    <div className={['mt-0.5 text-[10px]', isActiveProject ? 'text-zinc-400' : 'text-zinc-500'].join(' ')}>
+                    <div className={['mt-0.5 text-[10px]', isActiveProject ? 'text-zinc-600' : 'text-zinc-500'].join(' ')}>
                       {projectCli?.label ?? project.cliId}
                     </div>
                   </button>
@@ -202,7 +204,9 @@ export function Sidebar({
                       onClick={() => onCreateThread(project.id)}
                       className={[
                         'flex h-8 w-8 items-center justify-center rounded-lg border transition',
-                        isActiveProject ? 'border-sky-200 bg-sky-300 text-zinc-950 hover:bg-sky-200' : 'border-zinc-900 bg-zinc-900 text-white hover:bg-zinc-700'
+                        isActiveProject
+                          ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50'
+                          : 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50'
                       ].join(' ')}
                       aria-label="新线程"
                       title="新线程"
@@ -217,7 +221,12 @@ export function Sidebar({
 
                 <div className="mt-2 space-y-1">
                   {projectThreads.length === 0 ? (
-                    <div className={['rounded-xl border px-2.5 py-2 text-[11px]', isActiveProject ? 'border-white/10 text-zinc-300' : 'border-zinc-200 text-zinc-500'].join(' ')}>
+                    <div
+                      className={[
+                        'rounded-xl border px-2.5 py-2 text-[11px]',
+                        isActiveProject ? 'border-zinc-300 bg-white/70 text-zinc-600' : 'border-zinc-200 text-zinc-500'
+                      ].join(' ')}
+                    >
                       这个 project 还没有可用 thread。
                     </div>
                   ) : (
@@ -232,10 +241,10 @@ export function Sidebar({
                             'block w-full rounded-xl border px-2.5 py-2 text-left transition',
                             isActiveThread
                               ? isActiveProject
-                                ? 'border-white/10 bg-white/10 text-white'
+                                ? 'border-zinc-300 bg-white text-zinc-950 shadow-sm'
                                 : 'border-sky-200 bg-sky-100 text-zinc-950'
                               : isActiveProject
-                                ? 'border-transparent bg-transparent text-white hover:bg-white/6'
+                                ? 'border-transparent bg-transparent text-zinc-800 hover:bg-white/70'
                                 : 'border-transparent bg-transparent text-zinc-800 hover:bg-zinc-100'
                           ].join(' ')}
                         >
@@ -243,7 +252,7 @@ export function Sidebar({
                           <div
                             className={[
                               'mt-1 flex items-center justify-between gap-3 text-[10px]',
-                              isActiveThread ? (isActiveProject ? 'text-zinc-300' : 'text-zinc-700') : isActiveProject ? 'text-zinc-400' : 'text-zinc-500'
+                              isActiveThread ? (isActiveProject ? 'text-zinc-600' : 'text-zinc-700') : isActiveProject ? 'text-zinc-500' : 'text-zinc-500'
                             ].join(' ')}
                           >
                             <span className="min-w-0 truncate" title={thread.sessionId ?? 'new'}>

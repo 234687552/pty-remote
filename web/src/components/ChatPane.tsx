@@ -160,6 +160,22 @@ function getSvgDimensions(svg: string): SvgDimensions | null {
   return null;
 }
 
+function createMermaidRenderHost(): HTMLDivElement {
+  const renderHost = document.createElement('div');
+  renderHost.setAttribute('aria-hidden', 'true');
+  renderHost.style.position = 'fixed';
+  renderHost.style.top = '0';
+  renderHost.style.left = '-100000px';
+  renderHost.style.width = 'max-content';
+  renderHost.style.height = 'max-content';
+  renderHost.style.overflow = 'visible';
+  renderHost.style.pointerEvents = 'none';
+  renderHost.style.visibility = 'hidden';
+
+  (document.body || document.documentElement).appendChild(renderHost);
+  return renderHost;
+}
+
 function MermaidDiagram({ definition }: { definition: string }) {
   const inlineContainerRef = useRef<HTMLDivElement | null>(null);
   const expandedViewportRef = useRef<HTMLDivElement | null>(null);
@@ -197,11 +213,12 @@ function MermaidDiagram({ definition }: { definition: string }) {
     setError('');
 
     const renderDiagram = async () => {
+      const renderHost = createMermaidRenderHost();
+
       try {
         const mermaidApi = await loadMermaid();
         const renderId = `mermaid-diagram-${++mermaidRenderSequence}`;
-        const renderContainer = document.createElement('div');
-        const { svg: nextSvg, bindFunctions } = await mermaidApi.render(renderId, definition, renderContainer);
+        const { svg: nextSvg, bindFunctions } = await mermaidApi.render(renderId, definition, renderHost);
         if (cancelled) {
           return;
         }
@@ -223,6 +240,8 @@ function MermaidDiagram({ definition }: { definition: string }) {
         setSvgDimensions(null);
         bindFunctionsRef.current = null;
         setError(renderError instanceof Error ? renderError.message : 'Mermaid could not render this diagram.');
+      } finally {
+        renderHost.remove();
       }
     };
 

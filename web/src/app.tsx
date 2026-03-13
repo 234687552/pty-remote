@@ -70,9 +70,16 @@ export function App() {
   return (
     <AppShell
       sidebar={<SidebarFeature clis={clis} controller={controller} store={store} />}
-      header={<HeaderFeature clis={clis} store={store} />}
       mobilePane={store.mobilePane}
-      onMobilePaneChange={store.setMobilePane}
+      renderHeader={({ mobileTitleVisible }) => (
+        <HeaderFeature
+          clis={clis}
+          mobilePane={store.mobilePane}
+          mobileTitleVisible={mobileTitleVisible}
+          onMobilePaneChange={store.setMobilePane}
+          store={store}
+        />
+      )}
       chat={<ChatFeature clis={clis} controller={controller} socketConnected={socketConnected} store={store} />}
       terminal={<TerminalFeature store={store} terminal={terminal} />}
       composer={<ComposerFeature clis={clis} controller={controller} socketConnected={socketConnected} store={store} />}

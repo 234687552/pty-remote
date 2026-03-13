@@ -34,8 +34,11 @@ export function Composer({
   onSubmit
 }: ComposerProps) {
   return (
-    <form onSubmit={onSubmit} className="shrink-0 px-1 py-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] md:-mx-6 md:-mb-6 md:px-3 md:py-2 md:pb-2">
-      <div className="mb-1.5 grid grid-cols-3 gap-1.5 text-[11px] font-medium md:flex md:flex-wrap md:gap-2 md:text-xs">
+    <form
+      onSubmit={onSubmit}
+      className="shrink-0 border-t border-zinc-200/80 bg-white/96 px-2 py-2 shadow-[0_-10px_24px_rgba(0,0,0,0.04)] backdrop-blur-sm pb-[calc(env(safe-area-inset-bottom)+0.5rem)] md:-mx-6 md:-mb-6 md:border-0 md:bg-transparent md:px-3 md:py-2 md:pb-2 md:shadow-none md:backdrop-blur-none"
+    >
+      <div className="mb-1 grid grid-cols-3 gap-1 text-[11px] font-medium md:flex md:flex-wrap md:gap-2 md:text-xs">
         {[conversationBadge, socketBadge, cliBadge].map((badge) => (
           <span key={badge.label} className={['truncate rounded-full px-2.5 py-1 text-center md:px-3', badge.className].join(' ')}>
             {badge.label}: {badge.value}
@@ -49,13 +52,13 @@ export function Composer({
           value={prompt}
           onChange={(event) => onPromptChange(event.target.value)}
           placeholder={placeholder}
-          className="h-14 w-full rounded-xl border border-zinc-300 bg-white px-5 pr-28 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500"
+          className="h-[3.25rem] w-full rounded-xl border border-zinc-300 bg-white px-4 pr-24 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500"
           disabled={!canSend}
         />
         <button
           type={busy ? 'button' : 'submit'}
           onClick={busy ? onStop : undefined}
-          className="absolute top-1/2 right-2 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-zinc-900 text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className="absolute top-1/2 right-1.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-zinc-900 text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={busy ? !canStop : !canSend}
           aria-label={busy ? '结束当前运行' : '发送消息'}
           title={busy ? '结束当前运行' : '发送消息'}
