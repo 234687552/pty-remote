@@ -141,7 +141,7 @@ export class PtyManager {
 
   private currentCwd: string;
 
-  private currentLabel: string;
+  private cliLabel: string;
 
   private jsonlRefreshTimer: NodeJS.Timeout | null = null;
 
@@ -155,7 +155,7 @@ export class PtyManager {
     this.options = options;
     this.callbacks = callbacks;
     this.currentCwd = options.defaultCwd;
-    this.currentLabel = options.defaultLabel;
+    this.cliLabel = options.defaultLabel;
     this.terminalSize = {
       cols: options.terminalCols,
       rows: options.terminalRows
@@ -175,7 +175,7 @@ export class PtyManager {
     const handle = this.getActiveHandle();
     return {
       cwd: handle?.cwd ?? this.currentCwd,
-      label: handle?.label ?? this.currentLabel,
+      label: this.cliLabel,
       sessionId: handle?.sessionId ?? null,
       threadKey: handle?.threadKey ?? null
     };
@@ -220,7 +220,6 @@ export class PtyManager {
 
     this.activeThreadKey = handle.threadKey;
     this.currentCwd = handle.cwd;
-    this.currentLabel = handle.label;
     handle.lifecycle = 'attached';
     handle.detachedAt = null;
     handle.jsonlMissingSince = null;

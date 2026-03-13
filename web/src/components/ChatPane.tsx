@@ -44,6 +44,8 @@ interface ChatPaneProps {
   onLoadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
 }
 
+const QUESTION_JUMP_LONG_PRESS_DELAY_MS = 420;
+
 let mermaidRenderSequence = 0;
 let mermaidLoader: Promise<MermaidApi> | null = null;
 let panzoomLoader: Promise<typeof import('panzoom').default> | null = null;
@@ -947,7 +949,8 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
 export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesLoading, visible, onLoadOlderMessages }: ChatPaneProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
-  const questionJumpClickTimeoutRef = useRef<number | null>(null);
+  const questionJumpPressTimeoutRef = useRef<number | null>(null);
+  const questionJumpLongPressTriggeredRef = useRef(false);
   const questionMessageRefs = useRef(new Map<string, HTMLDivElement>());
 
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
@@ -959,8 +962,8 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
 
   useEffect(() => {
     return () => {
-      if (questionJumpClickTimeoutRef.current !== null) {
-        window.clearTimeout(questionJumpClickTimeoutRef.current);
+      if (questionJumpPressTimeoutRef.current !== null) {
+        window.clearTimeout(questionJumpPressTimeoutRef.current);
       }
     };
   }, []);
@@ -1044,24 +1047,59 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
     });
   }
 
-  function handleQuestionJumpButtonClick(direction: 'up' | 'down'): void {
-    if (questionJumpClickTimeoutRef.current !== null) {
-      window.clearTimeout(questionJumpClickTimeoutRef.current);
+  function clearQuestionJumpPressTimeout(): void {
+    if (questionJumpPressTimeoutRef.current !== null) {
+      window.clearTimeout(questionJumpPressTimeoutRef.current);
+      questionJumpPressTimeoutRef.current = null;
     }
-
-    questionJumpClickTimeoutRef.current = window.setTimeout(() => {
-      questionJumpClickTimeoutRef.current = null;
-      handleJumpToQuestion(direction);
-    }, 220);
   }
 
-  function handleQuestionJumpButtonDoubleClick(direction: 'up' | 'down'): void {
-    if (questionJumpClickTimeoutRef.current !== null) {
-      window.clearTimeout(questionJumpClickTimeoutRef.current);
-      questionJumpClickTimeoutRef.current = null;
+  function handleQuestionJumpButtonPressStart(direction: 'up' | 'down', event: React.PointerEvent<HTMLButtonElement>): void {
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return;
     }
 
-    handleJumpToMessagesEdge(direction);
+    clearQuestionJumpPressTimeout();
+    questionJumpLongPressTriggeredRef.current = false;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+
+    questionJumpPressTimeoutRef.current = window.setTimeout(() => {
+      questionJumpPressTimeoutRef.current = null;
+      questionJumpLongPressTriggeredRef.current = true;
+      handleJumpToMessagesEdge(direction);
+    }, QUESTION_JUMP_LONG_PRESS_DELAY_MS);
+  }
+
+  function handleQuestionJumpButtonPressEnd(direction: 'up' | 'down', event: React.PointerEvent<HTMLButtonElement>): void {
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    clearQuestionJumpPressTimeout();
+
+    if (questionJumpLongPressTriggeredRef.current) {
+      questionJumpLongPressTriggeredRef.current = false;
+      return;
+    }
+
+    handleJumpToQuestion(direction);
+  }
+
+  function handleQuestionJumpButtonPressCancel(event: React.PointerEvent<HTMLButtonElement>): void {
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    clearQuestionJumpPressTimeout();
+    questionJumpLongPressTriggeredRef.current = false;
+  }
+
+  function handleQuestionJumpButtonKeyboardClick(direction: 'up' | 'down', event: React.MouseEvent<HTMLButtonElement>): void {
+    if (event.detail !== 0) {
+      return;
+    }
+
+    handleJumpToQuestion(direction);
   }
 
   async function handleLoadOlderMessages(): Promise<void> {
@@ -1139,30 +1177,34 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
         </div>
 
         {questionMessageIds.length > 0 ? (
-          <div className="pointer-events-none absolute right-3 bottom-3 z-10 md:right-4 md:bottom-4">
-            <div className="pointer-events-auto flex flex-col overflow-hidden rounded-2xl border border-zinc-200/80 bg-white/65 shadow-[0_10px_24px_rgba(0,0,0,0.08)] backdrop-blur-sm">
+          <div className="pointer-events-none absolute right-3 bottom-14 z-10 md:right-4 md:bottom-16">
+            <div className="pointer-events-auto flex flex-col overflow-hidden rounded-xl border border-zinc-200/80 bg-white/65 shadow-[0_8px_20px_rgba(0,0,0,0.08)] backdrop-blur-sm">
               <button
                 type="button"
-                onClick={() => handleQuestionJumpButtonClick('up')}
-                onDoubleClick={() => handleQuestionJumpButtonDoubleClick('up')}
-                className="flex h-9 w-9 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-10 md:w-10"
-                aria-label="跳到上一条提问，双击直达顶部"
-                title="跳到上一条提问，双击直达顶部"
+                onClick={(event) => handleQuestionJumpButtonKeyboardClick('up', event)}
+                onPointerDown={(event) => handleQuestionJumpButtonPressStart('up', event)}
+                onPointerUp={(event) => handleQuestionJumpButtonPressEnd('up', event)}
+                onPointerCancel={handleQuestionJumpButtonPressCancel}
+                className="touch-manipulation select-none flex h-8 w-8 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-9 md:w-9"
+                aria-label="跳到上一条提问，长按直达顶部"
+                title="跳到上一条提问，长按直达顶部"
               >
-                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
                   <path d="M5 12l5-5 5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
               <div className="h-px bg-zinc-200/80" />
               <button
                 type="button"
-                onClick={() => handleQuestionJumpButtonClick('down')}
-                onDoubleClick={() => handleQuestionJumpButtonDoubleClick('down')}
-                className="flex h-9 w-9 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-10 md:w-10"
-                aria-label="跳到下一条提问，双击直达底部"
-                title="跳到下一条提问，双击直达底部"
+                onClick={(event) => handleQuestionJumpButtonKeyboardClick('down', event)}
+                onPointerDown={(event) => handleQuestionJumpButtonPressStart('down', event)}
+                onPointerUp={(event) => handleQuestionJumpButtonPressEnd('down', event)}
+                onPointerCancel={handleQuestionJumpButtonPressCancel}
+                className="touch-manipulation select-none flex h-8 w-8 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-9 md:w-9"
+                aria-label="跳到下一条提问，长按直达底部"
+                title="跳到下一条提问，长按直达底部"
               >
-                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
                   <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>

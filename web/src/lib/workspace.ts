@@ -199,7 +199,7 @@ export function hydrateThreadFromSnapshot(
     sessionId: snapshot.sessionId,
     title: compactPreview(previewSource || thread.title, 44),
     preview: compactPreview(previewSource || thread.preview, 88),
-    updatedAt: messages.length > 0 ? messages[messages.length - 1]?.createdAt ?? thread.updatedAt : thread.updatedAt,
+    updatedAt: latestUserMessage?.createdAt ?? thread.updatedAt,
     messageCount: messages.length || thread.messageCount,
     draft: !snapshot.sessionId
   };

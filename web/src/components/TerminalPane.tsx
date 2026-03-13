@@ -22,16 +22,16 @@ export function TerminalPane({ hostRef, viewportRef, visible, onJumpToEdge }: Te
         </div>
       </div>
 
-      <div className="pointer-events-none absolute right-3 bottom-3 z-10 md:right-4 md:bottom-4">
-        <div className="pointer-events-auto flex flex-col overflow-hidden rounded-2xl border border-zinc-200/80 bg-white/65 shadow-[0_10px_24px_rgba(0,0,0,0.08)] backdrop-blur-sm">
+      <div className="pointer-events-none absolute right-3 bottom-14 z-10 md:right-4 md:bottom-16">
+        <div className="pointer-events-auto flex flex-col overflow-hidden rounded-xl border border-zinc-200/80 bg-white/65 shadow-[0_8px_20px_rgba(0,0,0,0.08)] backdrop-blur-sm">
           <button
             type="button"
             onClick={() => onJumpToEdge('up')}
-            className="flex h-9 w-9 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-10 md:w-10"
+            className="flex h-8 w-8 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-9 md:w-9"
             aria-label="终端直达顶部"
             title="终端直达顶部"
           >
-            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
               <path d="M5 12l5-5 5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
@@ -39,11 +39,11 @@ export function TerminalPane({ hostRef, viewportRef, visible, onJumpToEdge }: Te
           <button
             type="button"
             onClick={() => onJumpToEdge('down')}
-            className="flex h-9 w-9 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-10 md:w-10"
+            className="flex h-8 w-8 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-9 md:w-9"
             aria-label="终端直达底部"
             title="终端直达底部"
           >
-            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
               <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>

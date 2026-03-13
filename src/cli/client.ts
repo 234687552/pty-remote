@@ -57,7 +57,7 @@ const manager = new PtyManager(
     claudeBin: process.env.CLAUDE_BIN ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude'),
     permissionMode: CLAUDE_PERMISSION_MODE,
     defaultCwd: DEFAULT_ROOT_DIR,
-    defaultLabel: (process.env.PTY_REMOTE_CLI_LABEL ?? DEFAULT_CLI_LABEL).trim(),
+    defaultLabel: process.env.PTY_REMOTE_CLI_LABEL?.trim() || DEFAULT_CLI_LABEL,
     terminalCols: TERMINAL_COLS,
     terminalRows: TERMINAL_ROWS,
     terminalReplayMaxBytes: TERMINAL_REPLAY_MAX_BYTES,

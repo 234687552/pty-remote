@@ -36,7 +36,7 @@ export function Composer({
   return (
     <form
       onSubmit={onSubmit}
-      className="shrink-0 border-t border-zinc-200/80 bg-white/96 px-2 py-2 shadow-[0_-10px_24px_rgba(0,0,0,0.04)] backdrop-blur-sm pb-[calc(env(safe-area-inset-bottom)+0.5rem)] md:-mx-6 md:-mb-6 md:border-0 md:bg-transparent md:px-3 md:py-2 md:pb-2 md:shadow-none md:backdrop-blur-none"
+      className="shrink-0 border-t border-zinc-200/80 bg-white/96 px-2 py-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] shadow-[0_-10px_24px_rgba(0,0,0,0.04)] backdrop-blur-sm md:mt-4 md:rounded-3xl md:border md:border-zinc-200 md:bg-white md:px-4 md:py-3 md:pb-3 md:shadow-sm md:backdrop-blur-none"
     >
       <div className="mb-1 grid grid-cols-3 gap-1 text-[11px] font-medium md:flex md:flex-wrap md:gap-2 md:text-xs">
         {[conversationBadge, socketBadge, cliBadge].map((badge) => (

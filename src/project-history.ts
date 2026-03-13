@@ -61,12 +61,13 @@ function compactTitle(text: string): string {
   return `${text.slice(0, 41)}...`;
 }
 
-async function summarizeSessionFile(filePath: string, updatedAt: string): Promise<ProjectSessionSummary | null> {
+async function summarizeSessionFile(filePath: string): Promise<ProjectSessionSummary | null> {
   const rawJsonl = await fs.readFile(filePath, 'utf8');
   const messages = parseClaudeJsonlMessages(rawJsonl);
   const lastUserMessage = getLatestUserTextMessage(messages);
   const preview = getUserMessageText(lastUserMessage);
-  if (!preview) {
+  const updatedAt = lastUserMessage?.createdAt ?? null;
+  if (!preview || !updatedAt) {
     return null;
   }
 
@@ -94,33 +95,18 @@ export async function listProjectSessions(projectRoot: string, maxSessions = DEF
     throw error;
   }
 
-  const files = await Promise.all(
-    entries
-      .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
-      .map(async (entry) => {
-        const filePath = path.join(projectFilesPath, entry.name);
-        const stat = await fs.stat(filePath);
-        return {
-          filePath,
-          updatedAt: stat.mtime.toISOString(),
-          updatedAtMs: stat.mtimeMs
-        };
-      })
-  );
+  const sessions = (
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
+        .map((entry) => summarizeSessionFile(path.join(projectFilesPath, entry.name)))
+    )
+  )
+    .filter((summary): summary is ProjectSessionSummary => Boolean(summary))
+    .sort((left, right) => {
+      const timestampDiff = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      return timestampDiff || right.sessionId.localeCompare(left.sessionId);
+    });
 
-  files.sort((left, right) => right.updatedAtMs - left.updatedAtMs);
-
-  const sessions: ProjectSessionSummary[] = [];
-  for (const file of files) {
-    if (sessions.length >= normalizedMax) {
-      break;
-    }
-
-    const summary = await summarizeSessionFile(file.filePath, file.updatedAt);
-    if (summary) {
-      sessions.push(summary);
-    }
-  }
-
-  return sessions;
+  return sessions.slice(0, normalizedMax);
 }
