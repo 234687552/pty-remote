@@ -29,6 +29,7 @@ const SOCKET_URL = process.env.SOCKET_URL ?? `http://${process.env.HOST ?? '127.
 const execFileAsync = promisify(execFile);
 const CLI_ID = resolveCliId();
 const DEFAULT_CLI_LABEL = resolveDefaultCliLabel();
+const CLI_LABEL = process.env.PTY_REMOTE_CLI_LABEL?.trim() || DEFAULT_CLI_LABEL;
 const PTY_BACKEND_NAME = 'node-pty';
 const TERMINAL_REPLAY_MAX_BYTES = 1024 * 1024;
 const RECENT_OUTPUT_MAX_CHARS = 12_000;
@@ -57,7 +58,6 @@ const manager = new PtyManager(
     claudeBin: process.env.CLAUDE_BIN ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude'),
     permissionMode: CLAUDE_PERMISSION_MODE,
     defaultCwd: DEFAULT_ROOT_DIR,
-    defaultLabel: process.env.PTY_REMOTE_CLI_LABEL?.trim() || DEFAULT_CLI_LABEL,
     terminalCols: TERMINAL_COLS,
     terminalRows: TERMINAL_ROWS,
     terminalReplayMaxBytes: TERMINAL_REPLAY_MAX_BYTES,
@@ -285,7 +285,7 @@ function connectSocketClient(): void {
       'cli:register',
       {
         cliId: CLI_ID,
-        label: registration.label,
+        label: CLI_LABEL,
         cwd: registration.cwd,
         threadKey: registration.threadKey,
         sessionId: registration.sessionId,

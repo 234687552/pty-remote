@@ -337,7 +337,6 @@ async function routeWebCommand(command: WebCommandEnvelope, io: SocketIOServer):
     record.descriptor = {
       ...record.descriptor,
       cwd,
-      label: path.basename(cwd) || cwd,
       threadKey: payload?.threadKey ?? (command.payload as { threadKey?: string }).threadKey ?? null,
       sessionId: payload?.sessionId ?? null,
       lastSeenAt: new Date().toISOString()

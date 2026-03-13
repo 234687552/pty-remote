@@ -87,7 +87,6 @@ export function Sidebar({
 }: SidebarProps) {
   const dragStateRef = useRef<{ moved: boolean; pointerId: number; startTop: number; startY: number } | null>(null);
   const suppressClickRef = useRef(false);
-  const activeProjectLabel = projects.find((project) => project.id === activeProjectId)?.label ?? '选择项目';
   const resolvedToggleTop = typeof window !== 'undefined' && window.innerWidth < 1024 ? Math.max(toggleTop, 72) : toggleTop;
 
   function handleOpenSidebarButtonClick(event: React.MouseEvent<HTMLButtonElement>): void {
@@ -146,24 +145,6 @@ export function Sidebar({
 
   const sidebarContent = (
     <>
-      <div className="flex items-center justify-between border-b border-zinc-200 px-3 py-3 lg:hidden">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold text-zinc-900">Projects</div>
-          <div className="truncate text-xs text-zinc-500">{activeProjectLabel}</div>
-        </div>
-        <button
-          type="button"
-          onClick={() => onCollapsedChange(true)}
-          className="flex h-9 w-9 items-center justify-center rounded-xl border border-zinc-300 bg-white text-zinc-700 transition hover:bg-zinc-50"
-          aria-label="关闭边栏"
-          title="关闭边栏"
-        >
-          <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
-            <path d="M6 6l8 8M14 6l-8 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-          </svg>
-        </button>
-      </div>
-
       <div className="flex-1 space-y-2.5 overflow-auto p-2.5 pt-2.5">
         {projects.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">

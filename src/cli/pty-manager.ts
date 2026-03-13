@@ -33,7 +33,6 @@ export interface PtyManagerOptions {
   claudeBin: string;
   permissionMode: string;
   defaultCwd: string;
-  defaultLabel: string;
   terminalCols: number;
   terminalRows: number;
   terminalReplayMaxBytes: number;
@@ -141,8 +140,6 @@ export class PtyManager {
 
   private currentCwd: string;
 
-  private cliLabel: string;
-
   private jsonlRefreshTimer: NodeJS.Timeout | null = null;
 
   private snapshotEmitTimer: NodeJS.Timeout | null = null;
@@ -155,7 +152,6 @@ export class PtyManager {
     this.options = options;
     this.callbacks = callbacks;
     this.currentCwd = options.defaultCwd;
-    this.cliLabel = options.defaultLabel;
     this.terminalSize = {
       cols: options.terminalCols,
       rows: options.terminalRows
@@ -168,14 +164,12 @@ export class PtyManager {
 
   getRegistrationPayload(): {
     cwd: string;
-    label: string;
     sessionId: string | null;
     threadKey: string | null;
   } {
     const handle = this.getActiveHandle();
     return {
       cwd: handle?.cwd ?? this.currentCwd,
-      label: this.cliLabel,
       sessionId: handle?.sessionId ?? null,
       threadKey: handle?.threadKey ?? null
     };

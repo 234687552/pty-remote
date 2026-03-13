@@ -1,4 +1,4 @@
-import { Children, useEffect, useMemo, useRef, useState } from 'react';
+import { Children, memo, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 
 import ReactMarkdown from 'react-markdown';
@@ -466,7 +466,13 @@ function MermaidDiagram({ definition }: { definition: string }) {
   );
 }
 
-function MessageMarkdown({ content, tone = 'default' }: { content: string; tone?: 'default' | 'inverse' }) {
+const MessageMarkdown = memo(function MessageMarkdown({
+  content,
+  tone = 'default'
+}: {
+  content: string;
+  tone?: 'default' | 'inverse';
+}) {
   const isInverse = tone === 'inverse';
 
   return (
@@ -553,7 +559,7 @@ function MessageMarkdown({ content, tone = 'default' }: { content: string; tone?
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 function getToolInputPreview(input: string, maxChars = 180): string {
   const normalized = input.replace(/\s+/g, ' ').trim();
@@ -743,20 +749,27 @@ function createToolCallIndex(messages: ChatMessage[]): Map<string, ToolCallMeta>
 }
 
 function hasRenderableMessageContent(message: ChatMessage): boolean {
-  return message.blocks.some((block) => block.type !== 'tool_result');
+  return message.blocks.some((block) => {
+    if (block.type === 'tool_use') {
+      return true;
+    }
+
+    if (block.type === 'text') {
+      return Boolean(block.text.trim());
+    }
+
+    return false;
+  });
 }
 
 function TextBlockContent({
   block,
-  isStreaming,
   tone
 }: {
   block: Extract<ChatMessageBlock, { type: 'text' }>;
-  isStreaming: boolean;
   tone?: 'default' | 'inverse';
 }) {
-  const content = isStreaming ? `${block.text}\n\n...` : block.text;
-  return <MessageMarkdown content={content} tone={tone} />;
+  return <MessageMarkdown content={block.text} tone={tone} />;
 }
 
 function resolveToolUseStatus(
@@ -910,19 +923,17 @@ function ToolUseBlockContent({
 
 function MessageContent({ message, toolCallIndex }: { message: ChatMessage; toolCallIndex: Map<string, ToolCallMeta> }) {
   if (message.blocks.length === 0) {
-    return <MessageMarkdown content={message.status === 'streaming' ? '...' : ''} />;
+    return null;
   }
 
   return (
     <div className="space-y-2">
       {message.blocks.map((block, index) => {
         if (block.type === 'text') {
-          const isLastBlock = index === message.blocks.length - 1;
           return (
             <TextBlockContent
               key={block.id}
               block={block}
-              isStreaming={message.status === 'streaming' && isLastBlock}
               tone={message.role === 'user' ? 'inverse' : 'default'}
             />
           );
