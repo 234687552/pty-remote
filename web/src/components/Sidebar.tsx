@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { PROVIDER_LABELS, PROVIDER_ORDER, type CliDescriptor, type ProviderId } from '@shared/runtime-types.ts';
 
@@ -20,15 +20,14 @@ interface SidebarProps {
   projects: ProjectEntry[];
   projectsRefreshing: boolean;
   onActivateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => void;
-  onAddProject: () => void;
+  onAddProject: (input: { cwd: string; providerId: ProviderId }) => Promise<void>;
+  onPickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
   onMobileOpenChange: (open: boolean) => void;
   onRefreshAllProjects: () => void;
   onSelectCli: (cliId: string | null) => void;
   onSelectProject: (project: ProjectEntry) => void;
   onSelectProvider: (project: ProjectEntry, providerId: ProviderId) => void;
 }
-
-const MOBILE_OVERLAY_CLOSE_GUARD_MS = 280;
 
 interface ProviderSection {
   id: ProviderId;
@@ -115,6 +114,7 @@ export function Sidebar({
   projectsRefreshing,
   onActivateConversation,
   onAddProject,
+  onPickProjectDirectory,
   onMobileOpenChange,
   onRefreshAllProjects,
   onSelectCli,
@@ -122,24 +122,102 @@ export function Sidebar({
   onSelectProvider
 }: SidebarProps) {
   const [expandedProvidersByProject, setExpandedProvidersByProject] = useState<Record<string, ProviderId | null>>({});
-  const lastMobileOpenAtRef = useRef(0);
+  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
+  const [draftCwd, setDraftCwd] = useState('');
+  const [draftProviderId, setDraftProviderId] = useState<ProviderId>(activeProviderId ?? 'claude');
+  const [addProjectPending, setAddProjectPending] = useState(false);
+  const [pickDirectoryPending, setPickDirectoryPending] = useState(false);
+  const [addProjectError, setAddProjectError] = useState('');
   const providerSectionsByProject = useMemo(
     () =>
       Object.fromEntries(projects.map((project) => [project.id, buildProviderSections(project, clis, projectConversationsByKey)])),
     [clis, projectConversationsByKey, projects]
   );
+  useEffect(() => {
+    if (!isAddDialogOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !addProjectPending && !pickDirectoryPending) {
+        setIsAddDialogOpen(false);
+        setAddProjectError('');
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [addProjectPending, isAddDialogOpen, pickDirectoryPending]);
 
   useEffect(() => {
-    if (mobileOpen) {
-      lastMobileOpenAtRef.current = window.performance?.now?.() ?? Date.now();
+    if (!isAddDialogOpen) {
+      return;
     }
-  }, [mobileOpen]);
+
+    setDraftProviderId(activeProviderId ?? 'claude');
+  }, [activeProviderId, isAddDialogOpen]);
 
   function selectProvider(projectId: string, providerId: ProviderId): void {
     setExpandedProvidersByProject((current) => ({
       ...current,
       [projectId]: providerId
     }));
+  }
+
+  function openAddProjectDialog(): void {
+    setDraftCwd('');
+    setDraftProviderId(activeProviderId ?? 'claude');
+    setAddProjectError('');
+    setIsAddDialogOpen(true);
+  }
+
+  function closeAddProjectDialog(): void {
+    if (addProjectPending || pickDirectoryPending) {
+      return;
+    }
+    setIsAddDialogOpen(false);
+    setAddProjectError('');
+  }
+
+  async function handlePickDirectory(): Promise<void> {
+    setAddProjectError('');
+    setPickDirectoryPending(true);
+    try {
+      const cwd = await onPickProjectDirectory(draftProviderId);
+      if (cwd) {
+        setDraftCwd(cwd);
+      }
+    } catch (error) {
+      setAddProjectError(error instanceof Error ? error.message : '选择目录失败');
+    } finally {
+      setPickDirectoryPending(false);
+    }
+  }
+
+  async function handleAddProjectSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+
+    const normalizedCwd = draftCwd.trim();
+    if (!normalizedCwd) {
+      setAddProjectError('目录路径不能为空');
+      return;
+    }
+
+    setAddProjectPending(true);
+    setAddProjectError('');
+    try {
+      await onAddProject({
+        cwd: normalizedCwd,
+        providerId: draftProviderId
+      });
+      setIsAddDialogOpen(false);
+    } catch (error) {
+      setAddProjectError(error instanceof Error ? error.message : '添加项目失败');
+    } finally {
+      setAddProjectPending(false);
+    }
   }
 
   const sidebarContent = (
@@ -276,14 +354,14 @@ export function Sidebar({
             <option value="">选择 CLI</option>
             {clis.map((entry) => (
               <option key={entry.cliId} value={entry.cliId}>
-                {entry.label}
+                {entry.label} ({entry.providerId})
               </option>
             ))}
           </select>
 
           <button
             type="button"
-            onClick={onAddProject}
+            onClick={openAddProjectDialog}
             className="flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-900 text-white transition hover:bg-zinc-700"
             aria-label="添加项目"
             title="添加项目"
@@ -328,10 +406,15 @@ export function Sidebar({
         <button
           type="button"
           aria-label="关闭边栏蒙版"
-          onClick={() => {
-            const now = window.performance?.now?.() ?? Date.now();
-            const elapsedSinceOpen = now - lastMobileOpenAtRef.current;
-            if (elapsedSinceOpen < MOBILE_OVERLAY_CLOSE_GUARD_MS) {
+          onPointerDown={(event) => {
+            if (event.pointerType === 'mouse' && event.button !== 0) {
+              return;
+            }
+            event.preventDefault();
+            onMobileOpenChange(false);
+          }}
+          onClick={(event) => {
+            if (event.detail !== 0) {
               return;
             }
             onMobileOpenChange(false);
@@ -356,6 +439,92 @@ export function Sidebar({
         <aside className="hidden h-full w-[22rem] shrink-0 flex-col border-r border-zinc-200 bg-white lg:flex">
           {sidebarContent}
         </aside>
+      ) : null}
+
+      {isAddDialogOpen ? (
+        <div className="fixed inset-0 z-50 bg-zinc-950/40 backdrop-blur-sm" onClick={closeAddProjectDialog}>
+          <div
+            className="flex h-full w-full items-end justify-center px-3 pb-3 sm:items-center sm:px-6 sm:pb-6"
+            style={{
+              paddingTop: 'max(0.75rem, env(safe-area-inset-top))',
+              paddingRight: 'max(0.75rem, env(safe-area-inset-right))',
+              paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
+              paddingLeft: 'max(0.75rem, env(safe-area-inset-left))'
+            }}
+          >
+            <div
+              className="w-full max-w-md rounded-3xl border border-zinc-200 bg-white p-5 shadow-[0_24px_90px_rgba(15,23,42,0.22)]"
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+            >
+              <form className="space-y-4" onSubmit={(event) => void handleAddProjectSubmit(event)}>
+                <label className="block space-y-1.5">
+                  <span className="text-xs font-semibold uppercase tracking-[0.18em] text-zinc-500">目录路径</span>
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                    <input
+                      value={draftCwd}
+                      onChange={(event) => setDraftCwd(event.target.value)}
+                      placeholder="/Users/name/project"
+                      className="min-w-0 flex-1 rounded-2xl border border-zinc-300 bg-white px-3 py-2.5 text-sm text-zinc-900 outline-none transition focus:border-zinc-500"
+                      autoFocus
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void handlePickDirectory()}
+                      disabled={pickDirectoryPending || addProjectPending}
+                      className="hidden shrink-0 rounded-2xl border border-zinc-300 px-3 py-2.5 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 sm:inline-flex"
+                    >
+                      {pickDirectoryPending ? '选择中...' : '选择目录'}
+                    </button>
+                  </div>
+                </label>
+
+                <fieldset>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(['claude', 'codex'] as ProviderId[]).map((providerId) => {
+                      const selected = draftProviderId === providerId;
+                      return (
+                        <button
+                          key={providerId}
+                          type="button"
+                          onClick={() => setDraftProviderId(providerId)}
+                          className={[
+                            'rounded-2xl border px-3 py-3 text-left transition',
+                            selected ? 'border-zinc-900 bg-zinc-900 text-white' : 'border-zinc-300 bg-white text-zinc-900 hover:border-zinc-400'
+                          ].join(' ')}
+                          aria-pressed={selected}
+                        >
+                          <div className="text-sm font-semibold">{PROVIDER_LABELS[providerId]}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+
+                {addProjectError ? <div className="rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{addProjectError}</div> : null}
+
+                <div className="flex items-center justify-end gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={closeAddProjectDialog}
+                    disabled={addProjectPending || pickDirectoryPending}
+                    className="rounded-2xl border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={addProjectPending || pickDirectoryPending}
+                    className="rounded-2xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {addProjectPending ? '添加中...' : '添加'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
       ) : null}
     </>
   );

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { PointerEvent as ReactPointerEvent, SetStateAction } from 'react';
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent, SetStateAction } from 'react';
 
 import type { WorkspacePane } from '@/features/workspace/types.ts';
 import { clampSidebarToggleTop } from '@/lib/workspace.ts';
@@ -71,7 +71,6 @@ export function MobileFloatingControls({
   const mobileControlsRef = useRef<HTMLDivElement | null>(null);
   const dragStateRef = useRef<DragState | null>(null);
   const dragMovedRef = useRef(false);
-  const suppressLauncherClickRef = useRef(false);
 
   useEffect(() => {
     if (!mobileControlsExpanded) {
@@ -140,7 +139,6 @@ export function MobileFloatingControls({
     }
 
     const deltaY = event.clientY - dragState.startY;
-    suppressLauncherClickRef.current = true;
 
     if (dragMovedRef.current || Math.abs(deltaY) > LAUNCHER_DRAG_THRESHOLD) {
       const nextTop = clampSidebarToggleTop(dragState.startTop + deltaY, window.innerHeight);
@@ -165,7 +163,6 @@ export function MobileFloatingControls({
 
     dragStateRef.current = null;
     dragMovedRef.current = false;
-    suppressLauncherClickRef.current = true;
   }
 
   function handleLauncherAction(): void {
@@ -178,12 +175,11 @@ export function MobileFloatingControls({
     setMobileControlsExpanded(true);
   }
 
-  function handleLauncherClick(): void {
-    if (suppressLauncherClickRef.current) {
-      suppressLauncherClickRef.current = false;
+  function handleLauncherKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>): void {
+    if (event.key !== 'Enter' && event.key !== ' ') {
       return;
     }
-
+    event.preventDefault();
     handleLauncherAction();
   }
 
@@ -205,11 +201,11 @@ export function MobileFloatingControls({
         <div className="pointer-events-auto inline-flex max-w-[calc(100vw-1.5rem)] items-center gap-1 rounded-full border border-zinc-200/70 bg-white/82 p-1.5 shadow-[0_10px_28px_rgba(0,0,0,0.08)] backdrop-blur-md">
           <button
             type="button"
-            onClick={handleLauncherClick}
             onPointerDown={handleLauncherPointerDown}
             onPointerMove={handleLauncherPointerMove}
             onPointerUp={handleLauncherPointerEnd}
             onPointerCancel={handleLauncherPointerCancel}
+            onKeyDown={handleLauncherKeyDown}
             className="touch-none select-none flex h-10 w-10 items-center justify-center rounded-full bg-white/78 text-zinc-500 shadow-[0_4px_14px_rgba(255,255,255,0.32)] transition hover:bg-white hover:text-zinc-900"
             aria-label={mobileControlsExpanded ? '打开边栏' : '展开移动控制条'}
             title={mobileControlsExpanded ? '打开边栏' : '展开移动控制条'}

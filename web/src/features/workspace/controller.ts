@@ -5,7 +5,8 @@ import type {
   GetOlderMessagesResultPayload,
   GetRuntimeSnapshotResultPayload,
   ListProjectSessionsResultPayload,
-  PickProjectDirectoryResultPayload
+  PickProjectDirectoryResultPayload,
+  SelectConversationResultPayload
 } from '@shared/protocol.ts';
 import { PROVIDER_LABELS, type CliDescriptor, type ProviderId } from '@shared/runtime-types.ts';
 
@@ -16,6 +17,7 @@ import {
   clampSidebarToggleTop,
   createDraftConversation,
   getProjectProviderKey,
+  getThreadLabel,
   hydrateConversationFromSnapshot,
   mergeProjectConversations,
   sortProjects,
@@ -28,8 +30,9 @@ import type { WorkspaceStore } from './store.ts';
 
 export interface WorkspaceController {
   activateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
-  addProject: () => Promise<void>;
+  addProject: (input: { cwd: string; providerId: ProviderId }) => Promise<void>;
   loadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
+  pickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
   refreshAllProjectConversations: () => Promise<void>;
   selectCli: (cliId: string | null) => void;
   selectProject: (project: ProjectEntry) => void;
@@ -76,10 +79,11 @@ export function useWorkspaceController({
   terminal
 }: UseWorkspaceControllerParams): WorkspaceController {
   const projectRefreshInFlightRef = useRef(new Map<string, Promise<ListProjectSessionsResultPayload>>());
-  const requestedConversationKeyRef = useRef<string | null>(null);
-  const sendCommandRef = useRef(sendCommand);
+  const conversationActivationRef = useRef<
+    { status: 'idle' } | { requestId: number; requestKey: string; requestToken: string; status: 'selecting' }
+  >({ status: 'idle' });
+  const conversationActivationSeqRef = useRef(0);
   const sidebarRefreshTriggeredRef = useRef(false);
-  const terminalRef = useRef(terminal);
   const previousSidebarCollapsedRef = useRef(store.workspaceState.sidebarCollapsed);
   const sidebarToggleTopRef = useRef(store.sidebarToggleTop);
 
@@ -107,14 +111,6 @@ export function useWorkspaceController({
   const connectedProviderIdsKey = connectedProviderIds.join('|');
 
   sidebarToggleTopRef.current = store.sidebarToggleTop;
-
-  useEffect(() => {
-    sendCommandRef.current = sendCommand;
-  }, [sendCommand]);
-
-  useEffect(() => {
-    terminalRef.current = terminal;
-  }, [terminal]);
 
   useEffect(() => {
     if (!socketConnected) {
@@ -258,24 +254,24 @@ export function useWorkspaceController({
   useEffect(() => {
     if (!socketConnected || !activeCliId || !activeCliConnected) {
       store.resetRuntimeForCliChange();
-      terminalRef.current.clearTerminal();
+      terminal.clearTerminal();
       return;
     }
 
-    terminalRef.current.prepareForResume();
+    terminal.prepareForResume();
     store.resetRuntimeForCliChange();
 
-    void sendCommandRef.current('get-runtime-snapshot', {}, activeCliId)
+    void sendCommand('get-runtime-snapshot', {}, activeCliId)
       .then(async (result) => {
         const nextSnapshot = (result.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
         store.setSnapshot(nextSnapshot);
-        await terminalRef.current.resumeSession(nextSnapshot.sessionId, { force: true });
+        await terminal.resumeSession(nextSnapshot.sessionId, { force: true });
       })
       .catch((runtimeError) => {
-        terminalRef.current.clearTerminal();
+        terminal.clearTerminal();
         store.setError(runtimeError instanceof Error ? runtimeError.message : '加载 CLI 运行态失败');
       });
-  }, [activeCliConnected, activeCliId, socketConnected]);
+  }, [activeCliConnected, activeCliId, sendCommand, socketConnected, terminal]);
 
   useEffect(() => {
     if (!socketConnected || store.workspaceState.sidebarCollapsed || store.projectsRefreshing) {
@@ -345,18 +341,20 @@ export function useWorkspaceController({
     const backendMatchesConversation =
       (store.snapshot.conversationKey ?? activeCli.conversationKey ?? null) === conversationKey &&
       (store.snapshot.providerId ?? activeCli.providerId) === activeProviderId;
+    const activationState = conversationActivationRef.current;
 
     if (backendMatchesProject && backendMatchesConversation) {
-      requestedConversationKeyRef.current = requestKey;
+      if (activationState.status === 'selecting' && activationState.requestKey === requestKey) {
+        conversationActivationRef.current = { status: 'idle' };
+      }
       return;
     }
 
-    if (requestedConversationKeyRef.current === requestKey) {
+    if (activationState.status === 'selecting' && activationState.requestKey === requestKey) {
       return;
     }
 
-    requestedConversationKeyRef.current = requestKey;
-    void activateConversation(activeProject, activeProviderId, activeConversation);
+    void activateConversation(activeProject, activeProviderId, activeConversation, { requestKey });
   }, [activeCli, activeConversation, activeProject, activeProviderId, socketConnected, store.snapshot.conversationKey, store.snapshot.providerId]);
 
   async function refreshProjectConversations(
@@ -473,8 +471,11 @@ export function useWorkspaceController({
   async function activateConversation(
     project: ProjectEntry,
     providerId: ProviderId,
-    conversation: ProjectConversationEntry
+    conversation: ProjectConversationEntry,
+    options?: { requestKey?: string; requestToken?: string }
   ): Promise<void> {
+    let requestId: number | null = null;
+    let requestToken: string | null = null;
     try {
       store.setError('');
       const targetCli = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId);
@@ -482,7 +483,19 @@ export function useWorkspaceController({
         throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
       }
 
-      requestedConversationKeyRef.current = `${targetCli.cliId}:${providerId}:${conversation.conversationKey}:${conversation.sessionId ?? 'draft'}`;
+      const requestKey =
+        options?.requestKey ??
+        `${targetCli.cliId}:${providerId}:${conversation.conversationKey}:${conversation.sessionId ?? 'draft'}`;
+      requestToken = options?.requestToken ?? `select-${targetCli.cliId}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      requestId = conversationActivationSeqRef.current + 1;
+      conversationActivationSeqRef.current = requestId;
+      conversationActivationRef.current = {
+        status: 'selecting',
+        requestId,
+        requestKey,
+        requestToken
+      };
+
       if (conversation.sessionId === null) {
         store.resetRuntimeForDraftThread();
       }
@@ -494,45 +507,66 @@ export function useWorkspaceController({
         activeConversationId: conversation.id
       }));
 
-      await sendCommand(
+      const result = await sendCommand(
         'select-conversation',
         {
           cwd: project.cwd,
           conversationKey: conversation.conversationKey,
-          sessionId: conversation.sessionId
+          sessionId: conversation.sessionId,
+          clientRequestId: requestToken
         },
         targetCli.cliId
       );
+      const selectPayload = result.payload as SelectConversationResultPayload | undefined;
+      const acknowledgedRequestToken = selectPayload?.clientRequestId ?? null;
+      const activationState = conversationActivationRef.current;
+      if (
+        requestId !== null &&
+        requestToken !== null &&
+        activationState.status === 'selecting' &&
+        activationState.requestId === requestId &&
+        (acknowledgedRequestToken === null || acknowledgedRequestToken === requestToken)
+      ) {
+        conversationActivationRef.current = { status: 'idle' };
+      }
       store.setMobilePane('chat');
     } catch (activateError) {
-      requestedConversationKeyRef.current = null;
+      const activationState = conversationActivationRef.current;
+      if (
+        requestId !== null &&
+        requestToken !== null &&
+        activationState.status === 'selecting' &&
+        activationState.requestId === requestId &&
+        activationState.requestToken === requestToken
+      ) {
+        conversationActivationRef.current = { status: 'idle' };
+      }
       store.setError(activateError instanceof Error ? activateError.message : '切换 conversation 失败');
     }
   }
 
-  async function addProject(): Promise<void> {
+  async function addProject(input: { cwd: string; providerId: ProviderId }): Promise<void> {
     try {
       store.setError('');
-      const targetCli =
-        getConnectedCliForProvider(clis, activeProviderId, activeCliId) ?? clis.find((cli) => cli.connected) ?? null;
-      if (!targetCli) {
-        throw new Error('请先选择一个在线 CLI');
+      const normalizedCwd = input.cwd.trim();
+      const selectedProviderId = input.providerId;
+      if (!normalizedCwd) {
+        throw new Error('目录路径不能为空');
       }
 
-      const result = await sendCommand('pick-project-directory', {}, targetCli.cliId);
-      const payload = result.payload as PickProjectDirectoryResultPayload | undefined;
-      if (!payload?.cwd) {
-        return;
+      const targetCli = getConnectedCliForProvider(clis, selectedProviderId, activeCliId);
+      if (!targetCli) {
+        throw new Error(`No connected CLI available for ${PROVIDER_LABELS[selectedProviderId]}`);
       }
 
       let selectedProject: ProjectEntry = {
         id: crypto.randomUUID(),
-        cwd: payload.cwd,
-        label: payload.label
+        cwd: normalizedCwd,
+        label: getThreadLabel(normalizedCwd)
       };
 
       store.patchWorkspace((current) => {
-        const existingProject = current.projects.find((project) => project.cwd === payload.cwd);
+        const existingProject = current.projects.find((project) => project.cwd === normalizedCwd);
         if (existingProject) {
           selectedProject = existingProject;
           return {
@@ -574,8 +608,21 @@ export function useWorkspaceController({
         await activateConversation(selectedProject, targetCli.providerId, nextConversation);
       }
     } catch (addProjectError) {
-      store.setError(addProjectError instanceof Error ? addProjectError.message : '添加项目失败');
+      const message = addProjectError instanceof Error ? addProjectError.message : '添加项目失败';
+      store.setError(message);
+      throw addProjectError instanceof Error ? addProjectError : new Error(message);
     }
+  }
+
+  async function pickProjectDirectory(providerId: ProviderId): Promise<string | null> {
+    const targetCli = getConnectedCliForProvider(clis, providerId, activeCliId);
+    if (!targetCli) {
+      throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
+    }
+
+    const result = await sendCommand('pick-project-directory', {}, targetCli.cliId);
+    const payload = result.payload as PickProjectDirectoryResultPayload | undefined;
+    return payload?.cwd?.trim() || null;
   }
 
   function selectCli(nextCliId: string | null): void {
@@ -678,6 +725,7 @@ export function useWorkspaceController({
     activateConversation,
     addProject,
     loadOlderMessages,
+    pickProjectDirectory,
     refreshAllProjectConversations,
     selectCli,
     selectProject,

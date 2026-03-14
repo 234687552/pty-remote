@@ -36,6 +36,8 @@ export interface TerminalBridge {
   scheduleResize: () => void;
 }
 
+type TerminalBridgeMethods = Omit<TerminalBridge, 'terminalViewportRef' | 'terminalHostRef'>;
+
 export function useTerminalBridge({ activeCliId, socketRef, setError }: UseTerminalBridgeOptions): TerminalBridge {
   const terminalViewportRef = useRef<HTMLDivElement | null>(null);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
@@ -48,6 +50,8 @@ export function useTerminalBridge({ activeCliId, socketRef, setError }: UseTermi
   const terminalResumePendingRef = useRef(false);
   const terminalResyncRequestedRef = useRef(false);
   const bufferedTerminalChunksRef = useRef<TerminalChunkPayload[]>([]);
+  const terminalMethodsRef = useRef<TerminalBridgeMethods | null>(null);
+  const terminalBridgeRef = useRef<TerminalBridge | null>(null);
 
   function scheduleResize(): void {
     if (resizeFrameRef.current) {
@@ -363,9 +367,7 @@ export function useTerminalBridge({ activeCliId, socketRef, setError }: UseTermi
     };
   }, []);
 
-  return {
-    terminalViewportRef,
-    terminalHostRef,
+  terminalMethodsRef.current = {
     clearTerminal,
     handleSocketConnected,
     handleSocketDisconnected,
@@ -375,4 +377,37 @@ export function useTerminalBridge({ activeCliId, socketRef, setError }: UseTermi
     resumeSession,
     scheduleResize
   };
+
+  if (!terminalBridgeRef.current) {
+    terminalBridgeRef.current = {
+      terminalViewportRef,
+      terminalHostRef,
+      clearTerminal: () => {
+        terminalMethodsRef.current?.clearTerminal();
+      },
+      handleSocketConnected: () => {
+        terminalMethodsRef.current?.handleSocketConnected();
+      },
+      handleSocketDisconnected: () => {
+        terminalMethodsRef.current?.handleSocketDisconnected();
+      },
+      handleTerminalChunk: (payload) => {
+        terminalMethodsRef.current?.handleTerminalChunk(payload);
+      },
+      jumpToEdge: (direction) => {
+        terminalMethodsRef.current?.jumpToEdge(direction);
+      },
+      prepareForResume: () => {
+        terminalMethodsRef.current?.prepareForResume();
+      },
+      resumeSession: (targetSessionId, options) => {
+        return terminalMethodsRef.current?.resumeSession(targetSessionId, options) ?? Promise.resolve();
+      },
+      scheduleResize: () => {
+        terminalMethodsRef.current?.scheduleResize();
+      }
+    };
+  }
+
+  return terminalBridgeRef.current;
 }

@@ -53,6 +53,7 @@ export interface CliCommandPayloadMap {
     cwd: string;
     conversationKey: string;
     sessionId: string | null;
+    clientRequestId?: string | null;
   };
 }
 
@@ -86,6 +87,7 @@ export interface SelectConversationResultPayload {
   label: string;
   conversationKey: string;
   sessionId: string | null;
+  clientRequestId?: string | null;
 }
 
 export interface CliCommandResultPayloadMap {

@@ -1,4 +1,5 @@
 import type { CliDescriptor } from '@shared/runtime-types.ts';
+import { PROVIDER_LABELS } from '@shared/runtime-types.ts';
 
 import { AppHeader } from '@/components/AppHeader.tsx';
 import { selectHeaderSummary, selectMobileProjectTitle } from '@/features/workspace/selectors.ts';
@@ -26,9 +27,12 @@ export function HeaderFeature({
   sidebarCollapsed,
   store
 }: HeaderFeatureProps) {
+  const activeProviderLabel =
+    store.workspaceState.activeProviderId ? PROVIDER_LABELS[store.workspaceState.activeProviderId] : 'agent';
+
   return (
     <AppHeader
-      mobileAgentLabel="Claude"
+      mobileAgentLabel={activeProviderLabel}
       mobilePane={mobilePane}
       mobileProjectTitle={selectMobileProjectTitle(store, clis)}
       mobileSidebarOpen={mobileSidebarOpen}

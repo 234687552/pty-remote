@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { MutableRefObject, RefObject } from 'react';
 import { io, type Socket } from 'socket.io-client';
 
 import type {
@@ -18,6 +19,7 @@ import { getSocketBaseUrl } from '@/lib/runtime.ts';
 
 interface UseCliSocketOptions {
   activeCliId: string | null;
+  socketRef?: MutableRefObject<Socket | null>;
   onConnect?: () => void;
   onDisconnect?: () => void;
   onSnapshot?: (snapshot: RuntimeSnapshot) => void;
@@ -28,7 +30,7 @@ interface UseCliSocketOptions {
 export interface CliSocketController {
   socketConnected: boolean;
   clis: CliDescriptor[];
-  socketRef: React.RefObject<Socket | null>;
+  socketRef: RefObject<Socket | null>;
   sendCommand: <TName extends CliCommandName>(
     name: TName,
     payload: CliCommandPayloadMap[TName],
@@ -38,6 +40,7 @@ export interface CliSocketController {
 
 export function useCliSocket({
   activeCliId,
+  socketRef: externalSocketRef,
   onConnect,
   onDisconnect,
   onSnapshot,
@@ -46,13 +49,15 @@ export function useCliSocket({
 }: UseCliSocketOptions): CliSocketController {
   const [socketConnected, setSocketConnected] = useState(false);
   const [clis, setClis] = useState<CliDescriptor[]>([]);
-  const socketRef = useRef<Socket | null>(null);
+  const internalSocketRef = useRef<Socket | null>(null);
+  const socketRef = externalSocketRef ?? internalSocketRef;
   const activeCliIdRef = useRef<string | null>(activeCliId);
   const onConnectRef = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
   const onSnapshotRef = useRef(onSnapshot);
   const onMessagesUpsertRef = useRef(onMessagesUpsert);
   const onTerminalChunkRef = useRef(onTerminalChunk);
+  const sendCommandRef = useRef<CliSocketController['sendCommand'] | null>(null);
 
   useEffect(() => {
     activeCliIdRef.current = activeCliId ?? null;
@@ -122,40 +127,42 @@ export function useCliSocket({
     };
   }, []);
 
-  async function sendCommand<TName extends CliCommandName>(
-    name: TName,
-    payload: CliCommandPayloadMap[TName],
-    targetCliId = activeCliIdRef.current
-  ): Promise<CliCommandResult<TName>> {
-    const socket = socketRef.current;
-    if (!socket?.connected) {
-      throw new Error('Socket is not connected');
-    }
-    if (!targetCliId) {
-      throw new Error('CLI is not selected');
-    }
+  if (!sendCommandRef.current) {
+    sendCommandRef.current = async function sendCommand<TName extends CliCommandName>(
+      name: TName,
+      payload: CliCommandPayloadMap[TName],
+      targetCliId = activeCliIdRef.current
+    ): Promise<CliCommandResult<TName>> {
+      const socket = socketRef.current;
+      if (!socket?.connected) {
+        throw new Error('Socket is not connected');
+      }
+      if (!targetCliId) {
+        throw new Error('CLI is not selected');
+      }
 
-    const result = await new Promise<CliCommandResult<TName>>((resolve) => {
-      socket.emit(
-        'web:command',
-        { targetCliId, name, payload } satisfies WebCommandEnvelope<TName>,
-        (ack?: CliCommandResult<TName>) => {
-          resolve(ack ?? { ok: false, error: 'No response from server' });
-        }
-      );
-    });
+      const result = await new Promise<CliCommandResult<TName>>((resolve) => {
+        socket.emit(
+          'web:command',
+          { targetCliId, name, payload } satisfies WebCommandEnvelope<TName>,
+          (ack?: CliCommandResult<TName>) => {
+            resolve(ack ?? { ok: false, error: 'No response from server' });
+          }
+        );
+      });
 
-    if (!result.ok) {
-      throw new Error(result.error || 'Request failed');
-    }
+      if (!result.ok) {
+        throw new Error(result.error || 'Request failed');
+      }
 
-    return result;
+      return result;
+    };
   }
 
   return {
     socketConnected,
     clis,
     socketRef,
-    sendCommand
+    sendCommand: sendCommandRef.current
   };
 }

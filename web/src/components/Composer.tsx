@@ -19,6 +19,55 @@ interface ComposerProps {
   onSubmit: (event: React.FormEvent) => void;
 }
 
+const COMPOSER_TOOL_BUTTONS = [
+  {
+    id: 'image',
+    label: '插入图片',
+    icon: (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+        <rect x="3.25" y="4.25" width="13.5" height="11.5" rx="2.25" stroke="currentColor" strokeWidth="1.5" />
+        <circle cx="7.25" cy="8" r="1.25" fill="currentColor" />
+        <path
+          d="M5.5 13.5 8.5 10.5a1 1 0 0 1 1.42 0l1.58 1.58a1 1 0 0 0 1.41 0l1.59-1.58"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    )
+  },
+  {
+    id: 'slash',
+    label: '斜杠命令',
+    icon: <span className="text-[15px] leading-none font-semibold">/</span>
+  },
+  {
+    id: 'tool-1',
+    label: '功能一',
+    icon: (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+        <path
+          d="M10 3.5 11.65 7l3.85.55-2.8 2.72.66 3.73L10 12.2 6.64 14l.66-3.73L4.5 7.55 8.35 7 10 3.5Z"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinejoin="round"
+        />
+      </svg>
+    )
+  },
+  {
+    id: 'tool-2',
+    label: '功能二',
+    icon: (
+      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+        <path d="M5 6h10M5 10h10M5 14h6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+        <circle cx="13.5" cy="14" r="1.5" fill="currentColor" />
+      </svg>
+    )
+  }
+] as const;
+
 export function Composer({
   busy,
   canSend,
@@ -36,39 +85,62 @@ export function Composer({
   return (
     <form
       onSubmit={onSubmit}
-      className="shrink-0 border-t border-zinc-200/80 bg-white/96 px-2 py-2 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] shadow-[0_-10px_24px_rgba(0,0,0,0.04)] backdrop-blur-sm md:mt-4 md:rounded-3xl md:border md:border-zinc-200 md:bg-white md:px-4 md:py-3 md:pb-3 md:shadow-sm md:backdrop-blur-none"
+      className="shrink-0 bg-transparent px-2 py-1 pb-[calc(env(safe-area-inset-bottom)+0.25rem)] md:mt-4 md:px-0 md:py-0"
     >
-      <div className="mb-1 grid grid-cols-3 gap-1 text-[11px] font-medium md:flex md:flex-wrap md:gap-2 md:text-xs">
+      <div className="mb-px grid grid-cols-3 gap-1 text-[10px] font-medium md:flex md:flex-wrap md:gap-1.5 md:text-[11px]">
         {[conversationBadge, socketBadge, cliBadge].map((badge) => (
-          <span key={badge.label} className={['truncate rounded-full px-2.5 py-1 text-center md:px-3', badge.className].join(' ')}>
+          <span key={badge.label} className={['truncate rounded-full px-2 py-0.5 text-center md:px-2.5', badge.className].join(' ')}>
             {badge.label}: {badge.value}
           </span>
         ))}
       </div>
 
-      <div className="relative">
+      <div className="relative rounded-[1.5rem] border border-zinc-200/80 bg-zinc-100/90 shadow-[0_1px_0_rgba(255,255,255,0.55)_inset] md:bg-white md:shadow-none">
         <input
           type="text"
           value={prompt}
           onChange={(event) => onPromptChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' || event.shiftKey) {
+              return;
+            }
+
+            event.preventDefault();
+            event.currentTarget.form?.requestSubmit();
+          }}
           placeholder={placeholder}
-          className="h-[3.25rem] w-full rounded-xl border border-zinc-300 bg-white px-4 pr-24 text-sm outline-none ring-0 placeholder:text-zinc-400 focus:border-zinc-500"
+          className="h-[5.35rem] w-full rounded-[1.5rem] border border-transparent bg-transparent px-6 pt-4 pr-24 pb-10 text-[16px] leading-6 text-zinc-800 outline-none ring-0 placeholder:text-zinc-500 focus:border-zinc-200"
           disabled={!canSend}
         />
+        <div className="pointer-events-none absolute inset-x-0 bottom-1 flex items-center justify-between px-5">
+          <div className="pointer-events-auto flex items-center gap-2.5 text-zinc-500">
+            {COMPOSER_TOOL_BUTTONS.map((button) => (
+              <button
+                key={button.id}
+                type="button"
+                className="flex h-6 min-w-6 items-center justify-center text-zinc-500 transition hover:text-zinc-800"
+                aria-label={button.label}
+                title={button.label}
+              >
+                {button.icon}
+              </button>
+            ))}
+          </div>
+        </div>
         <button
           type={busy ? 'button' : 'submit'}
           onClick={busy ? onStop : undefined}
-          className="absolute top-1/2 right-1.5 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full bg-zinc-900 text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className="absolute right-4 bottom-0.5 flex h-16 w-16 scale-[0.62] items-center justify-center rounded-full bg-black text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={busy ? !canStop : !canSend}
           aria-label={busy ? '结束当前运行' : '发送消息'}
           title={busy ? '结束当前运行' : '发送消息'}
         >
           {busy ? (
-            <span className="block h-3.5 w-3.5 rounded-[0.2rem] bg-current" aria-hidden="true" />
+            <span className="block h-4.5 w-4.5 rounded-[0.24rem] bg-current" aria-hidden="true" />
           ) : (
-            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
-              <path d="M10 14V6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-              <path d="M6.5 9.5 10 6l3.5 3.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-6 w-6">
+              <path d="M10 14.5V5.5" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" />
+              <path d="M5.8 9.8 10 5.5l4.2 4.3" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           )}
         </button>

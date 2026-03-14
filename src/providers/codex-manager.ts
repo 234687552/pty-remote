@@ -1,5 +1,4 @@
 import { promises as fs, watch as watchFs, type FSWatcher } from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import type {
@@ -10,33 +9,33 @@ import type {
 } from '../../shared/protocol.ts';
 import type { ChatMessage, ProviderId, RuntimeSnapshot, RuntimeStatus } from '../../shared/runtime-types.ts';
 import {
-  applyClaudeJsonlLine,
-  createClaudeJsonlMessagesState,
-  materializeClaudeJsonlMessages,
-  resolveClaudeJsonlFilePath,
-  type ClaudeJsonlMessagesState,
-  type ClaudeJsonlRuntimePhase
-} from './jsonl.ts';
+  applyCodexJsonlLine,
+  createCodexJsonlMessagesState,
+  materializeCodexJsonlMessages,
+  refreshCodexJsonlMessageStatuses,
+  type CodexJsonlMessagesState,
+  type CodexJsonlRuntimePhase
+} from './codex-jsonl.ts';
 import {
   appendRecentOutput,
   appendReplayChunk,
-  looksLikeBypassPrompt,
+  getCodexPtyLifecycle,
   looksReadyForInput,
-  resizeClaudePtySession,
-  startClaudePtySession,
-  stopClaudePtySession,
-  type ClaudePtySession
-} from './pty.ts';
+  resizeCodexPtySession,
+  startCodexPtySession,
+  stopCodexPtySession,
+  type CodexPtySession
+} from './codex-pty.ts';
+import { findCodexSessionFile, findLatestCodexSessionForCwdSince, type CodexHistoryOptions } from './codex-history.ts';
 
-export interface PtyManagerOptions {
-  claudeBin: string;
-  permissionMode: string;
+export interface CodexManagerOptions extends CodexHistoryOptions {
+  codexBin: string;
   defaultCwd: string;
   terminalCols: number;
   terminalRows: number;
   terminalReplayMaxBytes: number;
   recentOutputMaxChars: number;
-  claudeReadyTimeoutMs: number;
+  codexReadyTimeoutMs: number;
   promptSubmitDelayMs: number;
   jsonlRefreshDebounceMs: number;
   snapshotEmitDebounceMs: number;
@@ -49,13 +48,13 @@ export interface PtyManagerOptions {
   maxDetachedPtys: number;
 }
 
-interface PtyManagerCallbacks {
+interface CodexManagerCallbacks {
   emitMessagesUpsert(payload: Omit<MessagesUpsertPayload, 'cliId'>): void;
   emitSnapshot(snapshot: RuntimeSnapshot): void;
   emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId'>): void;
 }
 
-export interface PtyManagerSelection {
+export interface CodexManagerSelection {
   cwd: string;
   label: string;
   sessionId: string | null;
@@ -70,17 +69,18 @@ interface AgentRuntimeState extends RuntimeSnapshot {
 
 type HandleLifecycle = 'attached' | 'detached' | 'exited' | 'error';
 
-interface PtyHandle {
+interface CodexHandle {
   threadKey: string;
   cwd: string;
   label: string;
   sessionId: string | null;
+  sessionFilePath: string | null;
   lifecycle: HandleLifecycle;
-  pty: ClaudePtySession | null;
+  pty: CodexPtySession | null;
   ptyToken: number;
   jsonlWatcher: FSWatcher | null;
-  watchedJsonlSessionId: string | null;
-  jsonlMessagesState: ClaudeJsonlMessagesState;
+  watchedJsonlFilePath: string | null;
+  jsonlMessagesState: CodexJsonlMessagesState;
   parsedJsonlSessionId: string | null;
   jsonlReadOffset: number;
   jsonlPendingLine: string;
@@ -88,6 +88,7 @@ interface PtyHandle {
   suppressNextPtyExitError: boolean;
   runtime: AgentRuntimeState;
   detachedAt: number | null;
+  discoveryStartedAt: number | null;
   jsonlMissingSince: number | null;
   lastJsonlActivityAt: number | null;
   lastTerminalActivityAt: number | null;
@@ -126,14 +127,14 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-export class PtyManager {
-  private readonly providerId: ProviderId = 'claude';
+export class CodexManager {
+  private readonly providerId: ProviderId = 'codex';
 
-  private readonly handles = new Map<string, PtyHandle>();
+  private readonly callbacks: CodexManagerCallbacks;
 
-  private readonly callbacks: PtyManagerCallbacks;
+  private readonly handles = new Map<string, CodexHandle>();
 
-  private readonly options: PtyManagerOptions;
+  private readonly options: CodexManagerOptions;
 
   private activeThreadKey: string | null = null;
 
@@ -143,11 +144,11 @@ export class PtyManager {
 
   private snapshotEmitTimer: NodeJS.Timeout | null = null;
 
-  private gcTimer: NodeJS.Timeout;
+  private readonly gcTimer: NodeJS.Timeout;
 
   private terminalSize: { cols: number; rows: number };
 
-  constructor(options: PtyManagerOptions, callbacks: PtyManagerCallbacks) {
+  constructor(options: CodexManagerOptions, callbacks: CodexManagerCallbacks) {
     this.options = options;
     this.callbacks = callbacks;
     this.currentCwd = options.defaultCwd;
@@ -162,9 +163,9 @@ export class PtyManager {
   }
 
   getRegistrationPayload(): {
+    conversationKey: string | null;
     cwd: string;
     sessionId: string | null;
-    conversationKey: string | null;
   } {
     const handle = this.getActiveHandle();
     return {
@@ -193,10 +194,10 @@ export class PtyManager {
     };
 
     const handle = this.getActiveHandle();
-    resizeClaudePtySession(handle?.pty ?? null, nextCols, nextRows);
+    resizeCodexPtySession(handle?.pty ?? null, nextCols, nextRows);
   }
 
-  async activateConversation(selection: PtyManagerSelection): Promise<SelectConversationResultPayload> {
+  async activateConversation(selection: CodexManagerSelection): Promise<SelectConversationResultPayload> {
     const normalized = await this.normalizeSelection(selection);
     const current = this.getActiveHandle();
     if (current && current.threadKey !== normalized.conversationKey) {
@@ -217,14 +218,17 @@ export class PtyManager {
     handle.detachedAt = null;
     handle.jsonlMissingSince = null;
 
-    await this.refreshMessagesFromJsonl(handle);
-
-    if (handle.sessionId && !handle.pty) {
-      this.startHandleSession(handle, { emitSnapshot: false });
-    } else {
-      this.ensureJsonlWatcher(handle, handle.sessionId);
+    if (handle.sessionId && !handle.sessionFilePath) {
+      handle.sessionFilePath = await findCodexSessionFile(handle.sessionId, this.options);
     }
 
+    if (handle.sessionId && !handle.pty) {
+      this.startHandleSession(handle);
+    } else {
+      this.ensureJsonlWatcher(handle, handle.sessionFilePath);
+    }
+
+    await this.refreshMessagesFromJsonl(handle);
     this.emitActiveTerminalReplay(handle);
     this.emitSnapshotNow();
 
@@ -250,7 +254,7 @@ export class PtyManager {
 
     this.clearLastError(handle);
     if (this.isBusyStatus(handle.runtime.status)) {
-      throw new Error('Claude is still handling the previous message');
+      throw new Error('Codex is still handling the previous message');
     }
 
     await this.ensureHandleSession(handle);
@@ -264,7 +268,7 @@ export class PtyManager {
       this.scheduleJsonlRefresh(0);
     } catch (error) {
       this.setStatus(handle, 'idle', true);
-      this.setLastError(handle, error instanceof Error ? error.message : 'Claude request failed');
+      this.setLastError(handle, error instanceof Error ? error.message : 'Codex request failed');
       throw error;
     }
   }
@@ -283,9 +287,10 @@ export class PtyManager {
     if (handle.jsonlMessagesState.runtimePhase !== 'idle') {
       handle.jsonlMessagesState.runtimePhase = 'idle';
       handle.jsonlMessagesState.activityRevision += 1;
+      refreshCodexJsonlMessageStatuses(handle.jsonlMessagesState);
     }
 
-    const nextAllMessages = this.applyStreamingStatus(materializeClaudeJsonlMessages(handle.jsonlMessagesState), false);
+    const nextAllMessages = materializeCodexJsonlMessages(handle.jsonlMessagesState);
     const nextMessages = this.selectRecentMessages(nextAllMessages);
     const nextHasOlderMessages = nextAllMessages.length > nextMessages.length;
     const allMessagesChanged = !messagesEqual(handle.runtime.allMessages, nextAllMessages);
@@ -330,9 +335,11 @@ export class PtyManager {
     this.closeJsonlWatcher(handle);
     this.stopHandlePty(handle);
     handle.sessionId = null;
+    handle.sessionFilePath = null;
     this.resetHandleRuntime(handle, null);
     handle.lifecycle = 'attached';
     handle.detachedAt = null;
+    handle.discoveryStartedAt = null;
     this.emitSnapshotNow();
   }
 
@@ -383,18 +390,19 @@ export class PtyManager {
     }
   }
 
-  private createHandle(selection: PtyManagerSelection): PtyHandle {
+  private createHandle(selection: CodexManagerSelection): CodexHandle {
     return {
       threadKey: selection.conversationKey,
       cwd: selection.cwd,
       label: selection.label,
       sessionId: selection.sessionId,
+      sessionFilePath: null,
       lifecycle: 'exited',
       pty: null,
       ptyToken: 0,
       jsonlWatcher: null,
-      watchedJsonlSessionId: null,
-      jsonlMessagesState: createClaudeJsonlMessagesState(),
+      watchedJsonlFilePath: null,
+      jsonlMessagesState: createCodexJsonlMessagesState(),
       parsedJsonlSessionId: selection.sessionId,
       jsonlReadOffset: 0,
       jsonlPendingLine: '',
@@ -402,6 +410,7 @@ export class PtyManager {
       suppressNextPtyExitError: false,
       runtime: this.createFreshState(selection.conversationKey, selection.sessionId),
       detachedAt: null,
+      discoveryStartedAt: null,
       jsonlMissingSince: null,
       lastJsonlActivityAt: null,
       lastTerminalActivityAt: null,
@@ -424,8 +433,8 @@ export class PtyManager {
     };
   }
 
-  private emitActiveTerminalReplay(handle: PtyHandle | null): void {
-    if (!handle?.sessionId) {
+  private emitActiveTerminalReplay(handle: CodexHandle | null): void {
+    if (!handle) {
       return;
     }
 
@@ -436,7 +445,7 @@ export class PtyManager {
     });
   }
 
-  private createRuntimeSnapshot(handle: PtyHandle | null): RuntimeSnapshot {
+  private createRuntimeSnapshot(handle: CodexHandle | null): RuntimeSnapshot {
     if (!handle) {
       return {
         providerId: null,
@@ -460,7 +469,7 @@ export class PtyManager {
     };
   }
 
-  private getActiveHandle(): PtyHandle | null {
+  private getActiveHandle(): CodexHandle | null {
     if (!this.activeThreadKey) {
       return null;
     }
@@ -468,7 +477,7 @@ export class PtyManager {
     return this.handles.get(this.activeThreadKey) ?? null;
   }
 
-  private isActiveHandle(handle: PtyHandle): boolean {
+  private isActiveHandle(handle: CodexHandle): boolean {
     return this.activeThreadKey === handle.threadKey;
   }
 
@@ -476,7 +485,7 @@ export class PtyManager {
     return status === 'starting' || status === 'running';
   }
 
-  private async normalizeSelection(selection: PtyManagerSelection): Promise<PtyManagerSelection> {
+  private async normalizeSelection(selection: CodexManagerSelection): Promise<CodexManagerSelection> {
     const cwd = path.resolve(selection.cwd);
     const stat = await fs.stat(cwd);
     if (!stat.isDirectory()) {
@@ -491,7 +500,7 @@ export class PtyManager {
     };
   }
 
-  private syncHandleSelection(handle: PtyHandle, selection: PtyManagerSelection): void {
+  private syncHandleSelection(handle: CodexHandle, selection: CodexManagerSelection): void {
     handle.cwd = selection.cwd;
     handle.label = selection.label;
     handle.runtime.providerId = this.providerId;
@@ -506,18 +515,20 @@ export class PtyManager {
     if (!handle.pty && selection.sessionId && handle.sessionId !== selection.sessionId) {
       handle.sessionId = selection.sessionId;
       handle.runtime.sessionId = selection.sessionId;
+      handle.sessionFilePath = null;
+      handle.discoveryStartedAt = null;
       this.resetJsonlParsingState(handle, selection.sessionId);
     }
   }
 
-  private resetJsonlParsingState(handle: PtyHandle, sessionId: string | null): void {
-    handle.jsonlMessagesState = createClaudeJsonlMessagesState();
+  private resetJsonlParsingState(handle: CodexHandle, sessionId: string | null): void {
+    handle.jsonlMessagesState = createCodexJsonlMessagesState();
     handle.parsedJsonlSessionId = sessionId;
     handle.jsonlReadOffset = 0;
     handle.jsonlPendingLine = '';
   }
 
-  private resetHandleRuntime(handle: PtyHandle, sessionId: string | null): void {
+  private resetHandleRuntime(handle: CodexHandle, sessionId: string | null): void {
     handle.runtime = this.createFreshState(handle.threadKey, sessionId);
     handle.sessionId = sessionId;
     handle.awaitingJsonlTurn = false;
@@ -528,40 +539,39 @@ export class PtyManager {
     this.resetJsonlParsingState(handle, sessionId);
   }
 
-  private closeJsonlWatcher(handle: PtyHandle): void {
+  private closeJsonlWatcher(handle: CodexHandle): void {
     if (!handle.jsonlWatcher) {
       return;
     }
 
     handle.jsonlWatcher.close();
     handle.jsonlWatcher = null;
-    handle.watchedJsonlSessionId = null;
+    handle.watchedJsonlFilePath = null;
   }
 
-  private ensureJsonlWatcher(handle: PtyHandle, sessionId: string | null): void {
+  private ensureJsonlWatcher(handle: CodexHandle, filePath: string | null): void {
     if (!this.isActiveHandle(handle)) {
       this.closeJsonlWatcher(handle);
       return;
     }
 
-    if (!sessionId) {
+    if (!filePath) {
       this.closeJsonlWatcher(handle);
       return;
     }
 
-    if (handle.jsonlWatcher && handle.watchedJsonlSessionId === sessionId) {
+    if (handle.jsonlWatcher && handle.watchedJsonlFilePath === filePath) {
       return;
     }
 
     this.closeJsonlWatcher(handle);
 
-    const filePath = this.resolveSessionJsonlFilePath(handle, sessionId);
     const dirPath = path.dirname(filePath);
     const fileName = path.basename(filePath);
 
     try {
       handle.jsonlWatcher = watchFs(dirPath, { persistent: false }, (_eventType, changedFileName) => {
-        if (!this.isActiveHandle(handle) || handle.sessionId !== sessionId) {
+        if (!this.isActiveHandle(handle) || handle.sessionFilePath !== filePath) {
           return;
         }
         if (typeof changedFileName === 'string' && changedFileName.length > 0 && changedFileName !== fileName) {
@@ -569,9 +579,9 @@ export class PtyManager {
         }
         this.scheduleJsonlRefresh(0);
       });
-      handle.watchedJsonlSessionId = sessionId;
+      handle.watchedJsonlFilePath = filePath;
       handle.jsonlWatcher.on('error', (error) => {
-        if (!this.isActiveHandle(handle) || handle.sessionId !== sessionId) {
+        if (!this.isActiveHandle(handle) || handle.sessionFilePath !== filePath) {
           return;
         }
         this.closeJsonlWatcher(handle);
@@ -579,59 +589,32 @@ export class PtyManager {
         if (code === 'ENOENT') {
           return;
         }
-        this.setLastError(handle, error instanceof Error ? error.message : 'Failed to watch Claude jsonl');
+        this.setLastError(handle, error instanceof Error ? error.message : 'Failed to watch Codex jsonl');
       });
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') {
         return;
       }
-      this.setLastError(handle, error instanceof Error ? error.message : 'Failed to watch Claude jsonl');
+      this.setLastError(handle, error instanceof Error ? error.message : 'Failed to watch Codex jsonl');
     }
   }
 
-  private resolveSessionJsonlFilePath(handle: PtyHandle, sessionId: string): string {
-    return resolveClaudeJsonlFilePath(handle.cwd, sessionId, os.homedir());
-  }
-
-  private resolveRuntimeStatusFromJsonl(handle: PtyHandle, runtimePhase: ClaudeJsonlRuntimePhase): RuntimeStatus {
+  private resolveRuntimeStatusFromState(handle: CodexHandle, runtimePhase: CodexJsonlRuntimePhase): RuntimeStatus {
     if (handle.runtime.lastError !== null && handle.runtime.status === 'error') {
       return 'error';
     }
 
-    if (runtimePhase === 'running' || handle.awaitingJsonlTurn) {
+    const ptyLifecycle = handle.pty ? getCodexPtyLifecycle(handle.pty.recentOutput) : 'not_ready';
+    if (runtimePhase === 'running' || handle.awaitingJsonlTurn || ptyLifecycle === 'running') {
       return 'running';
     }
 
-    if (handle.pty && handle.runtime.status === 'starting' && handle.runtime.allMessages.length === 0) {
+    if (handle.pty && ptyLifecycle === 'not_ready' && handle.runtime.allMessages.length === 0) {
       return 'starting';
     }
 
     return 'idle';
-  }
-
-  private applyStreamingStatus(messages: ChatMessage[], isRunning: boolean): ChatMessage[] {
-    if (!isRunning) {
-      return messages;
-    }
-
-    const lastAssistantIndex = [...messages].reverse().findIndex((message) => message.role === 'assistant');
-    if (lastAssistantIndex < 0) {
-      return messages;
-    }
-
-    const targetIndex = messages.length - 1 - lastAssistantIndex;
-    const targetMessage = messages[targetIndex];
-    if (!targetMessage || targetMessage.status === 'error' || targetMessage.status === 'streaming') {
-      return messages;
-    }
-
-    const nextMessages = messages.slice();
-    nextMessages[targetIndex] = {
-      ...targetMessage,
-      status: 'streaming'
-    };
-    return nextMessages;
   }
 
   private selectRecentMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -642,7 +625,7 @@ export class PtyManager {
   }
 
   private createMessagesUpsertPayload(
-    handle: PtyHandle,
+    handle: CodexHandle,
     previousMessages: ChatMessage[],
     nextMessages: ChatMessage[],
     previousHasOlderMessages: boolean,
@@ -694,6 +677,28 @@ export class PtyManager {
     }
   }
 
+  private async discoverSessionForHandle(handle: CodexHandle): Promise<void> {
+    if (handle.sessionId || !handle.discoveryStartedAt) {
+      return;
+    }
+
+    const match = await findLatestCodexSessionForCwdSince(handle.cwd, handle.discoveryStartedAt, this.options);
+    if (!match) {
+      return;
+    }
+
+    handle.sessionId = match.sessionId;
+    handle.runtime.sessionId = match.sessionId;
+    handle.sessionFilePath = match.filePath;
+    handle.discoveryStartedAt = null;
+    this.resetJsonlParsingState(handle, match.sessionId);
+
+    if (this.isActiveHandle(handle)) {
+      this.ensureJsonlWatcher(handle, match.filePath);
+      this.emitSnapshotNow();
+    }
+  }
+
   private async refreshActiveMessages(): Promise<void> {
     const handle = this.getActiveHandle();
     if (!handle) {
@@ -703,24 +708,30 @@ export class PtyManager {
     await this.refreshMessagesFromJsonl(handle);
   }
 
-  private async refreshMessagesFromJsonl(handle: PtyHandle): Promise<void> {
+  private async refreshMessagesFromJsonl(handle: CodexHandle): Promise<void> {
+    await this.discoverSessionForHandle(handle);
+
     const sessionId = handle.sessionId;
+    const previousMessages = handle.runtime.messages;
+    const previousHasOlderMessages = handle.runtime.hasOlderMessages;
+    const previousStatus = handle.runtime.status;
+    const previousActivityRevision = handle.jsonlMessagesState.activityRevision;
+
     if (!sessionId) {
       this.closeJsonlWatcher(handle);
-      if (this.isActiveHandle(handle) && handle.runtime.status !== 'idle') {
-        handle.runtime.status = 'idle';
+      const nextStatus = this.resolveRuntimeStatusFromState(handle, handle.jsonlMessagesState.runtimePhase);
+      if (this.isActiveHandle(handle) && handle.runtime.status !== nextStatus) {
+        handle.runtime.status = nextStatus;
         this.emitSnapshotNow();
       }
       return;
     }
 
-    this.ensureJsonlWatcher(handle, sessionId);
+    if (!handle.sessionFilePath) {
+      handle.sessionFilePath = await findCodexSessionFile(sessionId, this.options);
+    }
 
-    const filePath = this.resolveSessionJsonlFilePath(handle, sessionId);
-    const previousMessages = handle.runtime.messages;
-    const previousHasOlderMessages = handle.runtime.hasOlderMessages;
-    const previousStatus = handle.runtime.status;
-    const previousActivityRevision = handle.jsonlMessagesState.activityRevision;
+    this.ensureJsonlWatcher(handle, handle.sessionFilePath);
 
     try {
       if (handle.parsedJsonlSessionId !== sessionId) {
@@ -730,49 +741,52 @@ export class PtyManager {
         handle.runtime.hasOlderMessages = false;
       }
 
-      const stat = await fs.stat(filePath);
-      handle.lastJsonlActivityAt = Math.max(handle.lastJsonlActivityAt ?? 0, Math.floor(stat.mtimeMs));
-      handle.jsonlMissingSince = null;
+      if (!handle.sessionFilePath) {
+        handle.jsonlMissingSince ??= Date.now();
+      } else {
+        const stat = await fs.stat(handle.sessionFilePath);
+        handle.lastJsonlActivityAt = Math.max(handle.lastJsonlActivityAt ?? 0, Math.floor(stat.mtimeMs));
+        handle.jsonlMissingSince = null;
 
-      if (handle.jsonlReadOffset > stat.size) {
-        this.resetJsonlParsingState(handle, sessionId);
-      }
-
-      const { text, size } = await this.readJsonlTail(filePath, handle.jsonlReadOffset);
-      if (text) {
-        const combined = `${handle.jsonlPendingLine}${text}`;
-        const lines = combined.split('\n');
-        const trailingLine = lines.pop() ?? '';
-
-        for (const line of lines) {
-          applyClaudeJsonlLine(handle.jsonlMessagesState, line);
+        if (handle.jsonlReadOffset > stat.size) {
+          this.resetJsonlParsingState(handle, sessionId);
         }
 
-        if (trailingLine.trim() && !applyClaudeJsonlLine(handle.jsonlMessagesState, trailingLine)) {
-          handle.jsonlPendingLine = trailingLine;
-        } else {
+        const { text, size } = await this.readJsonlTail(handle.sessionFilePath, handle.jsonlReadOffset);
+        if (text) {
+          const combined = `${handle.jsonlPendingLine}${text}`;
+          const lines = combined.split('\n');
+          const trailingLine = lines.pop() ?? '';
+
+          for (const line of lines) {
+            applyCodexJsonlLine(handle.jsonlMessagesState, line);
+          }
+
+          if (trailingLine.trim() && !applyCodexJsonlLine(handle.jsonlMessagesState, trailingLine)) {
+            handle.jsonlPendingLine = trailingLine;
+          } else {
+            handle.jsonlPendingLine = '';
+          }
+        } else if (handle.jsonlPendingLine.trim() && applyCodexJsonlLine(handle.jsonlMessagesState, handle.jsonlPendingLine)) {
           handle.jsonlPendingLine = '';
         }
-      } else if (handle.jsonlPendingLine.trim() && applyClaudeJsonlLine(handle.jsonlMessagesState, handle.jsonlPendingLine)) {
-        handle.jsonlPendingLine = '';
+
+        handle.jsonlReadOffset = size;
       }
 
-      handle.jsonlReadOffset = size;
       const sawJsonlActivity = handle.jsonlMessagesState.activityRevision !== previousActivityRevision;
       if (sawJsonlActivity) {
         handle.awaitingJsonlTurn = false;
         handle.lastJsonlActivityAt = Date.now();
       }
 
-      const nextRuntimeStatus = this.resolveRuntimeStatusFromJsonl(handle, handle.jsonlMessagesState.runtimePhase);
-      const nextAllMessages = this.applyStreamingStatus(
-        materializeClaudeJsonlMessages(handle.jsonlMessagesState),
-        handle.jsonlMessagesState.runtimePhase === 'running'
-      );
+      const nextAllMessages = materializeCodexJsonlMessages(handle.jsonlMessagesState);
       const nextMessages = this.selectRecentMessages(nextAllMessages);
+      const nextHasOlderMessages = nextAllMessages.length > nextMessages.length;
+      const nextRuntimeStatus = this.resolveRuntimeStatusFromState(handle, handle.jsonlMessagesState.runtimePhase);
       const allMessagesChanged = !messagesEqual(handle.runtime.allMessages, nextAllMessages);
       const messagesChanged = !messagesEqual(handle.runtime.messages, nextMessages);
-      const hasOlderMessagesChanged = handle.runtime.hasOlderMessages !== (nextAllMessages.length > nextMessages.length);
+      const hasOlderMessagesChanged = handle.runtime.hasOlderMessages !== nextHasOlderMessages;
       const statusChanged = previousStatus !== nextRuntimeStatus;
 
       if (allMessagesChanged) {
@@ -782,7 +796,7 @@ export class PtyManager {
         handle.runtime.messages = nextMessages;
       }
       if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
-        handle.runtime.hasOlderMessages = nextAllMessages.length > nextMessages.length;
+        handle.runtime.hasOlderMessages = nextHasOlderMessages;
       }
       if (statusChanged) {
         handle.runtime.status = nextRuntimeStatus;
@@ -798,7 +812,7 @@ export class PtyManager {
           previousMessages,
           nextMessages,
           previousHasOlderMessages,
-          nextAllMessages.length > nextMessages.length
+          nextHasOlderMessages
         );
         if (upsertPayload) {
           this.callbacks.emitMessagesUpsert(upsertPayload);
@@ -809,9 +823,11 @@ export class PtyManager {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') {
         handle.jsonlMissingSince ??= Date.now();
+        handle.sessionFilePath = null;
+        this.ensureJsonlWatcher(handle, null);
         return;
       }
-      this.setLastError(handle, error instanceof Error ? error.message : 'Failed to read Claude jsonl');
+      this.setLastError(handle, error instanceof Error ? error.message : 'Failed to read Codex jsonl');
     }
   }
 
@@ -845,7 +861,7 @@ export class PtyManager {
     this.callbacks.emitSnapshot(this.createRuntimeSnapshot(this.getActiveHandle()));
   }
 
-  private setStatus(handle: PtyHandle, nextStatus: RuntimeStatus, immediate = false): void {
+  private setStatus(handle: CodexHandle, nextStatus: RuntimeStatus, immediate = false): void {
     if (handle.runtime.status === nextStatus) {
       return;
     }
@@ -861,21 +877,21 @@ export class PtyManager {
     this.scheduleSnapshotEmit();
   }
 
-  private clearLastError(handle: PtyHandle): void {
+  private clearLastError(handle: CodexHandle): void {
     if (handle.runtime.lastError === null && handle.runtime.status !== 'error') {
       return;
     }
 
     handle.runtime.lastError = null;
     if (handle.runtime.status === 'error') {
-      handle.runtime.status = this.resolveRuntimeStatusFromJsonl(handle, handle.jsonlMessagesState.runtimePhase);
+      handle.runtime.status = this.resolveRuntimeStatusFromState(handle, handle.jsonlMessagesState.runtimePhase);
     }
     if (this.isActiveHandle(handle)) {
       this.emitSnapshotNow();
     }
   }
 
-  private setLastError(handle: PtyHandle, nextError: string | null): void {
+  private setLastError(handle: CodexHandle, nextError: string | null): void {
     if (handle.runtime.lastError === nextError && (nextError === null || handle.runtime.status === 'error')) {
       return;
     }
@@ -890,7 +906,7 @@ export class PtyManager {
     }
   }
 
-  private detachHandle(handle: PtyHandle): void {
+  private detachHandle(handle: CodexHandle): void {
     this.closeJsonlWatcher(handle);
     handle.lifecycle = handle.pty ? 'detached' : 'exited';
     handle.detachedAt = Date.now();
@@ -907,7 +923,7 @@ export class PtyManager {
     }
   }
 
-  private resetTerminalReplay(handle: PtyHandle): void {
+  private resetTerminalReplay(handle: CodexHandle): void {
     handle.runtime.terminalReplay = '';
     handle.runtime.terminalOffset = 0;
     if (handle.pty) {
@@ -917,7 +933,7 @@ export class PtyManager {
     }
   }
 
-  private stopHandlePty(handle: PtyHandle): void {
+  private stopHandlePty(handle: CodexHandle): void {
     const currentPty = handle.pty;
     if (!currentPty) {
       return;
@@ -927,11 +943,11 @@ export class PtyManager {
     handle.pty = null;
     handle.awaitingJsonlTurn = false;
     this.resetTerminalReplay(handle);
-    stopClaudePtySession(currentPty);
+    stopCodexPtySession(currentPty);
     this.discardInactiveHandle(handle);
   }
 
-  private stopHandlePtyPreservingReplay(handle: PtyHandle): void {
+  private stopHandlePtyPreservingReplay(handle: CodexHandle): void {
     const currentPty = handle.pty;
     if (!currentPty) {
       return;
@@ -940,22 +956,25 @@ export class PtyManager {
     handle.suppressNextPtyExitError = true;
     handle.pty = null;
     handle.awaitingJsonlTurn = false;
-    stopClaudePtySession(currentPty);
+    stopCodexPtySession(currentPty);
   }
 
-  private startHandleSession(handle: PtyHandle, options?: { emitSnapshot?: boolean }): void {
+  private startHandleSession(handle: CodexHandle): void {
     this.resetTerminalReplay(handle);
     handle.suppressNextPtyExitError = false;
+    handle.discoveryStartedAt = handle.sessionId ? null : Date.now();
+    if (!handle.sessionId) {
+      handle.sessionFilePath = null;
+    }
     const token = ++handle.ptyToken;
-    const started = startClaudePtySession({
-      claudeBin: this.options.claudeBin,
+    const started = startCodexPtySession({
+      codexBin: this.options.codexBin,
       cols: this.terminalSize.cols,
       cwd: handle.cwd,
       env: {
         ...process.env,
         TERM: 'xterm-256color'
       },
-      permissionMode: this.options.permissionMode,
       resumeSessionId: handle.sessionId,
       rows: this.terminalSize.rows,
       onData: (chunk) => {
@@ -972,21 +991,18 @@ export class PtyManager {
       }
     });
 
-    handle.pty = started.session;
-    handle.sessionId = started.sessionId;
-    handle.runtime.sessionId = started.sessionId;
+    handle.pty = started;
+    handle.runtime.sessionId = handle.sessionId;
     handle.runtime.status = 'starting';
     handle.lifecycle = this.isActiveHandle(handle) ? 'attached' : 'detached';
     if (this.isActiveHandle(handle)) {
-      this.ensureJsonlWatcher(handle, started.sessionId);
-      if (options?.emitSnapshot !== false) {
-        this.emitSnapshotNow();
-      }
+      this.ensureJsonlWatcher(handle, handle.sessionFilePath);
+      this.emitSnapshotNow();
       this.scheduleJsonlRefresh(0);
     }
   }
 
-  private async ensureHandleSession(handle: PtyHandle): Promise<void> {
+  private async ensureHandleSession(handle: CodexHandle): Promise<void> {
     if (handle.pty) {
       return;
     }
@@ -995,7 +1011,7 @@ export class PtyManager {
     this.startHandleSession(handle);
   }
 
-  private handlePtyData(handle: PtyHandle, chunk: string): void {
+  private handlePtyData(handle: CodexHandle, chunk: string): void {
     const session = handle.pty;
     if (!session) {
       return;
@@ -1019,7 +1035,7 @@ export class PtyManager {
     this.scheduleJsonlRefresh();
   }
 
-  private async handlePtyExit(handle: PtyHandle): Promise<void> {
+  private async handlePtyExit(handle: CodexHandle): Promise<void> {
     const expectedExit = handle.suppressNextPtyExitError;
     handle.suppressNextPtyExitError = false;
     handle.pty = null;
@@ -1029,7 +1045,7 @@ export class PtyManager {
 
     if (!this.isActiveHandle(handle)) {
       if (!expectedExit) {
-        handle.runtime.lastError = 'Claude CLI exited unexpectedly';
+        handle.runtime.lastError = 'Codex CLI exited unexpectedly';
       }
       this.discardInactiveHandle(handle);
       return;
@@ -1040,51 +1056,30 @@ export class PtyManager {
       this.setStatus(handle, 'idle', true);
       return;
     }
-    this.setLastError(handle, 'Claude CLI exited unexpectedly');
+    this.setLastError(handle, 'Codex CLI exited unexpectedly');
   }
 
-  private async autoAcceptBypassPrompt(handle: PtyHandle): Promise<boolean> {
-    if (!handle.pty) {
-      return false;
-    }
-
-    if (!looksLikeBypassPrompt(handle.pty.recentOutput)) {
-      return false;
-    }
-
-    handle.pty.pty.write('\x1b[B');
-    await sleep(120);
-    handle.pty.pty.write('\r');
-    await sleep(320);
-    return true;
-  }
-
-  private async waitForHandleReady(handle: PtyHandle): Promise<void> {
-    const deadline = Date.now() + this.options.claudeReadyTimeoutMs;
+  private async waitForHandleReady(handle: CodexHandle): Promise<void> {
+    const deadline = Date.now() + this.options.codexReadyTimeoutMs;
 
     while (Date.now() < deadline) {
       if (!handle.pty) {
-        throw new Error('Claude PTY session is not running');
+        throw new Error('Codex PTY session is not running');
       }
 
-      const currentText = handle.pty.recentOutput;
-      if (looksReadyForInput(currentText)) {
+      if (looksReadyForInput(handle.pty.recentOutput)) {
         return;
-      }
-
-      if (await this.autoAcceptBypassPrompt(handle)) {
-        continue;
       }
 
       await sleep(250);
     }
 
-    throw new Error('Claude CLI startup timed out');
+    throw new Error('Codex CLI startup timed out');
   }
 
-  private async sendPromptToHandle(handle: PtyHandle, content: string): Promise<void> {
+  private async sendPromptToHandle(handle: CodexHandle, content: string): Promise<void> {
     if (!handle.pty) {
-      throw new Error('Claude PTY session is not running');
+      throw new Error('Codex PTY session is not running');
     }
 
     const normalizedContent = content.replace(/\r\n/g, '\n');
@@ -1100,7 +1095,7 @@ export class PtyManager {
     handle.pty.pty.write('\r');
   }
 
-  private getLastActivityAt(handle: PtyHandle): number {
+  private getLastActivityAt(handle: CodexHandle): number {
     return Math.max(
       handle.lastJsonlActivityAt ?? 0,
       handle.lastTerminalActivityAt ?? 0,
@@ -1109,7 +1104,7 @@ export class PtyManager {
     );
   }
 
-  private pruneInactiveHandleState(handle: PtyHandle): void {
+  private pruneInactiveHandleState(handle: CodexHandle): void {
     if (this.isActiveHandle(handle)) {
       return;
     }
@@ -1121,7 +1116,7 @@ export class PtyManager {
     this.resetJsonlParsingState(handle, handle.sessionId);
   }
 
-  private discardInactiveHandle(handle: PtyHandle): void {
+  private discardInactiveHandle(handle: CodexHandle): void {
     if (this.isActiveHandle(handle) || handle.pty) {
       return;
     }
@@ -1148,7 +1143,17 @@ export class PtyManager {
         continue;
       }
 
-      const filePath = this.resolveSessionJsonlFilePath(handle, handle.sessionId);
+      const filePath = handle.sessionFilePath ?? (await findCodexSessionFile(handle.sessionId, this.options));
+      handle.sessionFilePath = filePath;
+
+      if (!filePath) {
+        handle.jsonlMissingSince ??= now;
+        if (now - handle.jsonlMissingSince >= this.options.detachedJsonlMissingTtlMs) {
+          this.stopHandlePty(handle);
+        }
+        continue;
+      }
+
       try {
         const stat = await fs.stat(filePath);
         handle.lastJsonlActivityAt = Math.max(handle.lastJsonlActivityAt ?? 0, Math.floor(stat.mtimeMs));

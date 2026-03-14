@@ -28,9 +28,8 @@ export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChang
       onActivateConversation={(project, providerId, conversation) => {
         void controller.activateConversation(project, providerId, conversation);
       }}
-      onAddProject={() => {
-        void controller.addProject();
-      }}
+      onAddProject={controller.addProject}
+      onPickProjectDirectory={controller.pickProjectDirectory}
       onMobileOpenChange={onMobileOpenChange}
       onRefreshAllProjects={() => {
         void controller.refreshAllProjectConversations();

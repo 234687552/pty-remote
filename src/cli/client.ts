@@ -18,6 +18,7 @@ import type {
 } from '../../shared/protocol.ts';
 import type { ProviderId } from '../../shared/runtime-types.ts';
 import { createClaudeProviderRuntime } from '../providers/claude.ts';
+import { createCodexProviderRuntime, type CodexProviderRuntimeOptions } from '../providers/codex.ts';
 import type { ProviderRuntime } from '../providers/provider-runtime.ts';
 import type { PtyManagerOptions } from './pty-manager.ts';
 
@@ -29,13 +30,14 @@ const CLI_ID_FILE = path.join(CONFIG_DIR, 'cli-id');
 
 const SOCKET_URL = process.env.SOCKET_URL ?? `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? '3001'}`;
 const execFileAsync = promisify(execFile);
+const PROVIDER_ID = resolveProviderId(process.env.PTY_REMOTE_PROVIDER);
 const CLI_ID = resolveCliId();
 const CLI_LABEL = resolveCliLabel();
-const PROVIDER_ID: ProviderId = 'claude';
 const PTY_BACKEND_NAME = 'node-pty';
 const TERMINAL_REPLAY_MAX_BYTES = 1024 * 1024;
 const RECENT_OUTPUT_MAX_CHARS = 12_000;
 const CLAUDE_READY_TIMEOUT_MS = 20_000;
+const CODEX_READY_TIMEOUT_MS = 20_000;
 const PROMPT_SUBMIT_DELAY_MS = 120;
 const JSONL_REFRESH_DEBOUNCE_MS = 120;
 const SNAPSHOT_EMIT_DEBOUNCE_MS = 200;
@@ -75,35 +77,93 @@ const runtimeOptions: PtyManagerOptions = {
   maxDetachedPtys: Number.isFinite(MAX_DETACHED_PTYS) && MAX_DETACHED_PTYS > 0 ? MAX_DETACHED_PTYS : 5
 };
 
-const runtime: ProviderRuntime = createClaudeProviderRuntime(runtimeOptions, {
-  emitMessagesUpsert(payload) {
-    if (!socketClient?.connected) {
-      return;
-    }
-    socketClient.emit('cli:messages-upsert', {
-      ...payload,
-      cliId: CLI_ID
-    });
-  },
-  emitSnapshot(snapshot) {
-    if (!socketClient?.connected) {
-      return;
-    }
-    socketClient.emit('cli:snapshot', {
-      cliId: CLI_ID,
-      snapshot
-    } satisfies RuntimeSnapshotPayload);
-  },
-  emitTerminalChunk(payload) {
-    if (!socketClient?.connected) {
-      return;
-    }
-    socketClient.emit('cli:terminal-chunk', {
-      ...payload,
-      cliId: CLI_ID
+const codexRuntimeOptions: CodexProviderRuntimeOptions = {
+  codexBin: process.env.CODEX_BIN ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/codex' : 'codex'),
+  defaultCwd: DEFAULT_ROOT_DIR,
+  terminalCols: TERMINAL_COLS,
+  terminalRows: TERMINAL_ROWS,
+  terminalReplayMaxBytes: TERMINAL_REPLAY_MAX_BYTES,
+  recentOutputMaxChars: RECENT_OUTPUT_MAX_CHARS,
+  codexReadyTimeoutMs: CODEX_READY_TIMEOUT_MS,
+  promptSubmitDelayMs: PROMPT_SUBMIT_DELAY_MS,
+  jsonlRefreshDebounceMs: JSONL_REFRESH_DEBOUNCE_MS,
+  snapshotEmitDebounceMs: SNAPSHOT_EMIT_DEBOUNCE_MS,
+  snapshotMessagesMax: SNAPSHOT_MESSAGES_MAX,
+  olderMessagesPageMax: OLDER_MESSAGES_PAGE_MAX,
+  gcIntervalMs: GC_INTERVAL_MS,
+  detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
+  detachedJsonlMissingTtlMs: DETACHED_JSONL_MISSING_TTL_MS,
+  detachedPtyTtlMs: DETACHED_PTY_TTL_MS,
+  maxDetachedPtys: Number.isFinite(MAX_DETACHED_PTYS) && MAX_DETACHED_PTYS > 0 ? MAX_DETACHED_PTYS : 5,
+  indexPath: process.env.CODEX_SESSION_INDEX_PATH?.trim() || undefined,
+  sessionsRootPath: process.env.CODEX_SESSIONS_ROOT_PATH?.trim() || undefined
+};
+
+function createRuntime(): ProviderRuntime {
+  if (PROVIDER_ID === 'codex') {
+    return createCodexProviderRuntime(codexRuntimeOptions, {
+      emitMessagesUpsert(payload) {
+        if (!socketClient?.connected) {
+          return;
+        }
+        socketClient.emit('cli:messages-upsert', {
+          ...payload,
+          cliId: CLI_ID
+        });
+      },
+      emitSnapshot(snapshot) {
+        if (!socketClient?.connected) {
+          return;
+        }
+        socketClient.emit('cli:snapshot', {
+          cliId: CLI_ID,
+          snapshot
+        } satisfies RuntimeSnapshotPayload);
+      },
+      emitTerminalChunk(payload) {
+        if (!socketClient?.connected) {
+          return;
+        }
+        socketClient.emit('cli:terminal-chunk', {
+          ...payload,
+          cliId: CLI_ID
+        });
+      }
     });
   }
-});
+
+  return createClaudeProviderRuntime(runtimeOptions, {
+    emitMessagesUpsert(payload) {
+      if (!socketClient?.connected) {
+        return;
+      }
+      socketClient.emit('cli:messages-upsert', {
+        ...payload,
+        cliId: CLI_ID
+      });
+    },
+    emitSnapshot(snapshot) {
+      if (!socketClient?.connected) {
+        return;
+      }
+      socketClient.emit('cli:snapshot', {
+        cliId: CLI_ID,
+        snapshot
+      } satisfies RuntimeSnapshotPayload);
+    },
+    emitTerminalChunk(payload) {
+      if (!socketClient?.connected) {
+        return;
+      }
+      socketClient.emit('cli:terminal-chunk', {
+        ...payload,
+        cliId: CLI_ID
+      });
+    }
+  });
+}
+
+const runtime: ProviderRuntime = createRuntime();
 
 function sanitizeIdentifier(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-');
@@ -147,7 +207,7 @@ function resolveCliLabel(): string {
     }
   }
 
-  return os.hostname() || path.basename(DEFAULT_ROOT_DIR) || 'claude-cli';
+  return os.hostname() || path.basename(DEFAULT_ROOT_DIR) || `${PROVIDER_ID}-cli`;
 }
 
 function execFileSyncSafe(command: string, args: string[]): string {
@@ -160,6 +220,14 @@ function sanitizePermissionMode(value: string | undefined): string {
     return value;
   }
   return 'bypassPermissions';
+}
+
+function resolveProviderId(value: string | undefined): ProviderId {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === 'codex') {
+    return 'codex';
+  }
+  return 'claude';
 }
 
 async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCommandResult> {
@@ -198,15 +266,24 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
     }
 
     if (envelope.name === 'select-conversation') {
-      const payload = envelope.payload as { cwd: string; label?: string; sessionId: string | null; conversationKey: string };
+      const payload = envelope.payload as {
+        cwd: string;
+        label?: string;
+        sessionId: string | null;
+        conversationKey: string;
+        clientRequestId?: string | null;
+      };
       return {
         ok: true,
-        payload: await runtime.activateConversation({
-          cwd: payload.cwd,
-          label: payload.label?.trim() || path.basename(payload.cwd) || payload.cwd,
-          sessionId: payload.sessionId ?? null,
-          conversationKey: payload.conversationKey
-        })
+        payload: {
+          ...(await runtime.activateConversation({
+            cwd: payload.cwd,
+            label: payload.label?.trim() || path.basename(payload.cwd) || payload.cwd,
+            sessionId: payload.sessionId ?? null,
+            conversationKey: payload.conversationKey
+          })),
+          clientRequestId: payload.clientRequestId ?? null
+        }
       };
     }
 
