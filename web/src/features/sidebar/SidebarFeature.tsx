@@ -7,10 +7,12 @@ import type { WorkspaceStore } from '@/features/workspace/store.ts';
 interface SidebarFeatureProps {
   clis: CliDescriptor[];
   controller: WorkspaceController;
+  mobileOpen: boolean;
+  onMobileOpenChange: (open: boolean) => void;
   store: WorkspaceStore;
 }
 
-export function SidebarFeature({ clis, controller, store }: SidebarFeatureProps) {
+export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChange, store }: SidebarFeatureProps) {
   return (
     <Sidebar
       activeCliId={store.workspaceState.activeCliId}
@@ -18,6 +20,7 @@ export function SidebarFeature({ clis, controller, store }: SidebarFeatureProps)
       activeThreadId={store.workspaceState.activeThreadId}
       clis={clis}
       collapsed={store.workspaceState.sidebarCollapsed}
+      mobileOpen={mobileOpen}
       projectThreadsById={store.projectThreadsById}
       projects={store.workspaceState.projects}
       projectsRefreshing={store.projectsRefreshing}
@@ -27,7 +30,7 @@ export function SidebarFeature({ clis, controller, store }: SidebarFeatureProps)
       onAddProject={() => {
         void controller.addProject();
       }}
-      onCollapsedChange={controller.setSidebarCollapsed}
+      onMobileOpenChange={onMobileOpenChange}
       onCreateThread={controller.createThread}
       onRefreshAllProjects={() => {
         void controller.refreshAllProjectThreads();

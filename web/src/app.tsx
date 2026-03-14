@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 
 import type { TerminalChunkPayload } from '@shared/protocol.ts';
 
@@ -13,9 +13,9 @@ import { selectActiveCliId } from '@/features/workspace/selectors.ts';
 import { useWorkspaceStore } from '@/features/workspace/store.ts';
 import { useCliSocket } from '@/hooks/useCliSocket.ts';
 import { useTerminalBridge } from '@/hooks/useTerminalBridge.ts';
-
 export function App() {
   const store = useWorkspaceStore();
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const activeCliId = selectActiveCliId(store.workspaceState);
   const terminalEventHandlersRef = useRef<{
     onConnect: () => void;
@@ -67,19 +67,26 @@ export function App() {
     terminal
   });
 
+  function handleMobileSidebarOpen(): void {
+    setMobileSidebarOpen(true);
+  }
+
+  function handleDesktopSidebarToggle(): void {
+    controller.setSidebarCollapsed(!store.workspaceState.sidebarCollapsed);
+  }
+
   return (
     <AppShell
-      sidebar={<SidebarFeature clis={clis} controller={controller} store={store} />}
+      sidebar={<SidebarFeature clis={clis} controller={controller} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} store={store} />}
       mobilePane={store.mobilePane}
-      renderHeader={({ mobileTitleVisible }) => (
+      renderHeader={() => (
         <HeaderFeature
           clis={clis}
           mobilePane={store.mobilePane}
-          mobileTitleVisible={mobileTitleVisible}
           onMobilePaneChange={store.setMobilePane}
-          onSidebarToggle={() => {
-            controller.setSidebarCollapsed(!store.workspaceState.sidebarCollapsed);
-          }}
+          onSidebarOpen={handleMobileSidebarOpen}
+          onSidebarToggle={handleDesktopSidebarToggle}
+          mobileSidebarOpen={mobileSidebarOpen}
           sidebarCollapsed={store.workspaceState.sidebarCollapsed}
           store={store}
         />

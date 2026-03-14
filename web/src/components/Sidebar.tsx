@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import type { CliDescriptor } from '@shared/runtime-types.ts';
 
@@ -10,12 +10,13 @@ interface SidebarProps {
   activeThreadId: string | null;
   clis: CliDescriptor[];
   collapsed: boolean;
+  mobileOpen: boolean;
   projectThreadsById: Record<string, ProjectThreadEntry[]>;
   projects: ProjectEntry[];
   projectsRefreshing: boolean;
   onActivateThread: (project: ProjectEntry, thread: ProjectThreadEntry) => void;
   onAddProject: () => void;
-  onCollapsedChange: (collapsed: boolean) => void;
+  onMobileOpenChange: (open: boolean) => void;
   onCreateThread: (projectId: string) => void;
   onRefreshAllProjects: () => void;
   onSelectCli: (cliId: string | null) => void;
@@ -23,6 +24,7 @@ interface SidebarProps {
 }
 
 type ProviderId = 'claude';
+const MOBILE_OVERLAY_CLOSE_GUARD_MS = 280;
 
 interface ProviderSection {
   id: ProviderId;
@@ -78,18 +80,26 @@ export function Sidebar({
   activeThreadId,
   clis,
   collapsed,
+  mobileOpen,
   projectThreadsById,
   projects,
   projectsRefreshing,
   onActivateThread,
   onAddProject,
-  onCollapsedChange,
+  onMobileOpenChange,
   onCreateThread,
   onRefreshAllProjects,
   onSelectCli,
   onSelectProject
 }: SidebarProps) {
   const [expandedProvidersByProject, setExpandedProvidersByProject] = useState<Record<string, ProviderId | null>>({});
+  const lastMobileOpenAtRef = useRef(0);
+
+  useEffect(() => {
+    if (mobileOpen) {
+      lastMobileOpenAtRef.current = window.performance?.now?.() ?? Date.now();
+    }
+  }, [mobileOpen]);
 
   function selectProvider(projectId: string, providerId: ProviderId): void {
     setExpandedProvidersByProject((current) => ({
@@ -283,23 +293,30 @@ export function Sidebar({
       <div
         className={[
           'fixed inset-0 z-40 transition-opacity duration-300 lg:hidden',
-          collapsed ? 'pointer-events-none opacity-0' : 'opacity-100'
+          mobileOpen ? 'opacity-100' : 'pointer-events-none opacity-0'
         ].join(' ')}
       >
         <button
           type="button"
           aria-label="关闭边栏蒙版"
-          onClick={() => onCollapsedChange(true)}
+          onClick={() => {
+            const now = window.performance?.now?.() ?? Date.now();
+            const elapsedSinceOpen = now - lastMobileOpenAtRef.current;
+            if (elapsedSinceOpen < MOBILE_OVERLAY_CLOSE_GUARD_MS) {
+              return;
+            }
+            onMobileOpenChange(false);
+          }}
           className={[
             'absolute inset-0 bg-black/18 backdrop-blur-[1px] transition-opacity duration-300',
-            collapsed ? 'opacity-0' : 'opacity-100'
+            mobileOpen ? 'opacity-100' : 'opacity-0'
           ].join(' ')}
         />
 
         <aside
           className={[
             'absolute top-0 left-0 flex h-full w-[20rem] max-w-[82vw] flex-col border-r border-zinc-200 bg-white shadow-[0_18px_60px_rgba(0,0,0,0.18)] transition-transform duration-300 ease-out',
-            collapsed ? '-translate-x-full' : 'translate-x-0'
+            mobileOpen ? 'translate-x-0' : '-translate-x-full'
           ].join(' ')}
         >
           {sidebarContent}

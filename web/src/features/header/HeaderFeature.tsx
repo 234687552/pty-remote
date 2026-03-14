@@ -8,8 +8,9 @@ import type { WorkspacePane } from '@/features/workspace/types.ts';
 interface HeaderFeatureProps {
   clis: CliDescriptor[];
   mobilePane: WorkspacePane;
-  mobileTitleVisible: boolean;
+  mobileSidebarOpen: boolean;
   onMobilePaneChange: (pane: WorkspacePane) => void;
+  onSidebarOpen: () => void;
   onSidebarToggle: () => void;
   sidebarCollapsed: boolean;
   store: WorkspaceStore;
@@ -18,8 +19,9 @@ interface HeaderFeatureProps {
 export function HeaderFeature({
   clis,
   mobilePane,
-  mobileTitleVisible,
+  mobileSidebarOpen,
   onMobilePaneChange,
+  onSidebarOpen,
   onSidebarToggle,
   sidebarCollapsed,
   store
@@ -29,8 +31,9 @@ export function HeaderFeature({
       mobileAgentLabel="Claude"
       mobilePane={mobilePane}
       mobileProjectTitle={selectMobileProjectTitle(store, clis)}
-      mobileTitleVisible={mobileTitleVisible}
+      mobileSidebarOpen={mobileSidebarOpen}
       onMobilePaneChange={onMobilePaneChange}
+      onSidebarOpen={onSidebarOpen}
       onSidebarToggle={onSidebarToggle}
       onSidebarToggleTopChange={store.setSidebarToggleTop}
       onSidebarToggleTopCommit={store.commitSidebarToggleTop}

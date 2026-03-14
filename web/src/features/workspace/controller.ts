@@ -84,6 +84,9 @@ export function useWorkspaceController({
       store.workspaceState
     ]
   );
+  const activeCliConnected = Boolean(activeCli?.connected);
+  const connectedCliIds = useMemo(() => clis.filter((cli) => cli.connected).map((cli) => cli.cliId).sort(), [clis]);
+  const connectedCliIdsKey = connectedCliIds.join('|');
 
   sidebarToggleTopRef.current = store.sidebarToggleTop;
 
@@ -211,7 +214,7 @@ export function useWorkspaceController({
   }, [activeCli, activeProject, activeThread, store.snapshot.sessionId, store.snapshot.threadKey, visibleMessages]);
 
   useEffect(() => {
-    if (!socketConnected || !activeCliId) {
+    if (!socketConnected || !activeCliId || !activeCliConnected) {
       store.resetRuntimeForCliChange();
       terminal.clearTerminal();
       return;
@@ -230,7 +233,7 @@ export function useWorkspaceController({
         terminal.clearTerminal();
         store.setError(runtimeError instanceof Error ? runtimeError.message : '加载 CLI 运行态失败');
       });
-  }, [activeCliId, socketConnected]);
+  }, [activeCliConnected, activeCliId, socketConnected]);
 
   useEffect(() => {
     if (!socketConnected || store.workspaceState.sidebarCollapsed || store.projectsRefreshing) {
@@ -238,14 +241,17 @@ export function useWorkspaceController({
     }
 
     const nextProjectToLoad = store.workspaceState.projects.find(
-      (project) => project.cliId && !store.projectThreadsById[project.id] && store.projectLoadingId !== project.id
+      (project) => project.cliId && connectedCliIds.includes(project.cliId) && !store.projectThreadsById[project.id] && store.projectLoadingId !== project.id
     );
     if (!nextProjectToLoad) {
       return;
     }
 
-    void refreshProjectThreads(nextProjectToLoad);
+    void refreshProjectThreads(nextProjectToLoad).catch((refreshError) => {
+      store.setError(refreshError instanceof Error ? refreshError.message : `刷新项目 ${nextProjectToLoad.label} 失败`);
+    });
   }, [
+    connectedCliIdsKey,
     socketConnected,
     store.projectLoadingId,
     store.projectThreadsById,
@@ -346,7 +352,7 @@ export function useWorkspaceController({
       let refreshErrorMessage = '';
 
       for (const project of store.workspaceState.projects) {
-        if (!project.cliId) {
+        if (!project.cliId || !connectedCliIds.includes(project.cliId)) {
           continue;
         }
 
