@@ -21,7 +21,6 @@ export function SidebarFeature({ clis, controller, store }: SidebarFeatureProps)
       projectThreadsById={store.projectThreadsById}
       projects={store.workspaceState.projects}
       projectsRefreshing={store.projectsRefreshing}
-      toggleTop={store.sidebarToggleTop}
       onActivateThread={(project, thread) => {
         void controller.activateThread(project, thread);
       }}
@@ -35,8 +34,6 @@ export function SidebarFeature({ clis, controller, store }: SidebarFeatureProps)
       }}
       onSelectCli={controller.selectCli}
       onSelectProject={controller.selectProject}
-      onToggleTopChange={store.setSidebarToggleTop}
-      onToggleTopCommit={store.commitSidebarToggleTop}
     />
   );
 }

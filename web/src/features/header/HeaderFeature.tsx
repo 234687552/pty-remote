@@ -1,7 +1,7 @@
 import type { CliDescriptor } from '@shared/runtime-types.ts';
 
 import { AppHeader } from '@/components/AppHeader.tsx';
-import { selectHeaderSummary, selectMobileHeaderTitle } from '@/features/workspace/selectors.ts';
+import { selectHeaderSummary } from '@/features/workspace/selectors.ts';
 import type { WorkspaceStore } from '@/features/workspace/store.ts';
 import type { WorkspacePane } from '@/features/workspace/types.ts';
 
@@ -10,16 +10,27 @@ interface HeaderFeatureProps {
   mobilePane: WorkspacePane;
   mobileTitleVisible: boolean;
   onMobilePaneChange: (pane: WorkspacePane) => void;
+  onSidebarToggle: () => void;
+  sidebarCollapsed: boolean;
   store: WorkspaceStore;
 }
 
-export function HeaderFeature({ clis, mobilePane, mobileTitleVisible, onMobilePaneChange, store }: HeaderFeatureProps) {
+export function HeaderFeature({
+  clis,
+  mobilePane,
+  mobileTitleVisible,
+  onMobilePaneChange,
+  onSidebarToggle,
+  sidebarCollapsed,
+  store
+}: HeaderFeatureProps) {
   return (
     <AppHeader
       mobilePane={mobilePane}
-      mobileTitle={selectMobileHeaderTitle(store, clis)}
       mobileTitleVisible={mobileTitleVisible}
       onMobilePaneChange={onMobilePaneChange}
+      onSidebarToggle={onSidebarToggle}
+      sidebarCollapsed={sidebarCollapsed}
       summary={selectHeaderSummary(store, clis)}
     />
   );

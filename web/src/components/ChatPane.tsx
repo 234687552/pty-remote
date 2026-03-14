@@ -1,4 +1,4 @@
-import { Children, memo, useEffect, useMemo, useRef, useState } from 'react';
+import { Children, memo, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 
 import ReactMarkdown from 'react-markdown';
@@ -13,6 +13,8 @@ import type {
   ToolResultChatMessageBlock,
   ToolUseChatMessageBlock
 } from '@shared/runtime-types.ts';
+
+import { MobileHeaderVisibilityContext } from '@/app-shell/AppShell.tsx';
 
 interface MarkdownNode {
   children?: MarkdownNode[];
@@ -958,11 +960,14 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
 }
 
 export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesLoading, visible, onLoadOlderMessages }: ChatPaneProps) {
+  const setMobileHeaderVisible = useContext(MobileHeaderVisibilityContext);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const questionJumpPressTimeoutRef = useRef<number | null>(null);
   const questionJumpLongPressTriggeredRef = useRef(false);
   const questionMessageRefs = useRef(new Map<string, HTMLDivElement>());
+  const previousMessagesScrollTopRef = useRef(0);
+  const touchStartYRef = useRef<number | null>(null);
 
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
   const toolCallIndex = useMemo(() => createToolCallIndex(renderableMessages), [renderableMessages]);
@@ -970,6 +975,10 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
     () => renderableMessages.filter((message) => message.role === 'user').map((message) => message.id),
     [renderableMessages]
   );
+
+  useEffect(() => {
+    previousMessagesScrollTopRef.current = messagesRef.current?.scrollTop ?? 0;
+  }, [visible]);
 
   useEffect(() => {
     return () => {
@@ -1044,6 +1053,46 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
       behavior: 'smooth',
       block: 'start'
     });
+  }
+
+  function handleMessagesScroll(event: React.UIEvent<HTMLDivElement>): void {
+    const nextTop = event.currentTarget.scrollTop;
+    const previousTop = previousMessagesScrollTopRef.current;
+    const delta = nextTop - previousTop;
+    previousMessagesScrollTopRef.current = nextTop;
+
+    if (Math.abs(delta) < 6) {
+      return;
+    }
+
+    setMobileHeaderVisible(delta < 0);
+  }
+
+  function handleMessagesTouchStart(event: React.TouchEvent<HTMLDivElement>): void {
+    touchStartYRef.current = event.touches[0]?.clientY ?? null;
+  }
+
+  function handleMessagesTouchMove(event: React.TouchEvent<HTMLDivElement>): void {
+    const touchStartY = touchStartYRef.current;
+    const currentY = event.touches[0]?.clientY;
+    if (touchStartY == null || currentY == null) {
+      return;
+    }
+
+    if (event.currentTarget.scrollTop > 4) {
+      return;
+    }
+
+    const deltaY = currentY - touchStartY;
+    if (deltaY > 14) {
+      setMobileHeaderVisible(true);
+    } else if (deltaY < -8) {
+      setMobileHeaderVisible(false);
+    }
+  }
+
+  function handleMessagesTouchEnd(): void {
+    touchStartYRef.current = null;
   }
 
   function handleJumpToMessagesEdge(direction: 'up' | 'down'): void {
@@ -1172,7 +1221,15 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
             </button>
           </div>
         ) : null}
-        <div ref={messagesRef} className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-1 py-4 sm:px-3 lg:px-4">
+        <div
+          ref={messagesRef}
+          onScroll={handleMessagesScroll}
+          onTouchStart={handleMessagesTouchStart}
+          onTouchMove={handleMessagesTouchMove}
+          onTouchEnd={handleMessagesTouchEnd}
+          onTouchCancel={handleMessagesTouchEnd}
+          className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-1 py-4 sm:px-3 lg:px-4"
+        >
           {renderableMessages.length === 0
             ? null
             : renderableMessages.map((message) => (

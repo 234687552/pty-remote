@@ -77,6 +77,10 @@ export function App() {
           mobilePane={store.mobilePane}
           mobileTitleVisible={mobileTitleVisible}
           onMobilePaneChange={store.setMobilePane}
+          onSidebarToggle={() => {
+            controller.setSidebarCollapsed(!store.workspaceState.sidebarCollapsed);
+          }}
+          sidebarCollapsed={store.workspaceState.sidebarCollapsed}
           store={store}
         />
       )}

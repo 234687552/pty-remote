@@ -28,8 +28,7 @@ const CLI_ID_FILE = path.join(CONFIG_DIR, 'cli-id');
 const SOCKET_URL = process.env.SOCKET_URL ?? `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? '3001'}`;
 const execFileAsync = promisify(execFile);
 const CLI_ID = resolveCliId();
-const DEFAULT_CLI_LABEL = resolveDefaultCliLabel();
-const CLI_LABEL = process.env.PTY_REMOTE_CLI_LABEL?.trim() || DEFAULT_CLI_LABEL;
+const CLI_LABEL = resolveCliLabel();
 const PTY_BACKEND_NAME = 'node-pty';
 const TERMINAL_REPLAY_MAX_BYTES = 1024 * 1024;
 const RECENT_OUTPUT_MAX_CHARS = 12_000;
@@ -131,7 +130,12 @@ function resolveCliId(): string {
   return generated;
 }
 
-function resolveDefaultCliLabel(): string {
+function resolveCliLabel(): string {
+  const envMachineName = process.env.COMPUTERNAME?.trim() || process.env.HOSTNAME?.trim();
+  if (envMachineName) {
+    return envMachineName;
+  }
+
   if (process.platform === 'darwin') {
     try {
       const computerName = execFileSyncSafe('scutil', ['--get', 'ComputerName']);

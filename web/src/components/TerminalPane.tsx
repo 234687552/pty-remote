@@ -1,3 +1,7 @@
+import { useContext, useEffect, useRef } from 'react';
+
+import { MobileHeaderVisibilityContext } from '@/app-shell/AppShell.tsx';
+
 interface TerminalPaneProps {
   hostRef: React.RefObject<HTMLDivElement | null>;
   viewportRef: React.RefObject<HTMLDivElement | null>;
@@ -6,8 +10,110 @@ interface TerminalPaneProps {
 }
 
 export function TerminalPane({ hostRef, viewportRef, visible, onJumpToEdge }: TerminalPaneProps) {
+  const setMobileHeaderVisible = useContext(MobileHeaderVisibilityContext);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const touchStartYRef = useRef<number | null>(null);
+  const pointerStartYRef = useRef<number | null>(null);
+
+  function handleVerticalGesture(deltaY: number): void {
+    if (deltaY > 14) {
+      setMobileHeaderVisible(true);
+    } else if (deltaY < -8) {
+      setMobileHeaderVisible(false);
+    }
+  }
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root || !visible) {
+      return;
+    }
+
+    const isEventInsideRoot = (target: EventTarget | null): target is Node => target instanceof Node && root.contains(target);
+
+    const handleTouchStart = (event: TouchEvent) => {
+      if (!isEventInsideRoot(event.target)) {
+        return;
+      }
+
+      touchStartYRef.current = event.touches[0]?.clientY ?? null;
+    };
+
+    const handleTouchMove = (event: TouchEvent) => {
+      if (!isEventInsideRoot(event.target)) {
+        return;
+      }
+
+      const touchStartY = touchStartYRef.current;
+      const currentY = event.touches[0]?.clientY;
+      if (touchStartY == null || currentY == null) {
+        return;
+      }
+
+      handleVerticalGesture(currentY - touchStartY);
+    };
+
+    const handleTouchEnd = (event: TouchEvent) => {
+      if (!isEventInsideRoot(event.target)) {
+        return;
+      }
+
+      touchStartYRef.current = null;
+    };
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || !isEventInsideRoot(event.target)) {
+        return;
+      }
+
+      pointerStartYRef.current = event.clientY;
+    };
+
+    const handlePointerMove = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || !isEventInsideRoot(event.target)) {
+        return;
+      }
+
+      const pointerStartY = pointerStartYRef.current;
+      if (pointerStartY == null) {
+        return;
+      }
+
+      handleVerticalGesture(event.clientY - pointerStartY);
+    };
+
+    const handlePointerEnd = (event: PointerEvent) => {
+      if (event.pointerType !== 'touch' || !isEventInsideRoot(event.target)) {
+        return;
+      }
+
+      pointerStartYRef.current = null;
+    };
+
+    document.addEventListener('touchstart', handleTouchStart, { capture: true, passive: true });
+    document.addEventListener('touchmove', handleTouchMove, { capture: true, passive: true });
+    document.addEventListener('touchend', handleTouchEnd, { capture: true, passive: true });
+    document.addEventListener('touchcancel', handleTouchEnd, { capture: true, passive: true });
+    document.addEventListener('pointerdown', handlePointerDown, { capture: true, passive: true });
+    document.addEventListener('pointermove', handlePointerMove, { capture: true, passive: true });
+    document.addEventListener('pointerup', handlePointerEnd, { capture: true, passive: true });
+    document.addEventListener('pointercancel', handlePointerEnd, { capture: true, passive: true });
+
+    return () => {
+      document.removeEventListener('touchstart', handleTouchStart, true);
+      document.removeEventListener('touchmove', handleTouchMove, true);
+      document.removeEventListener('touchend', handleTouchEnd, true);
+      document.removeEventListener('touchcancel', handleTouchEnd, true);
+      document.removeEventListener('pointerdown', handlePointerDown, true);
+      document.removeEventListener('pointermove', handlePointerMove, true);
+      document.removeEventListener('pointerup', handlePointerEnd, true);
+      document.removeEventListener('pointercancel', handlePointerEnd, true);
+    };
+  }, [setMobileHeaderVisible, visible]);
+
   return (
     <div
+      ref={rootRef}
       className={[
         'relative flex min-h-[22rem] min-w-0 flex-1 flex-col overflow-hidden bg-transparent sm:min-h-[24rem] lg:min-h-[28rem] lg:rounded-3xl lg:border lg:border-zinc-200 lg:bg-white lg:shadow-sm',
         visible ? 'flex' : 'hidden lg:flex'

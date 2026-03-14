@@ -1,9 +1,6 @@
-import { useRef } from 'react';
-import type React from 'react';
-
 import type { CliDescriptor } from '@shared/runtime-types.ts';
 
-import { clampSidebarToggleTop, type ProjectEntry, type ProjectThreadEntry } from '@/lib/workspace.ts';
+import type { ProjectEntry, ProjectThreadEntry } from '@/lib/workspace.ts';
 
 interface SidebarProps {
   activeCliId: string | null;
@@ -14,7 +11,6 @@ interface SidebarProps {
   projectThreadsById: Record<string, ProjectThreadEntry[]>;
   projects: ProjectEntry[];
   projectsRefreshing: boolean;
-  toggleTop: number;
   onActivateThread: (project: ProjectEntry, thread: ProjectThreadEntry) => void;
   onAddProject: () => void;
   onCollapsedChange: (collapsed: boolean) => void;
@@ -22,8 +18,6 @@ interface SidebarProps {
   onRefreshAllProjects: () => void;
   onSelectCli: (cliId: string | null) => void;
   onSelectProject: (project: ProjectEntry, firstThreadId: string | null) => void;
-  onToggleTopChange: (value: number) => void;
-  onToggleTopCommit: (value: number) => void;
 }
 
 function formatRelativeTime(value: string): string {
@@ -74,75 +68,14 @@ export function Sidebar({
   projectThreadsById,
   projects,
   projectsRefreshing,
-  toggleTop,
   onActivateThread,
   onAddProject,
   onCollapsedChange,
   onCreateThread,
   onRefreshAllProjects,
   onSelectCli,
-  onSelectProject,
-  onToggleTopChange,
-  onToggleTopCommit
+  onSelectProject
 }: SidebarProps) {
-  const dragStateRef = useRef<{ moved: boolean; pointerId: number; startTop: number; startY: number } | null>(null);
-  const suppressClickRef = useRef(false);
-  const resolvedToggleTop = typeof window !== 'undefined' && window.innerWidth < 1024 ? Math.max(toggleTop, 72) : toggleTop;
-
-  function handleOpenSidebarButtonClick(event: React.MouseEvent<HTMLButtonElement>): void {
-    if (suppressClickRef.current) {
-      suppressClickRef.current = false;
-      event.preventDefault();
-      return;
-    }
-    onCollapsedChange(!collapsed);
-  }
-
-  function handleSidebarTogglePointerDown(event: React.PointerEvent<HTMLButtonElement>): void {
-    if (event.button !== 0) {
-      return;
-    }
-    dragStateRef.current = {
-      pointerId: event.pointerId,
-      startY: event.clientY,
-      startTop: toggleTop,
-      moved: false
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }
-
-  function handleSidebarTogglePointerMove(event: React.PointerEvent<HTMLButtonElement>): void {
-    const dragState = dragStateRef.current;
-    if (!dragState || dragState.pointerId !== event.pointerId) {
-      return;
-    }
-
-    const nextTop = clampSidebarToggleTop(dragState.startTop + (event.clientY - dragState.startY), window.innerHeight);
-    if (Math.abs(nextTop - dragState.startTop) > 3) {
-      dragState.moved = true;
-    }
-    onToggleTopChange(nextTop);
-  }
-
-  function handleSidebarTogglePointerRelease(event: React.PointerEvent<HTMLButtonElement>): void {
-    const dragState = dragStateRef.current;
-    if (!dragState || dragState.pointerId !== event.pointerId) {
-      return;
-    }
-
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-
-    const nextTop = clampSidebarToggleTop(dragState.startTop + (event.clientY - dragState.startY), window.innerHeight);
-    onToggleTopChange(nextTop);
-    if (dragState.moved) {
-      suppressClickRef.current = true;
-    }
-    onToggleTopCommit(nextTop);
-    dragStateRef.current = null;
-  }
-
   const sidebarContent = (
     <>
       <div className="flex-1 space-y-2.5 overflow-auto p-2.5 pt-2.5">
@@ -301,18 +234,6 @@ export function Sidebar({
             </svg>
           </button>
 
-          <button
-            type="button"
-            onClick={() => onCollapsedChange(!collapsed)}
-            className="hidden h-10 w-10 items-center justify-center rounded-xl border border-zinc-300 text-zinc-700 transition hover:bg-zinc-50 lg:flex"
-            aria-label="收起边栏"
-            title="收起边栏"
-          >
-            <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
-              <rect x="3" y="4" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" />
-              <path d="M8 4v12M12.5 7.5l-2 2.5 2 2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
         </div>
       </div>
     </>
@@ -320,27 +241,6 @@ export function Sidebar({
 
   return (
     <>
-      <button
-        type="button"
-        onClick={handleOpenSidebarButtonClick}
-        onPointerDown={handleSidebarTogglePointerDown}
-        onPointerMove={handleSidebarTogglePointerMove}
-        onPointerUp={handleSidebarTogglePointerRelease}
-        onPointerCancel={handleSidebarTogglePointerRelease}
-        className={[
-          'fixed left-4 z-50 flex h-9 w-9 cursor-grab touch-none items-center justify-center rounded-xl border border-zinc-200/90 bg-white/80 text-zinc-500 shadow-[0_10px_24px_rgba(0,0,0,0.08)] backdrop-blur-sm transition duration-200 hover:bg-white/95 hover:text-zinc-700 hover:shadow-[0_14px_28px_rgba(0,0,0,0.1)] active:cursor-grabbing md:h-10 md:w-10 lg:left-6',
-          collapsed ? 'opacity-85' : 'pointer-events-none opacity-0'
-        ].join(' ')}
-        aria-label="打开边栏"
-        title="打开边栏，支持上下拖动"
-        style={{ top: resolvedToggleTop }}
-      >
-        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
-          <rect x="3" y="4" width="14" height="12" rx="2" stroke="currentColor" strokeWidth="1.4" />
-          <path d="M8 4v12M10.5 7.5l2 2.5-2 2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-
       <div
         className={[
           'fixed inset-0 z-40 transition-opacity duration-300 lg:hidden',
