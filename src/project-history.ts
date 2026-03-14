@@ -8,6 +8,12 @@ import { parseClaudeJsonlMessages, resolveClaudeProjectFilesPath } from './cli/j
 
 const DEFAULT_MAX_SESSIONS = 12;
 
+interface SessionFileEntry {
+  filePath: string;
+  sessionId: string;
+  updatedAtMs: number;
+}
+
 function normalizePreview(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
@@ -72,6 +78,7 @@ async function summarizeSessionFile(filePath: string): Promise<ProjectSessionSum
   }
 
   return {
+    providerId: 'claude',
     sessionId: path.basename(filePath, '.jsonl'),
     title: compactTitle(preview),
     preview,
@@ -80,10 +87,7 @@ async function summarizeSessionFile(filePath: string): Promise<ProjectSessionSum
   };
 }
 
-export async function listProjectSessions(projectRoot: string, maxSessions = DEFAULT_MAX_SESSIONS): Promise<ProjectSessionSummary[]> {
-  const projectFilesPath = resolveClaudeProjectFilesPath(projectRoot, os.homedir());
-  const normalizedMax = Number.isFinite(maxSessions) ? Math.max(1, Math.min(Math.floor(maxSessions), 50)) : DEFAULT_MAX_SESSIONS;
-
+async function listSessionFiles(projectFilesPath: string): Promise<SessionFileEntry[]> {
   let entries: Dirent[];
   try {
     entries = await fs.readdir(projectFilesPath, { withFileTypes: true });
@@ -95,18 +99,68 @@ export async function listProjectSessions(projectRoot: string, maxSessions = DEF
     throw error;
   }
 
-  const sessions = (
-    await Promise.all(
-      entries
-        .filter((entry) => entry.isFile() && entry.name.endsWith('.jsonl'))
-        .map((entry) => summarizeSessionFile(path.join(projectFilesPath, entry.name)))
-    )
-  )
-    .filter((summary): summary is ProjectSessionSummary => Boolean(summary))
-    .sort((left, right) => {
-      const timestampDiff = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
-      return timestampDiff || right.sessionId.localeCompare(left.sessionId);
-    });
+  const sessionFiles: SessionFileEntry[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.jsonl')) {
+      continue;
+    }
 
-  return sessions.slice(0, normalizedMax);
+    const filePath = path.join(projectFilesPath, entry.name);
+    let stat;
+    try {
+      stat = await fs.stat(filePath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        continue;
+      }
+      throw error;
+    }
+    if (!stat.isFile()) {
+      continue;
+    }
+
+    sessionFiles.push({
+      filePath,
+      sessionId: path.basename(entry.name, '.jsonl'),
+      updatedAtMs: stat.mtimeMs
+    } satisfies SessionFileEntry);
+  }
+
+  return sessionFiles.sort(
+    (left, right) => right.updatedAtMs - left.updatedAtMs || right.sessionId.localeCompare(left.sessionId)
+  );
+}
+
+export async function listProjectSessions(projectRoot: string, maxSessions = DEFAULT_MAX_SESSIONS): Promise<ProjectSessionSummary[]> {
+  const projectFilesPath = resolveClaudeProjectFilesPath(projectRoot, os.homedir());
+  const normalizedMax = Number.isFinite(maxSessions) ? Math.max(1, Math.min(Math.floor(maxSessions), 50)) : DEFAULT_MAX_SESSIONS;
+  const sessionFiles = await listSessionFiles(projectFilesPath);
+  const sessions: ProjectSessionSummary[] = [];
+
+  for (const entry of sessionFiles) {
+    let summary: ProjectSessionSummary | null;
+    try {
+      summary = await summarizeSessionFile(entry.filePath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        continue;
+      }
+      throw error;
+    }
+    if (!summary) {
+      continue;
+    }
+
+    sessions.push(summary);
+    if (sessions.length >= normalizedMax) {
+      break;
+    }
+  }
+
+  return sessions.sort((left, right) => {
+    const timestampDiff = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    return timestampDiff || right.sessionId.localeCompare(left.sessionId);
+  });
 }

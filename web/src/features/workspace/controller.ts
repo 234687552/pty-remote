@@ -5,42 +5,35 @@ import type {
   GetOlderMessagesResultPayload,
   GetRuntimeSnapshotResultPayload,
   ListProjectSessionsResultPayload,
-  MessagesUpsertPayload,
-  PickProjectDirectoryResultPayload,
-  TerminalChunkPayload
+  PickProjectDirectoryResultPayload
 } from '@shared/protocol.ts';
-import type { CliDescriptor, ChatMessage, RuntimeSnapshot } from '@shared/runtime-types.ts';
+import { PROVIDER_LABELS, type CliDescriptor, type ProviderId } from '@shared/runtime-types.ts';
 
 import type { CliSocketController } from '@/hooks/useCliSocket.ts';
 import type { TerminalBridge } from '@/hooks/useTerminalBridge.ts';
-import {
-  createEmptySnapshot,
-  mergeChronologicalMessages
-} from '@/lib/runtime.ts';
+import { createEmptySnapshot } from '@/lib/runtime.ts';
 import {
   clampSidebarToggleTop,
-  createDraftThread,
-  hydrateThreadFromSnapshot,
-  mergeProjectThreads,
+  createDraftConversation,
+  getProjectProviderKey,
+  hydrateConversationFromSnapshot,
+  mergeProjectConversations,
   sortProjects,
-  sortThreads,
-  type ProjectEntry,
-  type ProjectThreadEntry
+  type ProjectConversationEntry,
+  type ProjectEntry
 } from '@/lib/workspace.ts';
 
-import {
-  selectWorkspaceDerivedState
-} from './selectors.ts';
+import { selectWorkspaceDerivedState } from './selectors.ts';
 import type { WorkspaceStore } from './store.ts';
 
 export interface WorkspaceController {
-  activateThread: (project: ProjectEntry, thread: ProjectThreadEntry) => Promise<void>;
+  activateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
   addProject: () => Promise<void>;
-  createThread: (projectId: string) => void;
   loadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
-  refreshAllProjectThreads: () => Promise<void>;
+  refreshAllProjectConversations: () => Promise<void>;
   selectCli: (cliId: string | null) => void;
-  selectProject: (project: ProjectEntry, firstThreadId: string | null) => void;
+  selectProject: (project: ProjectEntry) => void;
+  selectProvider: (project: ProjectEntry, providerId: ProviderId) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   stopMessage: () => Promise<void>;
   submitPrompt: (event: React.FormEvent) => Promise<void>;
@@ -54,6 +47,27 @@ interface UseWorkspaceControllerParams {
   terminal: TerminalBridge;
 }
 
+function getConnectedCliForProvider(
+  clis: CliDescriptor[],
+  providerId: ProviderId | null,
+  preferredCliId: string | null
+): CliDescriptor | null {
+  if (!providerId) {
+    return null;
+  }
+
+  const candidates = clis.filter((cli) => cli.connected && cli.providerId === providerId);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return candidates.find((cli) => cli.cliId === preferredCliId) ?? candidates[0] ?? null;
+}
+
+function getProviderIds(clis: CliDescriptor[]): ProviderId[] {
+  return [...new Set(clis.filter((cli) => cli.connected).map((cli) => cli.providerId))];
+}
+
 export function useWorkspaceController({
   clis,
   sendCommand,
@@ -61,8 +75,11 @@ export function useWorkspaceController({
   store,
   terminal
 }: UseWorkspaceControllerParams): WorkspaceController {
-  const requestedThreadKeyRef = useRef<string | null>(null);
+  const projectRefreshInFlightRef = useRef(new Map<string, Promise<ListProjectSessionsResultPayload>>());
+  const requestedConversationKeyRef = useRef<string | null>(null);
+  const sendCommandRef = useRef(sendCommand);
   const sidebarRefreshTriggeredRef = useRef(false);
+  const terminalRef = useRef(terminal);
   const previousSidebarCollapsedRef = useRef(store.workspaceState.sidebarCollapsed);
   const sidebarToggleTopRef = useRef(store.sidebarToggleTop);
 
@@ -70,8 +87,9 @@ export function useWorkspaceController({
     activeCli,
     activeCliId,
     activeProject,
-    activeProjectThreads,
-    activeThread,
+    activeProjectConversations,
+    activeProviderId,
+    activeConversation,
     visibleMessages
   } = useMemo(
     () => selectWorkspaceDerivedState(store, clis, socketConnected),
@@ -79,16 +97,24 @@ export function useWorkspaceController({
       clis,
       socketConnected,
       store.olderMessages,
-      store.projectThreadsById,
+      store.projectConversationsByKey,
       store.snapshot,
       store.workspaceState
     ]
   );
   const activeCliConnected = Boolean(activeCli?.connected);
-  const connectedCliIds = useMemo(() => clis.filter((cli) => cli.connected).map((cli) => cli.cliId).sort(), [clis]);
-  const connectedCliIdsKey = connectedCliIds.join('|');
+  const connectedProviderIds = useMemo(() => getProviderIds(clis), [clis]);
+  const connectedProviderIdsKey = connectedProviderIds.join('|');
 
   sidebarToggleTopRef.current = store.sidebarToggleTop;
+
+  useEffect(() => {
+    sendCommandRef.current = sendCommand;
+  }, [sendCommand]);
+
+  useEffect(() => {
+    terminalRef.current = terminal;
+  }, [terminal]);
 
   useEffect(() => {
     if (!socketConnected) {
@@ -102,11 +128,11 @@ export function useWorkspaceController({
     if (store.mobilePane === 'terminal') {
       terminal.scheduleResize();
     }
-  }, [store.mobilePane]);
+  }, [store.mobilePane, terminal]);
 
   useEffect(() => {
     terminal.scheduleResize();
-  }, [store.workspaceState.sidebarCollapsed]);
+  }, [store.workspaceState.sidebarCollapsed, terminal]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -125,112 +151,128 @@ export function useWorkspaceController({
   }, []);
 
   useEffect(() => {
-    if (clis.length !== 1 && store.workspaceState.activeCliId) {
+    if (clis.length === 0) {
       return;
     }
 
-    const soleCliId = clis[0]?.cliId ?? null;
-    const hasUnassignedProjects = store.workspaceState.projects.some((project) => !project.cliId);
-    if (!soleCliId && !hasUnassignedProjects) {
+    const selectedCli = clis.find((cli) => cli.cliId === store.workspaceState.activeCliId && cli.connected) ?? null;
+    const fallbackCli = selectedCli ?? clis.find((cli) => cli.connected) ?? null;
+    if (!fallbackCli) {
       return;
     }
 
     store.patchWorkspace((current) => {
-      const nextCliId = current.activeCliId ?? soleCliId;
-      const nextProjects = current.projects.map((project) => (project.cliId ? project : { ...project, cliId: soleCliId ?? project.cliId }));
-      const changed =
-        nextCliId !== current.activeCliId ||
-        nextProjects.some((project, index) => project.cliId !== current.projects[index]?.cliId);
-      return changed ? { ...current, activeCliId: nextCliId, projects: nextProjects } : current;
+      const nextCliId = fallbackCli.cliId;
+      const nextProviderId = current.activeProviderId ?? fallbackCli.providerId;
+      if (current.activeCliId === nextCliId && current.activeProviderId === nextProviderId) {
+        return current;
+      }
+
+      return {
+        ...current,
+        activeCliId: nextCliId,
+        activeProviderId: nextProviderId
+      };
     });
-  }, [clis, store.workspaceState.activeCliId, store.workspaceState.projects]);
+  }, [clis, store.workspaceState.activeCliId, store.workspaceState.activeProviderId]);
 
   useEffect(() => {
-    if (activeProject && store.workspaceState.activeCliId !== activeProject.cliId) {
-      store.patchWorkspace((current) =>
-        current.activeProjectId === activeProject.id && current.activeCliId !== activeProject.cliId
-          ? { ...current, activeCliId: activeProject.cliId }
-          : current
-      );
+    const nextCli = getConnectedCliForProvider(clis, store.workspaceState.activeProviderId, store.workspaceState.activeCliId);
+    if (!nextCli || nextCli.cliId === store.workspaceState.activeCliId) {
       return;
     }
 
-    if (store.workspaceState.activeCliId || clis.length === 0) {
-      return;
-    }
-
-    store.patchWorkspace((current) => (current.activeCliId ? current : { ...current, activeCliId: clis[0]?.cliId ?? null }));
-  }, [activeProject, clis, store.workspaceState.activeCliId]);
+    store.patchWorkspace((current) => ({
+      ...current,
+      activeCliId: nextCli.cliId
+    }));
+  }, [clis, store.workspaceState.activeCliId, store.workspaceState.activeProviderId]);
 
   useEffect(() => {
-    if (!activeProject || activeProjectThreads.length === 0 || activeThread) {
+    if (!activeProject || !activeProviderId || activeProjectConversations.length === 0 || activeConversation) {
       return;
     }
 
     store.patchWorkspace((current) =>
-      current.activeProjectId === activeProject.id && current.activeThreadId !== activeProjectThreads[0]?.id
-        ? { ...current, activeThreadId: activeProjectThreads[0]?.id ?? null }
+      current.activeProjectId === activeProject.id && current.activeProviderId === activeProviderId
+        ? {
+            ...current,
+            activeConversationId: activeProjectConversations[0]?.id ?? null
+          }
         : current
     );
-  }, [activeProject, activeProjectThreads, activeThread]);
+  }, [activeConversation, activeProject, activeProjectConversations, activeProviderId]);
 
   useEffect(() => {
-    if (!activeProject || !activeThread || !activeCli) {
+    if (!activeProject || !activeConversation || !activeCli || !activeProviderId) {
       return;
     }
 
     const backendMatchesProject = activeCli.cwd === activeProject.cwd;
-    const canHydrateFromSnapshot = backendMatchesProject && store.snapshot.threadKey === activeThread.threadKey;
+    const canHydrateFromSnapshot =
+      backendMatchesProject &&
+      store.snapshot.providerId === activeProviderId &&
+      store.snapshot.conversationKey === activeConversation.conversationKey;
     if (!canHydrateFromSnapshot) {
       return;
     }
 
-    store.setProjectThreads(activeProject.id, (threads) => {
+    store.setProjectConversations(activeProject.id, activeProviderId, (conversations) => {
       let changed = false;
-      const nextThreads = threads.map((thread) => {
-        if (thread.id !== activeThread.id) {
-          return thread;
+      const nextConversations = conversations.map((conversation) => {
+        if (conversation.id !== activeConversation.id) {
+          return conversation;
         }
 
-        const nextThread = hydrateThreadFromSnapshot(thread, store.snapshot, visibleMessages);
+        const nextConversation = hydrateConversationFromSnapshot(conversation, store.snapshot, visibleMessages);
         const shouldUpdate =
-          thread.sessionId !== nextThread.sessionId ||
-          thread.title !== nextThread.title ||
-          thread.preview !== nextThread.preview ||
-          thread.updatedAt !== nextThread.updatedAt ||
-          thread.messageCount !== nextThread.messageCount ||
-          thread.draft !== nextThread.draft;
+          conversation.sessionId !== nextConversation.sessionId ||
+          conversation.title !== nextConversation.title ||
+          conversation.preview !== nextConversation.preview ||
+          conversation.updatedAt !== nextConversation.updatedAt ||
+          conversation.messageCount !== nextConversation.messageCount ||
+          conversation.draft !== nextConversation.draft;
 
         if (!shouldUpdate) {
-          return thread;
+          return conversation;
         }
 
         changed = true;
-        return nextThread;
+        return nextConversation;
       });
 
-      return changed ? sortThreads(nextThreads) : threads;
+      return changed ? nextConversations : conversations;
     });
-  }, [activeCli, activeProject, activeThread, store.snapshot.sessionId, store.snapshot.threadKey, visibleMessages]);
+  }, [
+    activeCli,
+    activeConversation,
+    activeProject,
+    activeProviderId,
+    store,
+    store.snapshot.conversationKey,
+    store.snapshot.providerId,
+    store.snapshot.sessionId,
+    visibleMessages
+  ]);
 
   useEffect(() => {
     if (!socketConnected || !activeCliId || !activeCliConnected) {
       store.resetRuntimeForCliChange();
-      terminal.clearTerminal();
+      terminalRef.current.clearTerminal();
       return;
     }
 
-    terminal.prepareForResume();
+    terminalRef.current.prepareForResume();
     store.resetRuntimeForCliChange();
 
-    void sendCommand('get-runtime-snapshot', {}, activeCliId)
+    void sendCommandRef.current('get-runtime-snapshot', {}, activeCliId)
       .then(async (result) => {
         const nextSnapshot = (result.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
         store.setSnapshot(nextSnapshot);
-        await terminal.resumeSession(nextSnapshot.sessionId, { force: true });
+        await terminalRef.current.resumeSession(nextSnapshot.sessionId, { force: true });
       })
       .catch((runtimeError) => {
-        terminal.clearTerminal();
+        terminalRef.current.clearTerminal();
         store.setError(runtimeError instanceof Error ? runtimeError.message : '加载 CLI 运行态失败');
       });
   }, [activeCliConnected, activeCliId, socketConnected]);
@@ -240,21 +282,32 @@ export function useWorkspaceController({
       return;
     }
 
-    const nextProjectToLoad = store.workspaceState.projects.find(
-      (project) => project.cliId && connectedCliIds.includes(project.cliId) && !store.projectThreadsById[project.id] && store.projectLoadingId !== project.id
-    );
-    if (!nextProjectToLoad) {
+    const nextTarget = store.workspaceState.projects
+      .flatMap((project) =>
+        connectedProviderIds.map((providerId) => ({
+          project,
+          providerId,
+          storageKey: getProjectProviderKey(project.id, providerId)
+        }))
+      )
+      .find(
+        (target) =>
+          !store.projectConversationsByKey[target.storageKey] && store.projectLoadingId !== target.storageKey
+      );
+    if (!nextTarget) {
       return;
     }
 
-    void refreshProjectThreads(nextProjectToLoad).catch((refreshError) => {
-      store.setError(refreshError instanceof Error ? refreshError.message : `刷新项目 ${nextProjectToLoad.label} 失败`);
+    void refreshProjectConversations(nextTarget.project, nextTarget.providerId).catch((refreshError) => {
+      store.setError(
+        refreshError instanceof Error ? refreshError.message : `刷新项目 ${nextTarget.project.label} 失败`
+      );
     });
   }, [
-    connectedCliIdsKey,
+    connectedProviderIdsKey,
     socketConnected,
+    store.projectConversationsByKey,
     store.projectLoadingId,
-    store.projectThreadsById,
     store.projectsRefreshing,
     store.workspaceState.projects,
     store.workspaceState.sidebarCollapsed
@@ -273,7 +326,7 @@ export function useWorkspaceController({
     }
 
     sidebarRefreshTriggeredRef.current = true;
-    void refreshAllProjectThreads();
+    void refreshAllProjectConversations();
   }, [
     store.projectLoadingId,
     store.projectsRefreshing,
@@ -282,61 +335,85 @@ export function useWorkspaceController({
   ]);
 
   useEffect(() => {
-    if (!socketConnected || !activeCli?.connected || !activeProject || !activeThread) {
+    if (!socketConnected || !activeCli?.connected || !activeProject || !activeConversation || !activeProviderId) {
       return;
     }
 
-    const threadKey = activeThread.threadKey;
-    const requestKey = `${activeProject.cliId}:${threadKey}:${activeThread.sessionId ?? 'draft'}`;
+    const conversationKey = activeConversation.conversationKey;
+    const requestKey = `${activeCli.cliId}:${activeProviderId}:${conversationKey}:${activeConversation.sessionId ?? 'draft'}`;
     const backendMatchesProject = activeCli.cwd === activeProject.cwd;
-    const backendMatchesThread = (store.snapshot.threadKey ?? activeCli.threadKey ?? null) === threadKey;
+    const backendMatchesConversation =
+      (store.snapshot.conversationKey ?? activeCli.conversationKey ?? null) === conversationKey &&
+      (store.snapshot.providerId ?? activeCli.providerId) === activeProviderId;
 
-    if (backendMatchesProject && backendMatchesThread) {
-      requestedThreadKeyRef.current = requestKey;
+    if (backendMatchesProject && backendMatchesConversation) {
+      requestedConversationKeyRef.current = requestKey;
       return;
     }
 
-    if (requestedThreadKeyRef.current === requestKey) {
+    if (requestedConversationKeyRef.current === requestKey) {
       return;
     }
 
-    requestedThreadKeyRef.current = requestKey;
-    void activateThread(activeProject, activeThread);
-  }, [activeCli, activeProject, activeThread, socketConnected, store.snapshot.threadKey]);
+    requestedConversationKeyRef.current = requestKey;
+    void activateConversation(activeProject, activeProviderId, activeConversation);
+  }, [activeCli, activeConversation, activeProject, activeProviderId, socketConnected, store.snapshot.conversationKey, store.snapshot.providerId]);
 
-  async function refreshProjectThreads(project: ProjectEntry): Promise<ListProjectSessionsResultPayload> {
-    store.setProjectLoadingId(project.id);
-
-    try {
-      const result = await sendCommand('list-project-sessions', { cwd: project.cwd, maxSessions: 5 }, project.cliId);
-      const payload = result.payload as ListProjectSessionsResultPayload | undefined;
-      const normalizedPayload = payload ?? {
-        cwd: project.cwd,
-        label: project.label,
-        sessions: []
-      };
-
-      store.patchWorkspace((current) => ({
-        ...current,
-        projects: current.projects.map((entry) =>
-          entry.id !== project.id
-            ? entry
-            : {
-                ...entry,
-                cwd: normalizedPayload.cwd,
-                label: normalizedPayload.label
-              }
-        )
-      }));
-
-      store.setProjectThreads(project.id, (threads) => mergeProjectThreads(threads, normalizedPayload.sessions));
-      return normalizedPayload;
-    } finally {
-      store.setProjectLoadingId((current) => (current === project.id ? null : current));
+  async function refreshProjectConversations(
+    project: ProjectEntry,
+    providerId: ProviderId,
+    cliId = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId)?.cliId ?? null
+  ): Promise<ListProjectSessionsResultPayload> {
+    const storageKey = getProjectProviderKey(project.id, providerId);
+    const existingRequest = projectRefreshInFlightRef.current.get(storageKey);
+    if (existingRequest) {
+      return existingRequest;
     }
+    if (!cliId) {
+      throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
+    }
+
+    store.setProjectLoadingId(storageKey);
+
+    const request = (async () => {
+      try {
+        const result = await sendCommand('list-project-conversations', { cwd: project.cwd, maxSessions: 5 }, cliId);
+        const payload = result.payload as ListProjectSessionsResultPayload | undefined;
+        const normalizedPayload = payload ?? {
+          providerId,
+          cwd: project.cwd,
+          label: project.label,
+          sessions: []
+        };
+
+        store.patchWorkspace((current) => ({
+          ...current,
+          projects: current.projects.map((entry) =>
+            entry.id !== project.id
+              ? entry
+              : {
+                  ...entry,
+                  cwd: normalizedPayload.cwd,
+                  label: normalizedPayload.label
+                }
+          )
+        }));
+
+        store.setProjectConversations(project.id, normalizedPayload.providerId, (conversations) =>
+          mergeProjectConversations(conversations, normalizedPayload.sessions, normalizedPayload.providerId)
+        );
+        return normalizedPayload;
+      } finally {
+        projectRefreshInFlightRef.current.delete(storageKey);
+        store.setProjectLoadingId((current) => (current === storageKey ? null : current));
+      }
+    })();
+
+    projectRefreshInFlightRef.current.set(storageKey, request);
+    return request;
   }
 
-  async function refreshAllProjectThreads(): Promise<void> {
+  async function refreshAllProjectConversations(): Promise<void> {
     if (store.projectsRefreshing || store.workspaceState.projects.length === 0) {
       return;
     }
@@ -345,38 +422,43 @@ export function useWorkspaceController({
 
     try {
       store.setError('');
-      const latestThreadsByProject = new Map<string, ProjectThreadEntry[]>(
-        Object.entries(store.projectThreadsById).map(([projectId, threads]) => [projectId, threads])
+      const latestConversationsByKey = new Map<string, ProjectConversationEntry[]>(
+        Object.entries(store.projectConversationsByKey)
       );
-      let nextActiveThreadId: string | null | undefined;
+      let nextActiveConversationId: string | null | undefined;
       let refreshErrorMessage = '';
 
       for (const project of store.workspaceState.projects) {
-        if (!project.cliId || !connectedCliIds.includes(project.cliId)) {
-          continue;
-        }
+        for (const providerId of connectedProviderIds) {
+          try {
+            const history = await refreshProjectConversations(project, providerId);
+            const storageKey = getProjectProviderKey(project.id, providerId);
+            const mergedConversations = mergeProjectConversations(
+              latestConversationsByKey.get(storageKey) ?? [],
+              history.sessions,
+              providerId
+            );
+            latestConversationsByKey.set(storageKey, mergedConversations);
 
-        try {
-          const history = await refreshProjectThreads(project);
-          const mergedThreads = mergeProjectThreads(latestThreadsByProject.get(project.id) ?? [], history.sessions);
-          latestThreadsByProject.set(project.id, mergedThreads);
-
-          if (project.id === store.workspaceState.activeProjectId) {
-            const activeCandidate =
-              mergedThreads.find((thread) => thread.id === store.workspaceState.activeThreadId) ??
-              mergedThreads.find((thread) => thread.sessionId === history.sessions[0]?.sessionId) ??
-              mergedThreads[0] ??
-              null;
-            nextActiveThreadId = activeCandidate?.id ?? null;
+            if (project.id === store.workspaceState.activeProjectId && providerId === store.workspaceState.activeProviderId) {
+              const activeCandidate =
+                mergedConversations.find((conversation) => conversation.id === store.workspaceState.activeConversationId) ??
+                mergedConversations.find((conversation) => conversation.sessionId === history.sessions[0]?.sessionId) ??
+                mergedConversations[0] ??
+                null;
+              nextActiveConversationId = activeCandidate?.id ?? null;
+            }
+          } catch (refreshError) {
+            refreshErrorMessage ||= refreshError instanceof Error ? refreshError.message : `刷新项目 ${project.label} 失败`;
           }
-        } catch (refreshError) {
-          refreshErrorMessage ||= refreshError instanceof Error ? refreshError.message : `刷新项目 ${project.label} 失败`;
         }
       }
 
-      if (nextActiveThreadId !== undefined) {
+      if (nextActiveConversationId !== undefined) {
         store.patchWorkspace((current) =>
-          current.activeThreadId === nextActiveThreadId ? current : { ...current, activeThreadId: nextActiveThreadId }
+          current.activeConversationId === nextActiveConversationId
+            ? current
+            : { ...current, activeConversationId: nextActiveConversationId }
         );
       }
 
@@ -388,45 +470,56 @@ export function useWorkspaceController({
     }
   }
 
-  async function activateThread(project: ProjectEntry, thread: ProjectThreadEntry): Promise<void> {
+  async function activateConversation(
+    project: ProjectEntry,
+    providerId: ProviderId,
+    conversation: ProjectConversationEntry
+  ): Promise<void> {
     try {
       store.setError('');
-      requestedThreadKeyRef.current = `${project.cliId}:${thread.threadKey}:${thread.sessionId ?? 'draft'}`;
-      if (thread.sessionId === null) {
+      const targetCli = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId);
+      if (!targetCli) {
+        throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
+      }
+
+      requestedConversationKeyRef.current = `${targetCli.cliId}:${providerId}:${conversation.conversationKey}:${conversation.sessionId ?? 'draft'}`;
+      if (conversation.sessionId === null) {
         store.resetRuntimeForDraftThread();
       }
       store.patchWorkspace((current) => ({
         ...current,
-        activeCliId: project.cliId,
+        activeCliId: targetCli.cliId,
         activeProjectId: project.id,
-        activeThreadId: thread.id
+        activeProviderId: providerId,
+        activeConversationId: conversation.id
       }));
 
       await sendCommand(
-        'select-thread',
+        'select-conversation',
         {
           cwd: project.cwd,
-          threadKey: thread.threadKey,
-          sessionId: thread.sessionId
+          conversationKey: conversation.conversationKey,
+          sessionId: conversation.sessionId
         },
-        project.cliId
+        targetCli.cliId
       );
       store.setMobilePane('chat');
     } catch (activateError) {
-      requestedThreadKeyRef.current = null;
-      store.setError(activateError instanceof Error ? activateError.message : '切换 thread 失败');
+      requestedConversationKeyRef.current = null;
+      store.setError(activateError instanceof Error ? activateError.message : '切换 conversation 失败');
     }
   }
 
   async function addProject(): Promise<void> {
     try {
       store.setError('');
-      const targetCliId = activeCliId ?? clis[0]?.cliId ?? null;
-      if (!targetCliId) {
+      const targetCli =
+        getConnectedCliForProvider(clis, activeProviderId, activeCliId) ?? clis.find((cli) => cli.connected) ?? null;
+      if (!targetCli) {
         throw new Error('请先选择一个在线 CLI');
       }
 
-      const result = await sendCommand('pick-project-directory', {}, targetCliId);
+      const result = await sendCommand('pick-project-directory', {}, targetCli.cliId);
       const payload = result.payload as PickProjectDirectoryResultPayload | undefined;
       if (!payload?.cwd) {
         return;
@@ -434,82 +527,87 @@ export function useWorkspaceController({
 
       let selectedProject: ProjectEntry = {
         id: crypto.randomUUID(),
-        cliId: targetCliId,
         cwd: payload.cwd,
         label: payload.label
       };
 
       store.patchWorkspace((current) => {
-        const existingProject = current.projects.find((project) => project.cliId === targetCliId && project.cwd === payload.cwd);
+        const existingProject = current.projects.find((project) => project.cwd === payload.cwd);
         if (existingProject) {
           selectedProject = existingProject;
           return {
             ...current,
-            activeCliId: existingProject.cliId,
+            activeCliId: targetCli.cliId,
             activeProjectId: existingProject.id,
-            activeThreadId: current.activeThreadId
+            activeProviderId: targetCli.providerId
           };
         }
 
         return {
           ...current,
-          activeCliId: targetCliId,
+          activeCliId: targetCli.cliId,
           activeProjectId: selectedProject.id,
-          activeThreadId: null,
+          activeProviderId: targetCli.providerId,
+          activeConversationId: null,
           projects: sortProjects([...current.projects, selectedProject])
         };
       });
 
-      const history = await refreshProjectThreads(selectedProject);
-      const draftThread = createDraftThread();
-      const nextThreads = mergeProjectThreads(store.projectThreadsById[selectedProject.id] ?? [], history.sessions);
-      const resolvedThreads = nextThreads.length > 0 ? nextThreads : [draftThread];
-      const nextThread = resolvedThreads.find((thread) => thread.sessionId === history.sessions[0]?.sessionId) ?? resolvedThreads[0];
-      store.setProjectThreads(selectedProject.id, () => resolvedThreads);
+      const history = await refreshProjectConversations(selectedProject, targetCli.providerId, targetCli.cliId);
+      const storageKey = getProjectProviderKey(selectedProject.id, targetCli.providerId);
+      const existingConversations = store.projectConversationsByKey[storageKey] ?? [];
+      const mergedConversations = mergeProjectConversations(
+        existingConversations,
+        history.sessions,
+        targetCli.providerId
+      );
+      const resolvedConversations =
+        mergedConversations.length > 0 ? mergedConversations : [createDraftConversation(targetCli.providerId)];
+      const nextConversation =
+        resolvedConversations.find((conversation) => conversation.sessionId === history.sessions[0]?.sessionId) ??
+        resolvedConversations[0] ??
+        null;
 
-      if (nextThread) {
-        await activateThread(selectedProject, nextThread);
+      store.setProjectConversations(selectedProject.id, targetCli.providerId, () => resolvedConversations);
+
+      if (nextConversation) {
+        await activateConversation(selectedProject, targetCli.providerId, nextConversation);
       }
     } catch (addProjectError) {
       store.setError(addProjectError instanceof Error ? addProjectError.message : '添加项目失败');
     }
   }
 
-  function createThread(projectId: string): void {
-    const nextProject = store.workspaceState.projects.find((project) => project.id === projectId) ?? null;
-    const nextThread = createDraftThread();
-    store.setProjectThreads(projectId, (threads) => sortThreads([nextThread, ...threads]));
-    store.patchWorkspace((current) => ({
-      ...current,
-      activeCliId: nextProject?.cliId ?? current.activeCliId,
-      activeProjectId: projectId,
-      activeThreadId: nextThread.id
-    }));
-
-    if (nextProject) {
-      void activateThread(nextProject, nextThread);
-    }
-  }
-
   function selectCli(nextCliId: string | null): void {
+    const nextCli = clis.find((cli) => cli.cliId === nextCliId) ?? null;
     store.patchWorkspace((current) => ({
       ...current,
       activeCliId: nextCliId,
-      activeProjectId:
-        current.activeProjectId &&
-        current.projects.find((project) => project.id === current.activeProjectId)?.cliId === nextCliId
-          ? current.activeProjectId
-          : current.projects.find((project) => project.cliId === nextCliId)?.id ?? null,
-      activeThreadId: null
+      activeProviderId: nextCli?.providerId ?? current.activeProviderId,
+      activeConversationId: nextCli && nextCli.providerId !== current.activeProviderId ? null : current.activeConversationId
     }));
   }
 
-  function selectProject(project: ProjectEntry, firstThreadId: string | null): void {
+  function selectProject(project: ProjectEntry): void {
     store.patchWorkspace((current) => ({
       ...current,
-      activeCliId: project.cliId,
+      activeProjectId: project.id
+    }));
+  }
+
+  function selectProvider(project: ProjectEntry, providerId: ProviderId): void {
+    const targetCli = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId);
+    const conversations = store.projectConversationsByKey[getProjectProviderKey(project.id, providerId)] ?? [];
+
+    store.patchWorkspace((current) => ({
+      ...current,
+      activeCliId: targetCli?.cliId ?? current.activeCliId,
       activeProjectId: project.id,
-      activeThreadId: firstThreadId ?? current.activeThreadId
+      activeProviderId: providerId,
+      activeConversationId:
+        current.activeProjectId === project.id && current.activeProviderId === providerId
+          ? current.activeConversationId
+          : conversations[0]?.id ?? null
     }));
   }
 
@@ -524,8 +622,8 @@ export function useWorkspaceController({
       store.setError('请输入消息');
       return;
     }
-    if (!activeProject || !activeThread) {
-      store.setError('请先在侧边栏选择一个 project / thread');
+    if (!activeProject || !activeConversation || !activeProviderId) {
+      store.setError('请先在侧边栏选择一个 project / provider / conversation');
       return;
     }
 
@@ -559,7 +657,10 @@ export function useWorkspaceController({
       });
       const payload = result.payload as GetOlderMessagesResultPayload | undefined;
 
-      if ((payload?.threadKey ?? null) !== store.snapshot.threadKey) {
+      if (
+        (payload?.providerId ?? null) !== store.snapshot.providerId ||
+        (payload?.conversationKey ?? null) !== store.snapshot.conversationKey
+      ) {
         return false;
       }
 
@@ -574,13 +675,13 @@ export function useWorkspaceController({
   }
 
   return {
-    activateThread,
+    activateConversation,
     addProject,
-    createThread,
     loadOlderMessages,
-    refreshAllProjectThreads,
+    refreshAllProjectConversations,
     selectCli,
     selectProject,
+    selectProvider,
     setSidebarCollapsed,
     stopMessage,
     submitPrompt

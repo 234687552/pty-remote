@@ -6,11 +6,13 @@ import type { ChatMessage, RuntimeSnapshot } from '@shared/runtime-types.ts';
 
 import { createEmptySnapshot, mergeChronologicalMessages } from '@/lib/runtime.ts';
 import {
+  getProjectProviderKey,
   loadWorkspaceState,
   saveWorkspaceState,
   type PersistedWorkspaceState,
-  type ProjectThreadEntry
+  type ProjectConversationEntry
 } from '@/lib/workspace.ts';
+import type { ProviderId } from '@shared/runtime-types.ts';
 
 import type { WorkspacePane } from './types.ts';
 
@@ -21,7 +23,7 @@ interface WorkspaceState {
   olderMessages: ChatMessage[];
   olderMessagesLoading: boolean;
   projectLoadingId: string | null;
-  projectThreadsById: Record<string, ProjectThreadEntry[]>;
+  projectConversationsByKey: Record<string, ProjectConversationEntry[]>;
   projectsRefreshing: boolean;
   prompt: string;
   sidebarToggleTop: number;
@@ -35,9 +37,10 @@ type WorkspaceAction =
       updater: (current: PersistedWorkspaceState) => PersistedWorkspaceState;
     }
   | {
-      type: 'threads/patched';
+      type: 'conversations/patched';
       projectId: string;
-      updater: (threads: ProjectThreadEntry[]) => ProjectThreadEntry[];
+      providerId: ProviderId;
+      updater: (conversations: ProjectConversationEntry[]) => ProjectConversationEntry[];
     }
   | {
       type: 'sidebar-toggle/previewed';
@@ -106,7 +109,7 @@ export interface WorkspaceStore {
   olderMessages: ChatMessage[];
   olderMessagesLoading: boolean;
   projectLoadingId: string | null;
-  projectThreadsById: Record<string, ProjectThreadEntry[]>;
+  projectConversationsByKey: Record<string, ProjectConversationEntry[]>;
   projectsRefreshing: boolean;
   prompt: string;
   sidebarToggleTop: number;
@@ -125,7 +128,11 @@ export interface WorkspaceStore {
   setOlderMessages: Dispatch<SetStateAction<ChatMessage[]>>;
   setOlderMessagesLoading: Dispatch<SetStateAction<boolean>>;
   setProjectLoadingId: Dispatch<SetStateAction<string | null>>;
-  setProjectThreads: (projectId: string, updater: (threads: ProjectThreadEntry[]) => ProjectThreadEntry[]) => void;
+  setProjectConversations: (
+    projectId: string,
+    providerId: ProviderId,
+    updater: (conversations: ProjectConversationEntry[]) => ProjectConversationEntry[]
+  ) => void;
   setProjectsRefreshing: Dispatch<SetStateAction<boolean>>;
   setPrompt: Dispatch<SetStateAction<string>>;
   setSidebarToggleTop: Dispatch<SetStateAction<number>>;
@@ -137,12 +144,14 @@ function resolveStateUpdate<T>(current: T, value: SetStateAction<T>): T {
 }
 
 function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPayload): RuntimeSnapshot {
-  const isSameThread = current.threadKey === payload.threadKey;
-  const baseSnapshot = isSameThread
+  const isSameConversation =
+    current.providerId === payload.providerId && current.conversationKey === payload.conversationKey;
+  const baseSnapshot = isSameConversation
     ? current
     : {
         ...current,
-        threadKey: payload.threadKey,
+        providerId: payload.providerId,
+        conversationKey: payload.conversationKey,
         sessionId: payload.sessionId,
         messages: [],
         hasOlderMessages: false
@@ -171,7 +180,7 @@ function createInitialWorkspaceState(): WorkspaceState {
     olderMessages: [],
     olderMessagesLoading: false,
     projectLoadingId: null,
-    projectThreadsById: {},
+    projectConversationsByKey: {},
     projectsRefreshing: false,
     prompt: '',
     sidebarToggleTop: workspaceState.sidebarToggleTop,
@@ -181,7 +190,11 @@ function createInitialWorkspaceState(): WorkspaceState {
 }
 
 function hasRuntimeTargetChanged(current: RuntimeSnapshot, next: RuntimeSnapshot): boolean {
-  return current.sessionId !== next.sessionId || current.threadKey !== next.threadKey;
+  return (
+    current.providerId !== next.providerId ||
+    current.sessionId !== next.sessionId ||
+    current.conversationKey !== next.conversationKey
+  );
 }
 
 function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
@@ -190,18 +203,19 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       const nextWorkspaceState = action.updater(state.workspaceState);
       return nextWorkspaceState === state.workspaceState ? state : { ...state, workspaceState: nextWorkspaceState };
     }
-    case 'threads/patched': {
-      const currentThreads = state.projectThreadsById[action.projectId] ?? [];
-      const nextThreads = action.updater(currentThreads);
-      if (nextThreads === currentThreads) {
+    case 'conversations/patched': {
+      const storageKey = getProjectProviderKey(action.projectId, action.providerId);
+      const currentConversations = state.projectConversationsByKey[storageKey] ?? [];
+      const nextConversations = action.updater(currentConversations);
+      if (nextConversations === currentConversations) {
         return state;
       }
 
       return {
         ...state,
-        projectThreadsById: {
-          ...state.projectThreadsById,
-          [action.projectId]: nextThreads
+        projectConversationsByKey: {
+          ...state.projectConversationsByKey,
+          [storageKey]: nextConversations
         }
       };
     }
@@ -301,8 +315,12 @@ export function useWorkspaceStore(): WorkspaceStore {
     dispatch({ type: 'workspace/patched', updater });
   }
 
-  function setProjectThreads(projectId: string, updater: (threads: ProjectThreadEntry[]) => ProjectThreadEntry[]): void {
-    dispatch({ type: 'threads/patched', projectId, updater });
+  function setProjectConversations(
+    projectId: string,
+    providerId: ProviderId,
+    updater: (conversations: ProjectConversationEntry[]) => ProjectConversationEntry[]
+  ): void {
+    dispatch({ type: 'conversations/patched', projectId, providerId, updater });
   }
 
   function commitSidebarToggleTop(value: number): void {
@@ -372,7 +390,7 @@ export function useWorkspaceStore(): WorkspaceStore {
     olderMessages: state.olderMessages,
     olderMessagesLoading: state.olderMessagesLoading,
     projectLoadingId: state.projectLoadingId,
-    projectThreadsById: state.projectThreadsById,
+    projectConversationsByKey: state.projectConversationsByKey,
     projectsRefreshing: state.projectsRefreshing,
     prompt: state.prompt,
     sidebarToggleTop: state.sidebarToggleTop,
@@ -391,7 +409,7 @@ export function useWorkspaceStore(): WorkspaceStore {
     setOlderMessages,
     setOlderMessagesLoading,
     setProjectLoadingId,
-    setProjectThreads,
+    setProjectConversations,
     setProjectsRefreshing,
     setPrompt,
     setSidebarToggleTop,

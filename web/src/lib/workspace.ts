@@ -1,13 +1,15 @@
 import type { ProjectSessionSummary } from '@shared/protocol.ts';
-import type { ChatMessage, RuntimeSnapshot } from '@shared/runtime-types.ts';
+import { PROVIDER_LABELS, type ChatMessage, type ProviderId, type RuntimeSnapshot } from '@shared/runtime-types.ts';
 
-export const PROJECTS_STORAGE_KEY = 'pty-remote.projects.v1';
+export const PROJECTS_STORAGE_KEY = 'pty-remote.projects.v2';
+const LEGACY_PROJECTS_STORAGE_KEY = 'pty-remote.projects.v1';
 export const SIDEBAR_TOGGLE_MARGIN = 16;
 export const SIDEBAR_TOGGLE_SIZE = 40;
 
-export interface ProjectThreadEntry {
+export interface ProjectConversationEntry {
   id: string;
-  threadKey: string;
+  providerId: ProviderId;
+  conversationKey: string;
   sessionId: string | null;
   title: string;
   preview: string;
@@ -18,7 +20,6 @@ export interface ProjectThreadEntry {
 
 export interface ProjectEntry {
   id: string;
-  cliId: string;
   cwd: string;
   label: string;
 }
@@ -26,10 +27,31 @@ export interface ProjectEntry {
 export interface PersistedWorkspaceState {
   activeCliId: string | null;
   activeProjectId: string | null;
-  activeThreadId: string | null;
+  activeProviderId: ProviderId | null;
+  activeConversationId: string | null;
   projects: ProjectEntry[];
   sidebarCollapsed: boolean;
   sidebarToggleTop: number;
+}
+
+interface LegacyProjectEntry {
+  id: string;
+  cliId?: string;
+  cwd: string;
+  label: string;
+}
+
+interface LegacyWorkspaceState {
+  activeCliId: string | null;
+  activeProjectId: string | null;
+  activeThreadId: string | null;
+  projects: LegacyProjectEntry[];
+  sidebarCollapsed: boolean;
+  sidebarToggleTop: number;
+}
+
+export function getProjectProviderKey(projectId: string, providerId: ProviderId): string {
+  return `${projectId}:${providerId}`;
 }
 
 export function getThreadLabel(cwd: string): string {
@@ -47,43 +69,71 @@ export function createEmptyWorkspaceState(): PersistedWorkspaceState {
   return {
     activeCliId: null,
     activeProjectId: null,
-    activeThreadId: null,
+    activeProviderId: null,
+    activeConversationId: null,
     projects: [],
     sidebarCollapsed: false,
     sidebarToggleTop: SIDEBAR_TOGGLE_MARGIN
   };
 }
 
+function normalizeProjects(projects: { id: string; cwd: string; label: string }[]): ProjectEntry[] {
+  return projects
+    .filter((project) => project && typeof project.cwd === 'string')
+    .map((project) => ({
+      id: project.id,
+      cwd: project.cwd,
+      label: project.label
+    }));
+}
+
+function migrateLegacyWorkspaceState(parsed: LegacyWorkspaceState): PersistedWorkspaceState {
+  return {
+    activeCliId: parsed.activeCliId ?? null,
+    activeProjectId: parsed.activeProjectId ?? null,
+    activeProviderId: 'claude',
+    activeConversationId: parsed.activeThreadId ?? null,
+    projects: normalizeProjects(parsed.projects ?? []),
+    sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
+    sidebarToggleTop: clampSidebarToggleTop(
+      typeof parsed.sidebarToggleTop === 'number' ? parsed.sidebarToggleTop : SIDEBAR_TOGGLE_MARGIN,
+      window.innerHeight
+    )
+  };
+}
+
 export function loadWorkspaceState(): PersistedWorkspaceState {
   try {
-    const rawValue = window.localStorage.getItem(PROJECTS_STORAGE_KEY);
-    if (!rawValue) {
+    const currentValue = window.localStorage.getItem(PROJECTS_STORAGE_KEY);
+    if (currentValue) {
+      const parsed = JSON.parse(currentValue) as PersistedWorkspaceState;
+      if (parsed && Array.isArray(parsed.projects)) {
+        return {
+          activeCliId: parsed.activeCliId ?? null,
+          activeProjectId: parsed.activeProjectId ?? null,
+          activeProviderId: parsed.activeProviderId ?? null,
+          activeConversationId: parsed.activeConversationId ?? null,
+          projects: normalizeProjects(parsed.projects),
+          sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
+          sidebarToggleTop: clampSidebarToggleTop(
+            typeof parsed.sidebarToggleTop === 'number' ? parsed.sidebarToggleTop : SIDEBAR_TOGGLE_MARGIN,
+            window.innerHeight
+          )
+        };
+      }
+    }
+
+    const legacyValue = window.localStorage.getItem(LEGACY_PROJECTS_STORAGE_KEY);
+    if (!legacyValue) {
       return createEmptyWorkspaceState();
     }
 
-    const parsed = JSON.parse(rawValue) as PersistedWorkspaceState;
+    const parsed = JSON.parse(legacyValue) as LegacyWorkspaceState;
     if (!parsed || !Array.isArray(parsed.projects)) {
       return createEmptyWorkspaceState();
     }
 
-    return {
-      activeCliId: parsed.activeCliId ?? null,
-      activeProjectId: parsed.activeProjectId ?? null,
-      activeThreadId: parsed.activeThreadId ?? null,
-      projects: parsed.projects
-        .filter((project) => project && typeof project.cwd === 'string')
-        .map((project) => ({
-          id: project.id,
-          cliId: typeof project.cliId === 'string' ? project.cliId : '',
-          cwd: project.cwd,
-          label: project.label
-        })),
-      sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
-      sidebarToggleTop: clampSidebarToggleTop(
-        typeof parsed.sidebarToggleTop === 'number' ? parsed.sidebarToggleTop : SIDEBAR_TOGGLE_MARGIN,
-        window.innerHeight
-      )
-    };
+    return migrateLegacyWorkspaceState(parsed);
   } catch {
     return createEmptyWorkspaceState();
   }
@@ -96,7 +146,7 @@ export function saveWorkspaceState(state: PersistedWorkspaceState): void {
 export function compactPreview(text: string, maxChars = 56): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (!normalized) {
-    return 'Untitled thread';
+    return 'Untitled conversation';
   }
   if (normalized.length <= maxChars) {
     return normalized;
@@ -120,24 +170,26 @@ function getLatestUserTextMessage(messages: ChatMessage[]): ChatMessage | undefi
   return [...messages].reverse().find((message) => message.role === 'user' && Boolean(getMessagePlainText(message)));
 }
 
-export function createDraftThread(label = 'New thread'): ProjectThreadEntry {
+export function createDraftConversation(providerId: ProviderId, label = 'New conversation'): ProjectConversationEntry {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
-    threadKey: crypto.randomUUID(),
+    providerId,
+    conversationKey: crypto.randomUUID(),
     sessionId: null,
     title: label,
-    preview: 'Start a new Claude session in this project.',
+    preview: `Start a new ${PROVIDER_LABELS[providerId]} session in this project.`,
     updatedAt: now,
     messageCount: 0,
     draft: true
   };
 }
 
-export function createThreadFromSession(session: ProjectSessionSummary): ProjectThreadEntry {
+export function createConversationFromSession(session: ProjectSessionSummary): ProjectConversationEntry {
   return {
-    id: session.sessionId,
-    threadKey: session.sessionId,
+    id: `${session.providerId}:${session.sessionId}`,
+    providerId: session.providerId,
+    conversationKey: session.sessionId,
     sessionId: session.sessionId,
     title: session.title,
     preview: session.preview,
@@ -147,8 +199,8 @@ export function createThreadFromSession(session: ProjectSessionSummary): Project
   };
 }
 
-export function sortThreads(threads: ProjectThreadEntry[]): ProjectThreadEntry[] {
-  return [...threads].sort((left, right) => {
+export function sortConversations(conversations: ProjectConversationEntry[]): ProjectConversationEntry[] {
+  return [...conversations].sort((left, right) => {
     if (left.draft !== right.draft) {
       return left.draft ? -1 : 1;
     }
@@ -156,20 +208,26 @@ export function sortThreads(threads: ProjectThreadEntry[]): ProjectThreadEntry[]
   });
 }
 
-export function mergeProjectThreads(existingThreads: ProjectThreadEntry[], sessions: ProjectSessionSummary[]): ProjectThreadEntry[] {
-  const drafts = existingThreads.filter((thread) => thread.draft && !thread.sessionId);
-  const existingBySessionId = new Map<string, ProjectThreadEntry>();
-  for (const thread of existingThreads) {
-    if (!thread.sessionId || existingBySessionId.has(thread.sessionId)) {
+export function mergeProjectConversations(
+  existingConversations: ProjectConversationEntry[],
+  sessions: ProjectSessionSummary[],
+  providerId: ProviderId
+): ProjectConversationEntry[] {
+  const drafts = existingConversations.filter((conversation) => conversation.draft && !conversation.sessionId);
+  const existingBySessionId = new Map<string, ProjectConversationEntry>();
+  for (const conversation of existingConversations) {
+    if (!conversation.sessionId || conversation.providerId !== providerId || existingBySessionId.has(conversation.sessionId)) {
       continue;
     }
-    existingBySessionId.set(thread.sessionId, thread);
+    existingBySessionId.set(conversation.sessionId, conversation);
   }
 
   const merged = sessions.map((session) => {
     const existing = existingBySessionId.get(session.sessionId);
     return {
-      ...(existing ?? createThreadFromSession(session)),
+      ...(existing ?? createConversationFromSession(session)),
+      providerId,
+      conversationKey: session.sessionId,
       sessionId: session.sessionId,
       title: session.title,
       preview: session.preview,
@@ -179,28 +237,29 @@ export function mergeProjectThreads(existingThreads: ProjectThreadEntry[], sessi
     };
   });
 
-  return sortThreads([...drafts, ...merged]);
+  return sortConversations([...drafts, ...merged]);
 }
 
 export function sortProjects(projects: ProjectEntry[]): ProjectEntry[] {
   return [...projects].sort((left, right) => left.label.localeCompare(right.label));
 }
 
-export function hydrateThreadFromSnapshot(
-  thread: ProjectThreadEntry,
+export function hydrateConversationFromSnapshot(
+  conversation: ProjectConversationEntry,
   snapshot: RuntimeSnapshot,
   messages: ChatMessage[]
-): ProjectThreadEntry {
+): ProjectConversationEntry {
   const latestUserMessage = getLatestUserTextMessage(messages);
   const previewSource = getMessagePlainText(latestUserMessage);
 
   return {
-    ...thread,
+    ...conversation,
+    providerId: snapshot.providerId ?? conversation.providerId,
     sessionId: snapshot.sessionId,
-    title: compactPreview(previewSource || thread.title, 44),
-    preview: compactPreview(previewSource || thread.preview, 88),
-    updatedAt: latestUserMessage?.createdAt ?? thread.updatedAt,
-    messageCount: messages.length || thread.messageCount,
+    title: compactPreview(previewSource || conversation.title, 44),
+    preview: compactPreview(previewSource || conversation.preview, 88),
+    updatedAt: latestUserMessage?.createdAt ?? conversation.updatedAt,
+    messageCount: messages.length || conversation.messageCount,
     draft: !snapshot.sessionId
   };
 }

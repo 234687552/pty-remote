@@ -4,12 +4,11 @@ import path from 'node:path';
 
 import type {
   GetOlderMessagesResultPayload,
-  GetRawJsonlResultPayload,
   MessagesUpsertPayload,
-  SelectThreadResultPayload,
+  SelectConversationResultPayload,
   TerminalChunkPayload
 } from '../../shared/protocol.ts';
-import type { ChatMessage, RuntimeSnapshot, RuntimeStatus } from '../../shared/runtime-types.ts';
+import type { ChatMessage, ProviderId, RuntimeSnapshot, RuntimeStatus } from '../../shared/runtime-types.ts';
 import {
   applyClaudeJsonlLine,
   createClaudeJsonlMessagesState,
@@ -43,7 +42,6 @@ export interface PtyManagerOptions {
   snapshotEmitDebounceMs: number;
   snapshotMessagesMax: number;
   olderMessagesPageMax: number;
-  rawJsonlMaxChars: number;
   gcIntervalMs: number;
   detachedDraftTtlMs: number;
   detachedJsonlMissingTtlMs: number;
@@ -61,12 +59,11 @@ export interface PtyManagerSelection {
   cwd: string;
   label: string;
   sessionId: string | null;
-  threadKey: string;
+  conversationKey: string;
 }
 
 interface AgentRuntimeState extends RuntimeSnapshot {
   allMessages: ChatMessage[];
-  rawJsonl: string;
   terminalOffset: number;
   terminalReplay: string;
 }
@@ -130,6 +127,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 export class PtyManager {
+  private readonly providerId: ProviderId = 'claude';
+
   private readonly handles = new Map<string, PtyHandle>();
 
   private readonly callbacks: PtyManagerCallbacks;
@@ -165,13 +164,13 @@ export class PtyManager {
   getRegistrationPayload(): {
     cwd: string;
     sessionId: string | null;
-    threadKey: string | null;
+    conversationKey: string | null;
   } {
     const handle = this.getActiveHandle();
     return {
       cwd: handle?.cwd ?? this.currentCwd,
       sessionId: handle?.sessionId ?? null,
-      threadKey: handle?.threadKey ?? null
+      conversationKey: handle?.threadKey ?? null
     };
   }
 
@@ -197,14 +196,14 @@ export class PtyManager {
     resizeClaudePtySession(handle?.pty ?? null, nextCols, nextRows);
   }
 
-  async activateThread(selection: PtyManagerSelection): Promise<SelectThreadResultPayload> {
+  async activateConversation(selection: PtyManagerSelection): Promise<SelectConversationResultPayload> {
     const normalized = await this.normalizeSelection(selection);
     const current = this.getActiveHandle();
-    if (current && current.threadKey !== normalized.threadKey) {
+    if (current && current.threadKey !== normalized.conversationKey) {
       this.detachHandle(current);
     }
 
-    let handle = this.handles.get(normalized.threadKey);
+    let handle = this.handles.get(normalized.conversationKey);
     if (!handle) {
       handle = this.createHandle(normalized);
       this.handles.set(handle.threadKey, handle);
@@ -229,10 +228,11 @@ export class PtyManager {
     this.emitSnapshotNow();
 
     return {
+      providerId: this.providerId,
       cwd: handle.cwd,
       label: handle.label,
       sessionId: handle.sessionId,
-      threadKey: handle.threadKey
+      conversationKey: handle.threadKey
     };
   }
 
@@ -335,47 +335,14 @@ export class PtyManager {
     this.emitSnapshotNow();
   }
 
-  async getRawJsonl(maxChars?: number): Promise<GetRawJsonlResultPayload> {
-    await this.refreshActiveMessages();
-    const handle = this.getActiveHandle();
-    if (!handle) {
-      return {
-        rawJsonl: '',
-        threadKey: null,
-        sessionId: null,
-        truncated: false
-      };
-    }
-
-    const normalizedMaxChars = typeof maxChars === 'number' && Number.isFinite(maxChars)
-      ? Math.max(1, Math.min(Math.floor(maxChars), this.options.rawJsonlMaxChars))
-      : this.options.rawJsonlMaxChars;
-    const rawJsonl = handle.runtime.rawJsonl;
-
-    if (rawJsonl.length <= normalizedMaxChars) {
-      return {
-        rawJsonl,
-        threadKey: handle.threadKey,
-        sessionId: handle.sessionId,
-        truncated: false
-      };
-    }
-
-    return {
-      rawJsonl: rawJsonl.slice(-normalizedMaxChars),
-      threadKey: handle.threadKey,
-      sessionId: handle.sessionId,
-      truncated: true
-    };
-  }
-
   async getOlderMessages(beforeMessageId?: string, maxMessages = this.options.olderMessagesPageMax): Promise<GetOlderMessagesResultPayload> {
     await this.refreshActiveMessages();
     const handle = this.getActiveHandle();
     if (!handle) {
       return {
         messages: [],
-        threadKey: null,
+        providerId: null,
+        conversationKey: null,
         sessionId: null,
         hasOlderMessages: false
       };
@@ -391,7 +358,8 @@ export class PtyManager {
 
     return {
       messages: cloneValue(allMessages.slice(start, end)),
-      threadKey: handle.threadKey,
+      providerId: this.providerId,
+      conversationKey: handle.threadKey,
       sessionId: handle.sessionId,
       hasOlderMessages: start > 0
     };
@@ -416,7 +384,7 @@ export class PtyManager {
 
   private createHandle(selection: PtyManagerSelection): PtyHandle {
     return {
-      threadKey: selection.threadKey,
+      threadKey: selection.conversationKey,
       cwd: selection.cwd,
       label: selection.label,
       sessionId: selection.sessionId,
@@ -431,7 +399,7 @@ export class PtyManager {
       jsonlPendingLine: '',
       awaitingJsonlTurn: false,
       suppressNextPtyExitError: false,
-      runtime: this.createFreshState(selection.threadKey, selection.sessionId),
+      runtime: this.createFreshState(selection.conversationKey, selection.sessionId),
       detachedAt: null,
       jsonlMissingSince: null,
       lastJsonlActivityAt: null,
@@ -440,9 +408,10 @@ export class PtyManager {
     };
   }
 
-  private createFreshState(threadKey: string | null, sessionId: string | null): AgentRuntimeState {
+  private createFreshState(conversationKey: string | null, sessionId: string | null): AgentRuntimeState {
     return {
-      threadKey,
+      providerId: this.providerId,
+      conversationKey,
       status: 'idle',
       sessionId,
       allMessages: [],
@@ -450,8 +419,7 @@ export class PtyManager {
       terminalOffset: 0,
       messages: [],
       hasOlderMessages: false,
-      lastError: null,
-      rawJsonl: ''
+      lastError: null
     };
   }
 
@@ -470,7 +438,8 @@ export class PtyManager {
   private createRuntimeSnapshot(handle: PtyHandle | null): RuntimeSnapshot {
     if (!handle) {
       return {
-        threadKey: null,
+        providerId: null,
+        conversationKey: null,
         status: 'idle',
         sessionId: null,
         messages: [],
@@ -480,7 +449,8 @@ export class PtyManager {
     }
 
     return {
-      threadKey: handle.threadKey,
+      providerId: this.providerId,
+      conversationKey: handle.threadKey,
       status: handle.runtime.status,
       sessionId: handle.runtime.sessionId,
       messages: cloneValue(handle.runtime.messages),
@@ -516,14 +486,15 @@ export class PtyManager {
       cwd,
       label: selection.label.trim() || path.basename(cwd) || cwd,
       sessionId: selection.sessionId,
-      threadKey: selection.threadKey
+      conversationKey: selection.conversationKey
     };
   }
 
   private syncHandleSelection(handle: PtyHandle, selection: PtyManagerSelection): void {
     handle.cwd = selection.cwd;
     handle.label = selection.label;
-    handle.runtime.threadKey = selection.threadKey;
+    handle.runtime.providerId = this.providerId;
+    handle.runtime.conversationKey = selection.conversationKey;
 
     if (handle.sessionId === null) {
       handle.sessionId = selection.sessionId;
@@ -690,7 +661,8 @@ export class PtyManager {
     }
 
     return {
-      threadKey: handle.threadKey,
+      providerId: this.providerId,
+      conversationKey: handle.threadKey,
       sessionId: handle.sessionId,
       upserts: cloneValue(upserts),
       recentMessageIds: nextIds,
@@ -752,7 +724,6 @@ export class PtyManager {
     try {
       if (handle.parsedJsonlSessionId !== sessionId) {
         this.resetJsonlParsingState(handle, sessionId);
-        handle.runtime.rawJsonl = '';
         handle.runtime.allMessages = [];
         handle.runtime.messages = [];
         handle.runtime.hasOlderMessages = false;
@@ -764,12 +735,10 @@ export class PtyManager {
 
       if (handle.jsonlReadOffset > stat.size) {
         this.resetJsonlParsingState(handle, sessionId);
-        handle.runtime.rawJsonl = '';
       }
 
       const { text, size } = await this.readJsonlTail(filePath, handle.jsonlReadOffset);
       if (text) {
-        handle.runtime.rawJsonl += text;
         const combined = `${handle.jsonlPendingLine}${text}`;
         const lines = combined.split('\n');
         const trailingLine = lines.pop() ?? '';
@@ -839,9 +808,6 @@ export class PtyManager {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') {
         handle.jsonlMissingSince ??= Date.now();
-        if (handle.runtime.rawJsonl) {
-          handle.runtime.rawJsonl = '';
-        }
         return;
       }
       this.setLastError(handle, error instanceof Error ? error.message : 'Failed to read Claude jsonl');
@@ -930,9 +896,13 @@ export class PtyManager {
     if (this.activeThreadKey === handle.threadKey) {
       this.activeThreadKey = null;
     }
+    this.pruneInactiveHandleState(handle);
     if (this.jsonlRefreshTimer) {
       clearTimeout(this.jsonlRefreshTimer);
       this.jsonlRefreshTimer = null;
+    }
+    if (!handle.pty) {
+      this.discardInactiveHandle(handle);
     }
   }
 
@@ -957,6 +927,7 @@ export class PtyManager {
     handle.awaitingJsonlTurn = false;
     this.resetTerminalReplay(handle);
     stopClaudePtySession(currentPty);
+    this.discardInactiveHandle(handle);
   }
 
   private stopHandlePtyPreservingReplay(handle: PtyHandle): void {
@@ -1057,6 +1028,7 @@ export class PtyManager {
       if (!expectedExit) {
         handle.runtime.lastError = 'Claude CLI exited unexpectedly';
       }
+      this.discardInactiveHandle(handle);
       return;
     }
 
@@ -1132,6 +1104,28 @@ export class PtyManager {
       handle.lastUserInputAt ?? 0,
       handle.detachedAt ?? 0
     );
+  }
+
+  private pruneInactiveHandleState(handle: PtyHandle): void {
+    if (this.isActiveHandle(handle)) {
+      return;
+    }
+
+    handle.runtime.allMessages = [];
+    handle.runtime.messages = [];
+    handle.runtime.hasOlderMessages = false;
+    handle.awaitingJsonlTurn = false;
+    this.resetJsonlParsingState(handle, handle.sessionId);
+  }
+
+  private discardInactiveHandle(handle: PtyHandle): void {
+    if (this.isActiveHandle(handle) || handle.pty) {
+      return;
+    }
+
+    this.closeJsonlWatcher(handle);
+    handle.lifecycle = 'exited';
+    this.handles.delete(handle.threadKey);
   }
 
   private async gcDetachedHandles(): Promise<void> {

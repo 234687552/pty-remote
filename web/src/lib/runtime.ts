@@ -5,7 +5,8 @@ export const MOBILE_TERMINAL_MIN_COLS = 80;
 
 export function createEmptySnapshot(): RuntimeSnapshot {
   return {
-    threadKey: null,
+    providerId: null,
+    conversationKey: null,
     status: 'idle',
     sessionId: null,
     messages: [],

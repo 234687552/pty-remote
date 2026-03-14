@@ -16,8 +16,10 @@ import type {
   PickProjectDirectoryResultPayload,
   RuntimeSnapshotPayload
 } from '../../shared/protocol.ts';
-import { listProjectSessions } from '../project-history.ts';
-import { PtyManager } from './pty-manager.ts';
+import type { ProviderId } from '../../shared/runtime-types.ts';
+import { createClaudeProviderRuntime } from '../providers/claude.ts';
+import type { ProviderRuntime } from '../providers/provider-runtime.ts';
+import type { PtyManagerOptions } from './pty-manager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,6 +31,7 @@ const SOCKET_URL = process.env.SOCKET_URL ?? `http://${process.env.HOST ?? '127.
 const execFileAsync = promisify(execFile);
 const CLI_ID = resolveCliId();
 const CLI_LABEL = resolveCliLabel();
+const PROVIDER_ID: ProviderId = 'claude';
 const PTY_BACKEND_NAME = 'node-pty';
 const TERMINAL_REPLAY_MAX_BYTES = 1024 * 1024;
 const RECENT_OUTPUT_MAX_CHARS = 12_000;
@@ -38,7 +41,6 @@ const JSONL_REFRESH_DEBOUNCE_MS = 120;
 const SNAPSHOT_EMIT_DEBOUNCE_MS = 200;
 const SNAPSHOT_MESSAGES_MAX = 40;
 const OLDER_MESSAGES_PAGE_MAX = 40;
-const RAW_JSONL_MAX_CHARS = 200_000;
 const TERMINAL_COLS = 120;
 const TERMINAL_ROWS = 32;
 const DETACHED_PTY_TTL_MS = 12 * 60 * 60 * 1000;
@@ -52,58 +54,56 @@ let socketClient: Socket | null = null;
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | null = null;
 
-const manager = new PtyManager(
-  {
-    claudeBin: process.env.CLAUDE_BIN ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude'),
-    permissionMode: CLAUDE_PERMISSION_MODE,
-    defaultCwd: DEFAULT_ROOT_DIR,
-    terminalCols: TERMINAL_COLS,
-    terminalRows: TERMINAL_ROWS,
-    terminalReplayMaxBytes: TERMINAL_REPLAY_MAX_BYTES,
-    recentOutputMaxChars: RECENT_OUTPUT_MAX_CHARS,
-    claudeReadyTimeoutMs: CLAUDE_READY_TIMEOUT_MS,
-    promptSubmitDelayMs: PROMPT_SUBMIT_DELAY_MS,
-    jsonlRefreshDebounceMs: JSONL_REFRESH_DEBOUNCE_MS,
-    snapshotEmitDebounceMs: SNAPSHOT_EMIT_DEBOUNCE_MS,
-    snapshotMessagesMax: SNAPSHOT_MESSAGES_MAX,
-    olderMessagesPageMax: OLDER_MESSAGES_PAGE_MAX,
-    rawJsonlMaxChars: RAW_JSONL_MAX_CHARS,
-    gcIntervalMs: GC_INTERVAL_MS,
-    detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
-    detachedJsonlMissingTtlMs: DETACHED_JSONL_MISSING_TTL_MS,
-    detachedPtyTtlMs: DETACHED_PTY_TTL_MS,
-    maxDetachedPtys: Number.isFinite(MAX_DETACHED_PTYS) && MAX_DETACHED_PTYS > 0 ? MAX_DETACHED_PTYS : 5
-  },
-  {
-    emitMessagesUpsert(payload) {
-      if (!socketClient?.connected) {
-        return;
-      }
-      socketClient.emit('cli:messages-upsert', {
-        ...payload,
-        cliId: CLI_ID
-      });
-    },
-    emitSnapshot(snapshot) {
-      if (!socketClient?.connected) {
-        return;
-      }
-      socketClient.emit('cli:snapshot', {
-        cliId: CLI_ID,
-        snapshot
-      } satisfies RuntimeSnapshotPayload);
-    },
-    emitTerminalChunk(payload) {
-      if (!socketClient?.connected) {
-        return;
-      }
-      socketClient.emit('cli:terminal-chunk', {
-        ...payload,
-        cliId: CLI_ID
-      });
+const runtimeOptions: PtyManagerOptions = {
+  claudeBin: process.env.CLAUDE_BIN ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude'),
+  permissionMode: CLAUDE_PERMISSION_MODE,
+  defaultCwd: DEFAULT_ROOT_DIR,
+  terminalCols: TERMINAL_COLS,
+  terminalRows: TERMINAL_ROWS,
+  terminalReplayMaxBytes: TERMINAL_REPLAY_MAX_BYTES,
+  recentOutputMaxChars: RECENT_OUTPUT_MAX_CHARS,
+  claudeReadyTimeoutMs: CLAUDE_READY_TIMEOUT_MS,
+  promptSubmitDelayMs: PROMPT_SUBMIT_DELAY_MS,
+  jsonlRefreshDebounceMs: JSONL_REFRESH_DEBOUNCE_MS,
+  snapshotEmitDebounceMs: SNAPSHOT_EMIT_DEBOUNCE_MS,
+  snapshotMessagesMax: SNAPSHOT_MESSAGES_MAX,
+  olderMessagesPageMax: OLDER_MESSAGES_PAGE_MAX,
+  gcIntervalMs: GC_INTERVAL_MS,
+  detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
+  detachedJsonlMissingTtlMs: DETACHED_JSONL_MISSING_TTL_MS,
+  detachedPtyTtlMs: DETACHED_PTY_TTL_MS,
+  maxDetachedPtys: Number.isFinite(MAX_DETACHED_PTYS) && MAX_DETACHED_PTYS > 0 ? MAX_DETACHED_PTYS : 5
+};
+
+const runtime: ProviderRuntime = createClaudeProviderRuntime(runtimeOptions, {
+  emitMessagesUpsert(payload) {
+    if (!socketClient?.connected) {
+      return;
     }
+    socketClient.emit('cli:messages-upsert', {
+      ...payload,
+      cliId: CLI_ID
+    });
+  },
+  emitSnapshot(snapshot) {
+    if (!socketClient?.connected) {
+      return;
+    }
+    socketClient.emit('cli:snapshot', {
+      cliId: CLI_ID,
+      snapshot
+    } satisfies RuntimeSnapshotPayload);
+  },
+  emitTerminalChunk(payload) {
+    if (!socketClient?.connected) {
+      return;
+    }
+    socketClient.emit('cli:terminal-chunk', {
+      ...payload,
+      cliId: CLI_ID
+    });
   }
-);
+});
 
 function sanitizeIdentifier(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-');
@@ -165,34 +165,27 @@ function sanitizePermissionMode(value: string | undefined): string {
 async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCommandResult> {
   try {
     if (envelope.name === 'send-message') {
-      await manager.dispatchMessage((envelope.payload as { content: string }).content);
+      await runtime.dispatchMessage((envelope.payload as { content: string }).content);
       return { ok: true, payload: null };
     }
 
     if (envelope.name === 'stop-message') {
-      await manager.stopActiveRun();
+      await runtime.stopActiveRun();
       return { ok: true, payload: null };
     }
 
     if (envelope.name === 'reset-session') {
-      await manager.resetActiveThread();
+      await runtime.resetActiveConversation();
       return { ok: true, payload: null };
     }
 
     if (envelope.name === 'get-runtime-snapshot') {
-      await manager.replayActiveState();
+      await runtime.replayActiveState();
       return {
         ok: true,
         payload: {
-          snapshot: manager.getSnapshot()
+          snapshot: runtime.getSnapshot()
         } satisfies GetRuntimeSnapshotResultPayload
-      };
-    }
-
-    if (envelope.name === 'get-raw-jsonl') {
-      return {
-        ok: true,
-        payload: await manager.getRawJsonl((envelope.payload as { maxChars?: number }).maxChars)
       };
     }
 
@@ -200,31 +193,32 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
       const payload = envelope.payload as { beforeMessageId?: string; maxMessages?: number };
       return {
         ok: true,
-        payload: await manager.getOlderMessages(payload.beforeMessageId, payload.maxMessages)
+        payload: await runtime.getOlderMessages(payload.beforeMessageId, payload.maxMessages)
       };
     }
 
-    if (envelope.name === 'select-thread') {
-      const payload = envelope.payload as { cwd: string; label?: string; sessionId: string | null; threadKey: string };
+    if (envelope.name === 'select-conversation') {
+      const payload = envelope.payload as { cwd: string; label?: string; sessionId: string | null; conversationKey: string };
       return {
         ok: true,
-        payload: await manager.activateThread({
+        payload: await runtime.activateConversation({
           cwd: payload.cwd,
           label: payload.label?.trim() || path.basename(payload.cwd) || payload.cwd,
           sessionId: payload.sessionId ?? null,
-          threadKey: payload.threadKey
+          conversationKey: payload.conversationKey
         })
       };
     }
 
-    if (envelope.name === 'list-project-sessions') {
+    if (envelope.name === 'list-project-conversations') {
       const payload = envelope.payload as { cwd: string; maxSessions?: number };
       return {
         ok: true,
         payload: {
+          providerId: runtime.providerId,
           cwd: payload.cwd,
           label: path.basename(payload.cwd) || payload.cwd,
-          sessions: await listProjectSessions(payload.cwd, payload.maxSessions)
+          sessions: await runtime.listProjectConversations(payload.cwd, payload.maxSessions)
         } satisfies ListProjectSessionsResultPayload
       };
     }
@@ -284,14 +278,15 @@ function connectSocketClient(): void {
   socketClient = socket;
 
   socket.on('connect', () => {
-    const registration = manager.getRegistrationPayload();
+    const registration = runtime.getRegistrationPayload();
     socket.emit(
       'cli:register',
       {
         cliId: CLI_ID,
+        providerId: PROVIDER_ID,
         label: CLI_LABEL,
         cwd: registration.cwd,
-        threadKey: registration.threadKey,
+        conversationKey: registration.conversationKey,
         sessionId: registration.sessionId,
         runtimeBackend: PTY_BACKEND_NAME
       },
@@ -304,7 +299,7 @@ function connectSocketClient(): void {
         }
 
         console.log(`cli registered as ${result.cliId}`);
-        void manager.replayActiveState();
+        void runtime.replayActiveState();
       }
     );
   });
@@ -314,7 +309,7 @@ function connectSocketClient(): void {
   });
 
   socket.on('cli:terminal-resize', (payload: { cols: number; rows: number }) => {
-    manager.updateTerminalSize(payload.cols, payload.rows);
+    runtime.updateTerminalSize(payload.cols, payload.rows);
   });
 
   socket.on('disconnect', (reason) => {
@@ -337,7 +332,7 @@ async function shutdownCliClient(reason: string, exitCode = 0): Promise<void> {
   shuttingDown = true;
   shutdownPromise = (async () => {
     console.log(`shutting down cli client (${reason})`);
-    await manager.shutdown();
+    await runtime.shutdown();
     socketClient?.removeAllListeners();
     socketClient?.disconnect();
     socketClient = null;

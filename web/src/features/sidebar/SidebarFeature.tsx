@@ -17,26 +17,27 @@ export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChang
     <Sidebar
       activeCliId={store.workspaceState.activeCliId}
       activeProjectId={store.workspaceState.activeProjectId}
-      activeThreadId={store.workspaceState.activeThreadId}
+      activeProviderId={store.workspaceState.activeProviderId}
+      activeConversationId={store.workspaceState.activeConversationId}
       clis={clis}
       collapsed={store.workspaceState.sidebarCollapsed}
       mobileOpen={mobileOpen}
-      projectThreadsById={store.projectThreadsById}
+      projectConversationsByKey={store.projectConversationsByKey}
       projects={store.workspaceState.projects}
       projectsRefreshing={store.projectsRefreshing}
-      onActivateThread={(project, thread) => {
-        void controller.activateThread(project, thread);
+      onActivateConversation={(project, providerId, conversation) => {
+        void controller.activateConversation(project, providerId, conversation);
       }}
       onAddProject={() => {
         void controller.addProject();
       }}
       onMobileOpenChange={onMobileOpenChange}
-      onCreateThread={controller.createThread}
       onRefreshAllProjects={() => {
-        void controller.refreshAllProjectThreads();
+        void controller.refreshAllProjectConversations();
       }}
       onSelectCli={controller.selectCli}
       onSelectProject={controller.selectProject}
+      onSelectProvider={controller.selectProvider}
     />
   );
 }

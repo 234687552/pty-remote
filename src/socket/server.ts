@@ -13,7 +13,6 @@ import type {
   CliStatusPayload,
   MessagesUpsertPayload,
   RuntimeSnapshotPayload,
-  SelectThreadResultPayload,
   TerminalChunkPayload,
   TerminalResizePayload,
   TerminalResumeRequestPayload,
@@ -115,9 +114,10 @@ function createCliDescriptor(cliId: string, payload: CliRegisterPayload): CliDes
   const now = new Date().toISOString();
   return {
     cliId,
+    providerId: payload.providerId,
     label: payload.label?.trim() || path.basename(payload.cwd) || cliId,
     cwd: payload.cwd,
-    threadKey: payload.threadKey ?? null,
+    conversationKey: payload.conversationKey ?? null,
     runtimeBackend: payload.runtimeBackend,
     connected: true,
     status: 'idle',
@@ -140,7 +140,7 @@ function updateDescriptorFromSnapshot(record: CliRuntimeRecord): void {
 
   record.descriptor = {
     ...record.descriptor,
-    threadKey: record.snapshot.threadKey,
+    conversationKey: record.snapshot.conversationKey,
     status: record.snapshot.status,
     sessionId: record.snapshot.sessionId,
     lastSeenAt: new Date().toISOString()
@@ -331,13 +331,14 @@ async function routeWebCommand(command: WebCommandEnvelope, io: SocketIOServer):
     payload: command.payload
   } satisfies CliCommandEnvelope);
 
-  if (result.ok && command.name === 'select-thread') {
-    const payload = result.payload as SelectThreadResultPayload | undefined;
+  if (result.ok && command.name === 'select-conversation') {
+    const payload = result.payload as { conversationKey?: string | null; sessionId?: string | null } | undefined;
     const cwd = path.resolve((command.payload as { cwd: string }).cwd);
     record.descriptor = {
       ...record.descriptor,
       cwd,
-      threadKey: payload?.threadKey ?? (command.payload as { threadKey?: string }).threadKey ?? null,
+      conversationKey:
+        payload?.conversationKey ?? (command.payload as { conversationKey?: string }).conversationKey ?? null,
       sessionId: payload?.sessionId ?? null,
       lastSeenAt: new Date().toISOString()
     };

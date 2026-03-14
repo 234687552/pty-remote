@@ -1,37 +1,40 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
-import type { CliDescriptor } from '@shared/runtime-types.ts';
+import { PROVIDER_LABELS, PROVIDER_ORDER, type CliDescriptor, type ProviderId } from '@shared/runtime-types.ts';
 
-import type { ProjectEntry, ProjectThreadEntry } from '@/lib/workspace.ts';
+import {
+  getProjectProviderKey,
+  type ProjectConversationEntry,
+  type ProjectEntry
+} from '@/lib/workspace.ts';
 
 interface SidebarProps {
   activeCliId: string | null;
   activeProjectId: string | null;
-  activeThreadId: string | null;
+  activeProviderId: ProviderId | null;
+  activeConversationId: string | null;
   clis: CliDescriptor[];
   collapsed: boolean;
   mobileOpen: boolean;
-  projectThreadsById: Record<string, ProjectThreadEntry[]>;
+  projectConversationsByKey: Record<string, ProjectConversationEntry[]>;
   projects: ProjectEntry[];
   projectsRefreshing: boolean;
-  onActivateThread: (project: ProjectEntry, thread: ProjectThreadEntry) => void;
+  onActivateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => void;
   onAddProject: () => void;
   onMobileOpenChange: (open: boolean) => void;
-  onCreateThread: (projectId: string) => void;
   onRefreshAllProjects: () => void;
   onSelectCli: (cliId: string | null) => void;
-  onSelectProject: (project: ProjectEntry, firstThreadId: string | null) => void;
+  onSelectProject: (project: ProjectEntry) => void;
+  onSelectProvider: (project: ProjectEntry, providerId: ProviderId) => void;
 }
 
-type ProviderId = 'claude';
 const MOBILE_OVERLAY_CLOSE_GUARD_MS = 280;
 
 interface ProviderSection {
   id: ProviderId;
   label: string;
   count: number;
-  threads: ProjectThreadEntry[];
-  totalThreads: number;
+  conversations: ProjectConversationEntry[];
   emptyText: string;
 }
 
@@ -74,26 +77,57 @@ function formatRelativeTime(value: string): string {
   return `${Math.abs(diffYears)} 年前`;
 }
 
+function buildProviderSections(
+  project: ProjectEntry,
+  clis: CliDescriptor[],
+  projectConversationsByKey: Record<string, ProjectConversationEntry[]>
+): ProviderSection[] {
+  const conversationProviderIds = Object.keys(projectConversationsByKey)
+    .filter((key) => key.startsWith(`${project.id}:`))
+    .map((key) => key.split(':')[1] as ProviderId);
+  const connectedProviderIds = clis.filter((cli) => cli.connected).map((cli) => cli.providerId);
+  const providerIds = [...new Set([...connectedProviderIds, ...conversationProviderIds])].sort(
+    (left, right) => PROVIDER_ORDER.indexOf(left) - PROVIDER_ORDER.indexOf(right)
+  );
+
+  return providerIds.map((providerId) => {
+    const allConversations = projectConversationsByKey[getProjectProviderKey(project.id, providerId)] ?? [];
+    return {
+      id: providerId,
+      label: PROVIDER_LABELS[providerId],
+      count: allConversations.length,
+      conversations: allConversations.slice(0, 5),
+      emptyText: '这个 provider 还没有可用 conversation。'
+    };
+  });
+}
+
 export function Sidebar({
   activeCliId,
   activeProjectId,
-  activeThreadId,
+  activeProviderId,
+  activeConversationId,
   clis,
   collapsed,
   mobileOpen,
-  projectThreadsById,
+  projectConversationsByKey,
   projects,
   projectsRefreshing,
-  onActivateThread,
+  onActivateConversation,
   onAddProject,
   onMobileOpenChange,
-  onCreateThread,
   onRefreshAllProjects,
   onSelectCli,
-  onSelectProject
+  onSelectProject,
+  onSelectProvider
 }: SidebarProps) {
   const [expandedProvidersByProject, setExpandedProvidersByProject] = useState<Record<string, ProviderId | null>>({});
   const lastMobileOpenAtRef = useRef(0);
+  const providerSectionsByProject = useMemo(
+    () =>
+      Object.fromEntries(projects.map((project) => [project.id, buildProviderSections(project, clis, projectConversationsByKey)])),
+    [clis, projectConversationsByKey, projects]
+  );
 
   useEffect(() => {
     if (mobileOpen) {
@@ -118,19 +152,11 @@ export function Sidebar({
         ) : (
           projects.map((project) => {
             const isActiveProject = project.id === activeProjectId;
-            const projectThreads = (projectThreadsById[project.id] ?? []).slice(0, 5);
-            const providerSections: ProviderSection[] = [
-              {
-                id: 'claude',
-                label: 'claude',
-                count: projectThreads.length,
-                threads: projectThreads,
-                totalThreads: projectThreads.length,
-                emptyText: '这个 provider 还没有可用 conversation。'
-              }
-            ];
-            const selectedProviderId = expandedProvidersByProject[project.id] ?? providerSections[0]?.id ?? null;
-            const selectedProvider = providerSections.find((provider) => provider.id === selectedProviderId) ?? providerSections[0] ?? null;
+            const providerSections = providerSectionsByProject[project.id] ?? [];
+            const defaultProviderId = isActiveProject ? activeProviderId : providerSections[0]?.id ?? null;
+            const selectedProviderId = expandedProvidersByProject[project.id] ?? defaultProviderId;
+            const selectedProvider =
+              providerSections.find((provider) => provider.id === selectedProviderId) ?? providerSections[0] ?? null;
 
             return (
               <section
@@ -145,7 +171,7 @@ export function Sidebar({
                 <div className="flex items-start justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() => onSelectProject(project, projectThreads[0]?.id ?? null)}
+                    onClick={() => onSelectProject(project)}
                     className="min-w-0 text-left"
                   >
                     <div className="truncate text-[13px] font-semibold">{project.label}</div>
@@ -169,14 +195,12 @@ export function Sidebar({
                           key={provider.id}
                           type="button"
                           onClick={() => {
-                            onSelectProject(project, projectThreads[0]?.id ?? null);
+                            onSelectProvider(project, provider.id);
                             selectProvider(project.id, provider.id);
                           }}
                           className={[
                             'inline-flex items-center gap-0.5 px-0.5 py-0.5 text-[9px] font-medium transition',
-                            isSelected
-                              ? 'text-zinc-700'
-                              : 'text-zinc-500 hover:text-zinc-700'
+                            isSelected ? 'text-zinc-700' : 'text-zinc-500 hover:text-zinc-700'
                           ].join(' ')}
                           aria-pressed={isSelected}
                         >
@@ -189,7 +213,7 @@ export function Sidebar({
                 </div>
 
                 <div className="mt-2 space-y-1">
-                  {!selectedProvider || selectedProvider.threads.length === 0 ? (
+                  {!selectedProvider || selectedProvider.conversations.length === 0 ? (
                     <div
                       className={[
                         'rounded-xl border px-2.5 py-2 text-[11px]',
@@ -199,16 +223,19 @@ export function Sidebar({
                       {selectedProvider?.emptyText ?? '这个 project 还没有可用 conversation。'}
                     </div>
                   ) : (
-                    selectedProvider.threads.map((thread) => {
-                      const isActiveThread = isActiveProject && thread.id === activeThreadId;
+                    selectedProvider.conversations.map((conversation) => {
+                      const isActiveConversation =
+                        isActiveProject &&
+                        selectedProvider.id === activeProviderId &&
+                        conversation.id === activeConversationId;
                       return (
                         <button
-                          key={thread.id}
+                          key={conversation.id}
                           type="button"
-                          onClick={() => onActivateThread(project, thread)}
+                          onClick={() => onActivateConversation(project, selectedProvider.id, conversation)}
                           className={[
                             'block w-full rounded-xl border px-2.5 py-2 text-left transition',
-                            isActiveThread
+                            isActiveConversation
                               ? isActiveProject
                                 ? 'border-zinc-300 bg-white text-zinc-950 shadow-sm'
                                 : 'border-sky-200 bg-sky-100 text-zinc-950'
@@ -218,11 +245,14 @@ export function Sidebar({
                           ].join(' ')}
                         >
                           <div className="flex items-center justify-between gap-3">
-                            <span className="min-w-0 truncate text-[13px] font-medium" title={thread.title}>
-                              {thread.title}
+                            <span className="min-w-0 truncate text-[13px] font-medium" title={conversation.title}>
+                              {conversation.title}
                             </span>
-                            <span className="shrink-0 text-[10px] text-zinc-500" title={new Date(thread.updatedAt).toLocaleString()}>
-                              {formatRelativeTime(thread.updatedAt)}
+                            <span
+                              className="shrink-0 text-[10px] text-zinc-500"
+                              title={new Date(conversation.updatedAt).toLocaleString()}
+                            >
+                              {formatRelativeTime(conversation.updatedAt)}
                             </span>
                           </div>
                         </button>
@@ -282,7 +312,6 @@ export function Sidebar({
               <path d="M16 4.5v3.8h-3.8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
-
         </div>
       </div>
     </>

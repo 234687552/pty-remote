@@ -1,6 +1,14 @@
 export type Role = 'user' | 'assistant';
 export type MessageStatus = 'complete' | 'streaming' | 'error';
 export type RuntimeStatus = 'idle' | 'starting' | 'running' | 'error';
+export type ProviderId = 'claude' | 'codex';
+
+export const PROVIDER_LABELS: Record<ProviderId, string> = {
+  claude: 'claude',
+  codex: 'codex'
+};
+
+export const PROVIDER_ORDER: ProviderId[] = ['claude', 'codex'];
 
 export interface TextChatMessageBlock {
   id: string;
@@ -35,7 +43,8 @@ export interface ChatMessage {
 }
 
 export interface RuntimeSnapshot {
-  threadKey: string | null;
+  providerId: ProviderId | null;
+  conversationKey: string | null;
   status: RuntimeStatus;
   sessionId: string | null;
   messages: ChatMessage[];
@@ -45,9 +54,10 @@ export interface RuntimeSnapshot {
 
 export interface CliDescriptor {
   cliId: string;
+  providerId: ProviderId;
   label: string;
   cwd: string;
-  threadKey: string | null;
+  conversationKey: string | null;
   runtimeBackend: string;
   connected: boolean;
   status: RuntimeStatus;
