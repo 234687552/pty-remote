@@ -118,6 +118,11 @@ export function selectMobileHeaderTitle(store: WorkspaceStore, clis: CliDescript
   return compactPreview(activeThread?.title ?? activeProject?.label ?? activeCli?.label ?? 'pty-remote', 36);
 }
 
+export function selectMobileProjectTitle(store: WorkspaceStore, clis: CliDescriptor[]): string {
+  const { activeCli, activeProject } = selectWorkspaceDerivedState(store, clis, true);
+  return compactPreview(activeProject?.label ?? activeCli?.label ?? 'pty-remote', 28);
+}
+
 export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescriptor[], socketConnected: boolean): ComposerViewModel {
   const { activeCli, activeCliId, activeProject, activeThread, busy, canSend, canStop, connected } = selectWorkspaceDerivedState(
     store,

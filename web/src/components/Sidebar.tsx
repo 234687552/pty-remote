@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 import type { CliDescriptor } from '@shared/runtime-types.ts';
 
 import type { ProjectEntry, ProjectThreadEntry } from '@/lib/workspace.ts';
@@ -18,6 +20,17 @@ interface SidebarProps {
   onRefreshAllProjects: () => void;
   onSelectCli: (cliId: string | null) => void;
   onSelectProject: (project: ProjectEntry, firstThreadId: string | null) => void;
+}
+
+type ProviderId = 'claude';
+
+interface ProviderSection {
+  id: ProviderId;
+  label: string;
+  count: number;
+  threads: ProjectThreadEntry[];
+  totalThreads: number;
+  emptyText: string;
 }
 
 function formatRelativeTime(value: string): string {
@@ -76,18 +89,39 @@ export function Sidebar({
   onSelectCli,
   onSelectProject
 }: SidebarProps) {
+  const [expandedProvidersByProject, setExpandedProvidersByProject] = useState<Record<string, ProviderId | null>>({});
+
+  function selectProvider(projectId: string, providerId: ProviderId): void {
+    setExpandedProvidersByProject((current) => ({
+      ...current,
+      [projectId]: providerId
+    }));
+  }
+
   const sidebarContent = (
     <>
       <div className="flex-1 space-y-2.5 overflow-auto p-2.5 pt-2.5">
         {projects.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
-            先添加一个项目目录，再在目录下切换历史 thread 或创建新 thread。
+            先添加一个项目目录，再在目录下切换历史 conversation。
           </div>
         ) : (
           projects.map((project) => {
             const isActiveProject = project.id === activeProjectId;
             const projectThreads = (projectThreadsById[project.id] ?? []).slice(0, 5);
-            const projectCli = clis.find((entry) => entry.cliId === project.cliId) ?? null;
+            const providerSections: ProviderSection[] = [
+              {
+                id: 'claude',
+                label: 'claude',
+                count: projectThreads.length,
+                threads: projectThreads,
+                totalThreads: projectThreads.length,
+                emptyText: '这个 provider 还没有可用 conversation。'
+              }
+            ];
+            const selectedProviderId = expandedProvidersByProject[project.id] ?? providerSections[0]?.id ?? null;
+            const selectedProvider = providerSections.find((provider) => provider.id === selectedProviderId) ?? providerSections[0] ?? null;
+
             return (
               <section
                 key={project.id}
@@ -105,46 +139,57 @@ export function Sidebar({
                     className="min-w-0 text-left"
                   >
                     <div className="truncate text-[13px] font-semibold">{project.label}</div>
-                    <div className={['mt-0.5 line-clamp-1 text-[11px]', isActiveProject ? 'text-zinc-600' : 'text-zinc-500'].join(' ')}>
+                    <div
+                      className={[
+                        'mt-0.5 line-clamp-1 text-[11px]',
+                        isActiveProject ? 'text-zinc-600' : 'text-zinc-500'
+                      ].join(' ')}
+                    >
                       {project.cwd}
                     </div>
-                    <div className={['mt-0.5 text-[10px]', isActiveProject ? 'text-zinc-600' : 'text-zinc-500'].join(' ')}>
-                      {projectCli?.label ?? project.cliId}
-                    </div>
                   </button>
-                  <div className="flex items-center gap-1">
-                    <button
-                      type="button"
-                      onClick={() => onCreateThread(project.id)}
-                      className={[
-                        'flex h-8 w-8 items-center justify-center rounded-lg border transition',
-                        isActiveProject
-                          ? 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50'
-                          : 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50'
-                      ].join(' ')}
-                      aria-label="新线程"
-                      title="新线程"
-                    >
-                      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
-                        <path d="M10 4v12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                        <path d="M4 10h12" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                      </svg>
-                    </button>
+                </div>
+
+                <div className="mt-1.5 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+                  <div className="flex min-w-max items-center gap-2">
+                    {providerSections.map((provider) => {
+                      const isSelected = selectedProviderId === provider.id;
+                      return (
+                        <button
+                          key={provider.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectProject(project, projectThreads[0]?.id ?? null);
+                            selectProvider(project.id, provider.id);
+                          }}
+                          className={[
+                            'inline-flex items-center gap-0.5 px-0.5 py-0.5 text-[9px] font-medium transition',
+                            isSelected
+                              ? 'text-zinc-700'
+                              : 'text-zinc-500 hover:text-zinc-700'
+                          ].join(' ')}
+                          aria-pressed={isSelected}
+                        >
+                          <span className="underline underline-offset-[2px]">{provider.label}</span>
+                          <span>[{provider.count}]</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
 
                 <div className="mt-2 space-y-1">
-                  {projectThreads.length === 0 ? (
+                  {!selectedProvider || selectedProvider.threads.length === 0 ? (
                     <div
                       className={[
                         'rounded-xl border px-2.5 py-2 text-[11px]',
                         isActiveProject ? 'border-zinc-300 bg-white/70 text-zinc-600' : 'border-zinc-200 text-zinc-500'
                       ].join(' ')}
                     >
-                      这个 project 还没有可用 thread。
+                      {selectedProvider?.emptyText ?? '这个 project 还没有可用 conversation。'}
                     </div>
                   ) : (
-                    projectThreads.map((thread) => {
+                    selectedProvider.threads.map((thread) => {
                       const isActiveThread = isActiveProject && thread.id === activeThreadId;
                       return (
                         <button
@@ -162,17 +207,11 @@ export function Sidebar({
                                 : 'border-transparent bg-transparent text-zinc-800 hover:bg-zinc-100'
                           ].join(' ')}
                         >
-                          <div className="truncate text-[13px] font-medium">{thread.title}</div>
-                          <div
-                            className={[
-                              'mt-1 flex items-center justify-between gap-3 text-[10px]',
-                              isActiveThread ? (isActiveProject ? 'text-zinc-600' : 'text-zinc-700') : isActiveProject ? 'text-zinc-500' : 'text-zinc-500'
-                            ].join(' ')}
-                          >
-                            <span className="min-w-0 truncate" title={thread.sessionId ?? 'new'}>
-                              {thread.sessionId ?? 'new'}
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="min-w-0 truncate text-[13px] font-medium" title={thread.title}>
+                              {thread.title}
                             </span>
-                            <span className="shrink-0" title={new Date(thread.updatedAt).toLocaleString()}>
+                            <span className="shrink-0 text-[10px] text-zinc-500" title={new Date(thread.updatedAt).toLocaleString()}>
                               {formatRelativeTime(thread.updatedAt)}
                             </span>
                           </div>
