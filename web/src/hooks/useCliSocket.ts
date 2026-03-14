@@ -8,17 +8,21 @@ import type {
   CliCommandResult,
   CliStatusPayload,
   MessagesUpsertPayload,
+  RuntimeSubscriptionPayload,
   RuntimeSnapshotPayload,
   TerminalChunkPayload,
   WebCommandEnvelope,
   WebInitPayload
 } from '@shared/protocol.ts';
-import type { CliDescriptor, RuntimeSnapshot } from '@shared/runtime-types.ts';
+import type { CliDescriptor, ProviderId, RuntimeSnapshot } from '@shared/runtime-types.ts';
 
 import { getSocketBaseUrl } from '@/lib/runtime.ts';
 
 interface UseCliSocketOptions {
   activeCliId: string | null;
+  activeProviderId: ProviderId | null;
+  activeConversationKey: string | null;
+  activeSessionId: string | null;
   socketRef?: MutableRefObject<Socket | null>;
   onConnect?: () => void;
   onDisconnect?: () => void;
@@ -34,12 +38,16 @@ export interface CliSocketController {
   sendCommand: <TName extends CliCommandName>(
     name: TName,
     payload: CliCommandPayloadMap[TName],
-    targetCliId?: string | null
+    targetCliId?: string | null,
+    targetProviderId?: ProviderId | null
   ) => Promise<CliCommandResult<TName>>;
 }
 
 export function useCliSocket({
   activeCliId,
+  activeProviderId,
+  activeConversationKey,
+  activeSessionId,
   socketRef: externalSocketRef,
   onConnect,
   onDisconnect,
@@ -52,6 +60,9 @@ export function useCliSocket({
   const internalSocketRef = useRef<Socket | null>(null);
   const socketRef = externalSocketRef ?? internalSocketRef;
   const activeCliIdRef = useRef<string | null>(activeCliId);
+  const activeProviderIdRef = useRef<ProviderId | null>(activeProviderId);
+  const activeConversationKeyRef = useRef<string | null>(activeConversationKey);
+  const activeSessionIdRef = useRef<string | null>(activeSessionId);
   const onConnectRef = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
   const onSnapshotRef = useRef(onSnapshot);
@@ -64,6 +75,18 @@ export function useCliSocket({
   }, [activeCliId]);
 
   useEffect(() => {
+    activeProviderIdRef.current = activeProviderId ?? null;
+  }, [activeProviderId]);
+
+  useEffect(() => {
+    activeConversationKeyRef.current = activeConversationKey ?? null;
+  }, [activeConversationKey]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activeSessionId ?? null;
+  }, [activeSessionId]);
+
+  useEffect(() => {
     onConnectRef.current = onConnect;
     onDisconnectRef.current = onDisconnect;
     onSnapshotRef.current = onSnapshot;
@@ -72,6 +95,18 @@ export function useCliSocket({
   }, [onConnect, onDisconnect, onMessagesUpsert, onSnapshot, onTerminalChunk]);
 
   useEffect(() => {
+    function emitRuntimeSubscription(socket: Socket | null): void {
+      if (!socket?.connected) {
+        return;
+      }
+      socket.emit('web:runtime-subscribe', {
+        targetCliId: activeCliIdRef.current,
+        targetProviderId: activeProviderIdRef.current,
+        conversationKey: activeConversationKeyRef.current,
+        sessionId: activeSessionIdRef.current
+      } satisfies RuntimeSubscriptionPayload);
+    }
+
     const socket = io(`${getSocketBaseUrl()}/web`, {
       path: '/socket.io/',
       transports: ['polling', 'websocket'],
@@ -83,6 +118,7 @@ export function useCliSocket({
 
     socket.on('connect', () => {
       setSocketConnected(true);
+      emitRuntimeSubscription(socket);
       onConnectRef.current?.();
     });
 
@@ -100,21 +136,21 @@ export function useCliSocket({
     });
 
     socket.on('runtime:snapshot', (payload: RuntimeSnapshotPayload) => {
-      if (payload.cliId !== activeCliIdRef.current) {
+      if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
         return;
       }
       onSnapshotRef.current?.(payload.snapshot);
     });
 
     socket.on('runtime:messages-upsert', (payload: MessagesUpsertPayload) => {
-      if (payload.cliId !== activeCliIdRef.current) {
+      if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
         return;
       }
       onMessagesUpsertRef.current?.(payload);
     });
 
     socket.on('terminal:chunk', (payload: TerminalChunkPayload) => {
-      if (payload.cliId !== activeCliIdRef.current) {
+      if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
         return;
       }
       onTerminalChunkRef.current?.(payload);
@@ -127,11 +163,25 @@ export function useCliSocket({
     };
   }, []);
 
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket?.connected) {
+      return;
+    }
+    socket.emit('web:runtime-subscribe', {
+      targetCliId: activeCliId,
+      targetProviderId: activeProviderId,
+      conversationKey: activeConversationKey,
+      sessionId: activeSessionId
+    } satisfies RuntimeSubscriptionPayload);
+  }, [activeCliId, activeProviderId, activeConversationKey, activeSessionId, socketRef]);
+
   if (!sendCommandRef.current) {
     sendCommandRef.current = async function sendCommand<TName extends CliCommandName>(
       name: TName,
       payload: CliCommandPayloadMap[TName],
-      targetCliId = activeCliIdRef.current
+      targetCliId = activeCliIdRef.current,
+      targetProviderId = activeProviderIdRef.current
     ): Promise<CliCommandResult<TName>> {
       const socket = socketRef.current;
       if (!socket?.connected) {
@@ -144,7 +194,7 @@ export function useCliSocket({
       const result = await new Promise<CliCommandResult<TName>>((resolve) => {
         socket.emit(
           'web:command',
-          { targetCliId, name, payload } satisfies WebCommandEnvelope<TName>,
+          { targetCliId, targetProviderId, name, payload } satisfies WebCommandEnvelope<TName>,
           (ack?: CliCommandResult<TName>) => {
             resolve(ack ?? { ok: false, error: 'No response from server' });
           }

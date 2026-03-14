@@ -29,6 +29,7 @@ export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChang
         void controller.activateConversation(project, providerId, conversation);
       }}
       onAddProject={controller.addProject}
+      onDeleteProject={controller.deleteProject}
       onPickProjectDirectory={controller.pickProjectDirectory}
       onMobileOpenChange={onMobileOpenChange}
       onRefreshAllProjects={() => {

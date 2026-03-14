@@ -133,7 +133,9 @@ async function listSessionFiles(projectFilesPath: string): Promise<SessionFileEn
 }
 
 export async function listProjectSessions(projectRoot: string, maxSessions = DEFAULT_MAX_SESSIONS): Promise<ProjectSessionSummary[]> {
-  const projectFilesPath = resolveClaudeProjectFilesPath(projectRoot, os.homedir());
+  const resolvedProjectRoot = path.resolve(projectRoot);
+  const canonicalProjectRoot = await fs.realpath(resolvedProjectRoot).catch(() => resolvedProjectRoot);
+  const projectFilesPath = resolveClaudeProjectFilesPath(canonicalProjectRoot, os.homedir());
   const normalizedMax = Number.isFinite(maxSessions) ? Math.max(1, Math.min(Math.floor(maxSessions), 50)) : DEFAULT_MAX_SESSIONS;
   const sessionFiles = await listSessionFiles(projectFilesPath);
   const sessions: ProjectSessionSummary[] = [];

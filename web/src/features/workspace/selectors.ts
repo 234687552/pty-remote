@@ -48,7 +48,7 @@ export function selectActiveProject(workspaceState: PersistedWorkspaceState): Pr
 }
 
 export function selectActiveProviderId(workspaceState: PersistedWorkspaceState, activeCli: CliDescriptor | null = null): ProviderId | null {
-  return workspaceState.activeProviderId ?? activeCli?.providerId ?? null;
+  return workspaceState.activeProviderId ?? activeCli?.supportedProviders[0] ?? null;
 }
 
 export function selectActiveCliId(workspaceState: PersistedWorkspaceState): string | null {
@@ -101,7 +101,7 @@ export function selectWorkspaceDerivedState(
     activeProviderId
   );
   const activeConversation = selectActiveConversation(store.workspaceState, activeProjectConversations);
-  const visibleMessages = selectVisibleMessages(store);
+  const visibleMessages = activeProject && activeConversation ? selectVisibleMessages(store) : [];
   const connected = Boolean(socketConnected && activeCli?.connected);
   const busy = isBusyStatus(store.snapshot.status);
 
@@ -139,7 +139,7 @@ export function selectHeaderSummary(store: WorkspaceStore, clis: CliDescriptor[]
     `项目 ${compactPreview(activeProject?.label ?? activeCli?.label ?? 'Workspace', 28)}`,
     `目录 ${compactPreview(activeProject?.cwd ?? activeCli?.cwd ?? '-', 56)}`,
     `会话 ${compactPreview(activeConversation?.title ?? '-', 36)}`,
-    `Session ${compactPreview(activeConversation?.sessionId ?? store.snapshot.sessionId ?? '-', 24)}`
+    `Session ${compactPreview(activeConversation?.sessionId ?? '-', 24)}`
   ];
 }
 
@@ -161,24 +161,24 @@ export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescript
   const conversationBadge: StatusBadge =
     !activeProject || !activeConversation
       ? {
-          label: 'conversation',
+          label: 'status',
           value: 'unselected',
           className: 'bg-zinc-100 text-zinc-600'
         }
       : store.snapshot.status === 'error'
         ? {
-            label: 'conversation',
+            label: 'status',
             value: 'error',
             className: 'bg-red-100 text-red-700'
           }
         : busy
           ? {
-              label: 'conversation',
+              label: 'status',
               value: getRuntimeStatusLabel(store.snapshot.status),
               className: 'bg-zinc-900 text-white'
             }
           : {
-              label: 'conversation',
+              label: 'status',
               value: getRuntimeStatusLabel(store.snapshot.status),
               className: 'bg-white/85 text-zinc-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.5)]'
             };
@@ -202,21 +202,7 @@ export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescript
           className: activeCli?.connected ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'
         };
 
-  const placeholder = !activeProject
-    ? '先从左侧添加并选择一个项目目录。'
-    : !activeProviderId
-      ? '先为当前项目选择一个 provider。'
-      : !connected
-        ? '等待 CLI 连接...'
-        : store.snapshot.status === 'starting'
-          ? `${providerLabel} 正在启动...`
-          : store.snapshot.status === 'running'
-            ? `${providerLabel} 正在运行...`
-            : store.snapshot.status === 'error'
-              ? '上次运行出错，可继续输入或切到别的 conversation。'
-              : activeConversation?.draft
-                ? `这是一个新的 ${providerLabel} conversation，第一条消息会创建新 session。`
-                : '输入消息，继续这个 conversation。';
+  const placeholder = '';
 
   return {
     busy,

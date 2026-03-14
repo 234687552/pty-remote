@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from 'react';
+
 interface StatusBadge {
   className: string;
   label: string;
@@ -68,6 +70,9 @@ const COMPOSER_TOOL_BUTTONS = [
   }
 ] as const;
 
+const COMPOSER_MIN_HEIGHT_PX = 86;
+const COMPOSER_MAX_HEIGHT_PX = 134;
+
 export function Composer({
   busy,
   canSend,
@@ -82,6 +87,38 @@ export function Composer({
   onStop,
   onSubmit
 }: ComposerProps) {
+  const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const [composerHeight, setComposerHeight] = useState(COMPOSER_MIN_HEIGHT_PX);
+  const [promptScrollable, setPromptScrollable] = useState(false);
+
+  useEffect(() => {
+    const textarea = promptRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    const syncPromptHeight = () => {
+      textarea.style.height = `${COMPOSER_MIN_HEIGHT_PX}px`;
+      const nextHeight = Math.min(Math.max(textarea.scrollHeight, COMPOSER_MIN_HEIGHT_PX), COMPOSER_MAX_HEIGHT_PX);
+      textarea.style.height = `${nextHeight}px`;
+      setComposerHeight(nextHeight);
+      setPromptScrollable(textarea.scrollHeight > COMPOSER_MAX_HEIGHT_PX);
+    };
+
+    syncPromptHeight();
+
+    const resizeObserver = new ResizeObserver(() => {
+      syncPromptHeight();
+    });
+    if (textarea.parentElement) {
+      resizeObserver.observe(textarea.parentElement);
+    }
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [prompt]);
+
   return (
     <form
       onSubmit={onSubmit}
@@ -96,8 +133,8 @@ export function Composer({
       </div>
 
       <div className="relative rounded-[1.5rem] border border-zinc-200/80 bg-zinc-100/90 shadow-[0_1px_0_rgba(255,255,255,0.55)_inset] md:bg-white md:shadow-none">
-        <input
-          type="text"
+        <textarea
+          ref={promptRef}
           value={prompt}
           onChange={(event) => onPromptChange(event.target.value)}
           onKeyDown={(event) => {
@@ -108,8 +145,14 @@ export function Composer({
             event.preventDefault();
             event.currentTarget.form?.requestSubmit();
           }}
+          rows={1}
           placeholder={placeholder}
-          className="h-[5.35rem] w-full rounded-[1.5rem] border border-transparent bg-transparent px-6 pt-4 pr-24 pb-10 text-[16px] leading-6 text-zinc-800 outline-none ring-0 placeholder:text-zinc-500 focus:border-zinc-200"
+          className={[
+            'w-full rounded-[1.5rem] border border-transparent bg-transparent px-6 pt-4 pr-24 pb-10 text-[16px] leading-6 text-zinc-800 outline-none ring-0 placeholder:text-zinc-500 focus:border-transparent',
+            'resize-none',
+            promptScrollable ? 'overflow-y-auto' : 'overflow-y-hidden'
+          ].join(' ')}
+          style={{ height: `${composerHeight}px` }}
           disabled={!canSend}
         />
         <div className="pointer-events-none absolute inset-x-0 bottom-1 flex items-center justify-between px-5">
@@ -120,7 +163,6 @@ export function Composer({
                 type="button"
                 className="flex h-6 min-w-6 items-center justify-center text-zinc-500 transition hover:text-zinc-800"
                 aria-label={button.label}
-                title={button.label}
               >
                 {button.icon}
               </button>
@@ -133,7 +175,6 @@ export function Composer({
           className="absolute right-4 bottom-0.5 flex h-16 w-16 scale-[0.62] items-center justify-center rounded-full bg-black text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={busy ? !canStop : !canSend}
           aria-label={busy ? '结束当前运行' : '发送消息'}
-          title={busy ? '结束当前运行' : '发送消息'}
         >
           {busy ? (
             <span className="block h-4.5 w-4.5 rounded-[0.24rem] bg-current" aria-hidden="true" />

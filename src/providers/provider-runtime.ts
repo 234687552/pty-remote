@@ -1,5 +1,6 @@
 import type {
   GetOlderMessagesResultPayload,
+  ProviderRuntimeRegistration,
   ProjectSessionSummary,
   SelectConversationResultPayload,
   TerminalChunkPayload
@@ -23,13 +24,7 @@ export interface ProviderRuntimeCallbacks {
     hasOlderMessages: boolean;
   }): void;
   emitSnapshot(snapshot: RuntimeSnapshot): void;
-  emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId'>): void;
-}
-
-export interface ProviderRuntimeRegistration {
-  cwd: string;
-  sessionId: string | null;
-  conversationKey: string | null;
+  emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId' | 'providerId'>): void;
 }
 
 export interface ProviderRuntime {

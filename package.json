@@ -10,7 +10,7 @@
     "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:socket\" \"npm:dev:cli\"",
     "dev:web": "vite build --watch",
     "dev:socket": "node --watch --disable-warning=ExperimentalWarning src/socket-main.ts",
-    "dev:cli": "PTY_REMOTE_PROVIDER=claude node --watch --disable-warning=ExperimentalWarning src/cli-main.ts",
+    "dev:cli": "node --watch --disable-warning=ExperimentalWarning src/cli-main.ts",
     "dev:cli:claude": "PTY_REMOTE_PROVIDER=claude node --watch --disable-warning=ExperimentalWarning src/cli-main.ts",
     "dev:cli:codex": "PTY_REMOTE_PROVIDER=codex node --watch --disable-warning=ExperimentalWarning src/cli-main.ts",
     "build": "npm run build:web",
@@ -19,7 +19,7 @@
     "threads:json": "node --disable-warning=ExperimentalWarning src/cli-main.ts threads list --json",
     "start": "npm run build:web && concurrently -k \"npm:start:socket\" \"npm:start:cli\"",
     "start:socket": "node --disable-warning=ExperimentalWarning src/socket-main.ts",
-    "start:cli": "PTY_REMOTE_PROVIDER=claude node --disable-warning=ExperimentalWarning src/cli-main.ts",
+    "start:cli": "node --disable-warning=ExperimentalWarning src/cli-main.ts",
     "start:cli:claude": "PTY_REMOTE_PROVIDER=claude node --disable-warning=ExperimentalWarning src/cli-main.ts",
     "start:cli:codex": "PTY_REMOTE_PROVIDER=codex node --disable-warning=ExperimentalWarning src/cli-main.ts",
     "postinstall": "node scripts/ensure-node-pty-helper.js"

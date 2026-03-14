@@ -20,8 +20,10 @@ import {
   appendRecentOutput,
   appendReplayChunk,
   getCodexPtyLifecycle,
+  looksLikeDirectoryTrustPrompt,
   looksReadyForInput,
   resizeCodexPtySession,
+  showsStarterPrompt,
   startCodexPtySession,
   stopCodexPtySession,
   type CodexPtySession
@@ -51,7 +53,7 @@ export interface CodexManagerOptions extends CodexHistoryOptions {
 interface CodexManagerCallbacks {
   emitMessagesUpsert(payload: Omit<MessagesUpsertPayload, 'cliId'>): void;
   emitSnapshot(snapshot: RuntimeSnapshot): void;
-  emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId'>): void;
+  emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId' | 'providerId'>): void;
 }
 
 export interface CodexManagerSelection {
@@ -439,6 +441,7 @@ export class CodexManager {
     }
 
     this.callbacks.emitTerminalChunk({
+      conversationKey: handle.threadKey,
       data: handle.runtime.terminalReplay,
       offset: 0,
       sessionId: handle.sessionId
@@ -615,6 +618,14 @@ export class CodexManager {
     }
 
     return 'idle';
+  }
+
+  private shouldContinueJsonlRefresh(handle: CodexHandle): boolean {
+    if (!this.isActiveHandle(handle) || !handle.pty) {
+      return false;
+    }
+
+    return handle.awaitingJsonlTurn || handle.runtime.status === 'starting' || handle.runtime.status === 'running';
   }
 
   private selectRecentMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -819,12 +830,19 @@ export class CodexManager {
         }
         this.scheduleSnapshotEmit(statusChanged ? 0 : this.options.snapshotEmitDebounceMs);
       }
+
+      if (this.shouldContinueJsonlRefresh(handle)) {
+        this.scheduleJsonlRefresh(Math.max(this.options.jsonlRefreshDebounceMs, 250));
+      }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') {
         handle.jsonlMissingSince ??= Date.now();
         handle.sessionFilePath = null;
         this.ensureJsonlWatcher(handle, null);
+        if (this.shouldContinueJsonlRefresh(handle)) {
+          this.scheduleJsonlRefresh(Math.max(this.options.jsonlRefreshDebounceMs, 250));
+        }
         return;
       }
       this.setLastError(handle, error instanceof Error ? error.message : 'Failed to read Codex jsonl');
@@ -1028,6 +1046,7 @@ export class CodexManager {
     }
 
     this.callbacks.emitTerminalChunk({
+      conversationKey: handle.threadKey,
       data: chunk,
       offset: chunkOffset,
       sessionId: handle.sessionId
@@ -1071,6 +1090,12 @@ export class CodexManager {
         return;
       }
 
+      if (looksLikeDirectoryTrustPrompt(handle.pty.recentOutput)) {
+        handle.pty.pty.write('\r');
+        await sleep(350);
+        continue;
+      }
+
       await sleep(250);
     }
 
@@ -1082,6 +1107,7 @@ export class CodexManager {
       throw new Error('Codex PTY session is not running');
     }
 
+    const shouldForceSubmit = showsStarterPrompt(handle.pty.recentOutput);
     const normalizedContent = content.replace(/\r\n/g, '\n');
     if (normalizedContent.includes('\n')) {
       handle.pty.pty.write('\x1b[200~');
@@ -1093,6 +1119,10 @@ export class CodexManager {
 
     await sleep(this.options.promptSubmitDelayMs);
     handle.pty.pty.write('\r');
+    if (shouldForceSubmit) {
+      await sleep(120);
+      handle.pty.pty.write('\r');
+    }
   }
 
   private getLastActivityAt(handle: CodexHandle): number {

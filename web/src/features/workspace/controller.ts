@@ -31,6 +31,7 @@ import type { WorkspaceStore } from './store.ts';
 export interface WorkspaceController {
   activateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
   addProject: (input: { cwd: string; providerId: ProviderId }) => Promise<void>;
+  deleteProject: (project: ProjectEntry) => Promise<void>;
   loadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
   pickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
   refreshAllProjectConversations: () => Promise<void>;
@@ -50,6 +51,14 @@ interface UseWorkspaceControllerParams {
   terminal: TerminalBridge;
 }
 
+function supportsProvider(cli: CliDescriptor, providerId: ProviderId | null): boolean {
+  return providerId !== null && cli.supportedProviders.includes(providerId);
+}
+
+function getCliRuntimeState(cli: CliDescriptor | null, providerId: ProviderId | null) {
+  return providerId ? cli?.runtimes[providerId] ?? null : null;
+}
+
 function getConnectedCliForProvider(
   clis: CliDescriptor[],
   providerId: ProviderId | null,
@@ -59,7 +68,7 @@ function getConnectedCliForProvider(
     return null;
   }
 
-  const candidates = clis.filter((cli) => cli.connected && cli.providerId === providerId);
+  const candidates = clis.filter((cli) => cli.connected && supportsProvider(cli, providerId));
   if (candidates.length === 0) {
     return null;
   }
@@ -68,7 +77,7 @@ function getConnectedCliForProvider(
 }
 
 function getProviderIds(clis: CliDescriptor[]): ProviderId[] {
-  return [...new Set(clis.filter((cli) => cli.connected).map((cli) => cli.providerId))];
+  return [...new Set(clis.filter((cli) => cli.connected).flatMap((cli) => cli.supportedProviders))];
 }
 
 export function useWorkspaceController({
@@ -159,7 +168,10 @@ export function useWorkspaceController({
 
     store.patchWorkspace((current) => {
       const nextCliId = fallbackCli.cliId;
-      const nextProviderId = current.activeProviderId ?? fallbackCli.providerId;
+      const nextProviderId =
+        current.activeProviderId && supportsProvider(fallbackCli, current.activeProviderId)
+          ? current.activeProviderId
+          : fallbackCli.supportedProviders[0] ?? null;
       if (current.activeCliId === nextCliId && current.activeProviderId === nextProviderId) {
         return current;
       }
@@ -204,7 +216,8 @@ export function useWorkspaceController({
       return;
     }
 
-    const backendMatchesProject = activeCli.cwd === activeProject.cwd;
+    const activeRuntime = getCliRuntimeState(activeCli, activeProviderId);
+    const backendMatchesProject = (activeRuntime?.cwd ?? activeCli.cwd) === activeProject.cwd;
     const canHydrateFromSnapshot =
       backendMatchesProject &&
       store.snapshot.providerId === activeProviderId &&
@@ -261,7 +274,7 @@ export function useWorkspaceController({
     terminal.prepareForResume();
     store.resetRuntimeForCliChange();
 
-    void sendCommand('get-runtime-snapshot', {}, activeCliId)
+      void sendCommand('get-runtime-snapshot', {}, activeCliId, activeProviderId)
       .then(async (result) => {
         const nextSnapshot = (result.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
         store.setSnapshot(nextSnapshot);
@@ -271,7 +284,7 @@ export function useWorkspaceController({
         terminal.clearTerminal();
         store.setError(runtimeError instanceof Error ? runtimeError.message : '加载 CLI 运行态失败');
       });
-  }, [activeCliConnected, activeCliId, sendCommand, socketConnected, terminal]);
+  }, [activeCliConnected, activeCliId, activeProviderId, sendCommand, socketConnected, terminal]);
 
   useEffect(() => {
     if (!socketConnected || store.workspaceState.sidebarCollapsed || store.projectsRefreshing) {
@@ -337,10 +350,11 @@ export function useWorkspaceController({
 
     const conversationKey = activeConversation.conversationKey;
     const requestKey = `${activeCli.cliId}:${activeProviderId}:${conversationKey}:${activeConversation.sessionId ?? 'draft'}`;
-    const backendMatchesProject = activeCli.cwd === activeProject.cwd;
+    const activeRuntime = getCliRuntimeState(activeCli, activeProviderId);
+    const backendMatchesProject = (activeRuntime?.cwd ?? activeCli.cwd) === activeProject.cwd;
     const backendMatchesConversation =
-      (store.snapshot.conversationKey ?? activeCli.conversationKey ?? null) === conversationKey &&
-      (store.snapshot.providerId ?? activeCli.providerId) === activeProviderId;
+      (store.snapshot.conversationKey ?? activeRuntime?.conversationKey ?? null) === conversationKey &&
+      (store.snapshot.providerId ?? activeProviderId) === activeProviderId;
     const activationState = conversationActivationRef.current;
 
     if (backendMatchesProject && backendMatchesConversation) {
@@ -375,7 +389,7 @@ export function useWorkspaceController({
 
     const request = (async () => {
       try {
-        const result = await sendCommand('list-project-conversations', { cwd: project.cwd, maxSessions: 5 }, cliId);
+        const result = await sendCommand('list-project-conversations', { cwd: project.cwd, maxSessions: 5 }, cliId, providerId);
         const payload = result.payload as ListProjectSessionsResultPayload | undefined;
         const normalizedPayload = payload ?? {
           providerId,
@@ -515,7 +529,8 @@ export function useWorkspaceController({
           sessionId: conversation.sessionId,
           clientRequestId: requestToken
         },
-        targetCli.cliId
+        targetCli.cliId,
+        providerId
       );
       const selectPayload = result.payload as SelectConversationResultPayload | undefined;
       const acknowledgedRequestToken = selectPayload?.clientRequestId ?? null;
@@ -573,7 +588,7 @@ export function useWorkspaceController({
             ...current,
             activeCliId: targetCli.cliId,
             activeProjectId: existingProject.id,
-            activeProviderId: targetCli.providerId
+            activeProviderId: selectedProviderId
           };
         }
 
@@ -581,36 +596,82 @@ export function useWorkspaceController({
           ...current,
           activeCliId: targetCli.cliId,
           activeProjectId: selectedProject.id,
-          activeProviderId: targetCli.providerId,
+          activeProviderId: selectedProviderId,
           activeConversationId: null,
           projects: sortProjects([...current.projects, selectedProject])
         };
       });
 
-      const history = await refreshProjectConversations(selectedProject, targetCli.providerId, targetCli.cliId);
-      const storageKey = getProjectProviderKey(selectedProject.id, targetCli.providerId);
+      const history = await refreshProjectConversations(selectedProject, selectedProviderId, targetCli.cliId);
+      const storageKey = getProjectProviderKey(selectedProject.id, selectedProviderId);
       const existingConversations = store.projectConversationsByKey[storageKey] ?? [];
       const mergedConversations = mergeProjectConversations(
         existingConversations,
         history.sessions,
-        targetCli.providerId
+        selectedProviderId
       );
       const resolvedConversations =
-        mergedConversations.length > 0 ? mergedConversations : [createDraftConversation(targetCli.providerId)];
+        mergedConversations.length > 0 ? mergedConversations : [createDraftConversation(selectedProviderId)];
       const nextConversation =
         resolvedConversations.find((conversation) => conversation.sessionId === history.sessions[0]?.sessionId) ??
         resolvedConversations[0] ??
         null;
 
-      store.setProjectConversations(selectedProject.id, targetCli.providerId, () => resolvedConversations);
+      store.setProjectConversations(selectedProject.id, selectedProviderId, () => resolvedConversations);
 
       if (nextConversation) {
-        await activateConversation(selectedProject, targetCli.providerId, nextConversation);
+        await activateConversation(selectedProject, selectedProviderId, nextConversation);
       }
     } catch (addProjectError) {
       const message = addProjectError instanceof Error ? addProjectError.message : '添加项目失败';
       store.setError(message);
       throw addProjectError instanceof Error ? addProjectError : new Error(message);
+    }
+  }
+
+  async function deleteProject(project: ProjectEntry): Promise<void> {
+    const deletingActiveProject = store.workspaceState.activeProjectId === project.id;
+    const providerIds = new Set<ProviderId>(connectedProviderIds);
+
+    for (const storageKey of Object.keys(store.projectConversationsByKey)) {
+      if (!storageKey.startsWith(`${project.id}:`)) {
+        continue;
+      }
+      providerIds.add(storageKey.split(':')[1] as ProviderId);
+    }
+
+    for (const storageKey of [...projectRefreshInFlightRef.current.keys()]) {
+      if (storageKey.startsWith(`${project.id}:`)) {
+        projectRefreshInFlightRef.current.delete(storageKey);
+      }
+    }
+
+    for (const providerId of providerIds) {
+      store.setProjectConversations(project.id, providerId, () => []);
+    }
+
+    store.patchWorkspace((current) => {
+      const nextProjects = sortProjects(current.projects.filter((entry) => entry.id !== project.id));
+      if (current.activeProjectId !== project.id) {
+        return {
+          ...current,
+          projects: nextProjects
+        };
+      }
+
+      const fallbackProject = nextProjects[0] ?? null;
+      return {
+        ...current,
+        projects: nextProjects,
+        activeProjectId: fallbackProject?.id ?? null,
+        activeProviderId: fallbackProject ? current.activeProviderId : null,
+        activeConversationId: null
+      };
+    });
+
+    if (deletingActiveProject) {
+      store.resetRuntimeForCliChange();
+      terminal.clearTerminal();
     }
   }
 
@@ -620,7 +681,7 @@ export function useWorkspaceController({
       throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
     }
 
-    const result = await sendCommand('pick-project-directory', {}, targetCli.cliId);
+    const result = await sendCommand('pick-project-directory', {}, targetCli.cliId, providerId);
     const payload = result.payload as PickProjectDirectoryResultPayload | undefined;
     return payload?.cwd?.trim() || null;
   }
@@ -630,8 +691,14 @@ export function useWorkspaceController({
     store.patchWorkspace((current) => ({
       ...current,
       activeCliId: nextCliId,
-      activeProviderId: nextCli?.providerId ?? current.activeProviderId,
-      activeConversationId: nextCli && nextCli.providerId !== current.activeProviderId ? null : current.activeConversationId
+      activeProviderId:
+        nextCli && current.activeProviderId && supportsProvider(nextCli, current.activeProviderId)
+          ? current.activeProviderId
+          : nextCli?.supportedProviders[0] ?? current.activeProviderId,
+      activeConversationId:
+        nextCli && current.activeProviderId && !supportsProvider(nextCli, current.activeProviderId)
+          ? null
+          : current.activeConversationId
     }));
   }
 
@@ -676,7 +743,7 @@ export function useWorkspaceController({
 
     try {
       store.setError('');
-      await sendCommand('send-message', { content });
+      await sendCommand('send-message', { content }, undefined, activeProviderId);
       store.setPrompt('');
       store.setMobilePane('chat');
     } catch (submitError) {
@@ -687,7 +754,7 @@ export function useWorkspaceController({
   async function stopMessage(): Promise<void> {
     try {
       store.setError('');
-      await sendCommand('stop-message', {});
+      await sendCommand('stop-message', {}, undefined, activeProviderId);
     } catch (stopError) {
       store.setError(stopError instanceof Error ? stopError.message : '结束失败');
     }
@@ -701,7 +768,7 @@ export function useWorkspaceController({
       const result = await sendCommand('get-older-messages', {
         beforeMessageId,
         maxMessages: 40
-      });
+      }, undefined, activeProviderId);
       const payload = result.payload as GetOlderMessagesResultPayload | undefined;
 
       if (
@@ -724,6 +791,7 @@ export function useWorkspaceController({
   return {
     activateConversation,
     addProject,
+    deleteProject,
     loadOlderMessages,
     pickProjectDirectory,
     refreshAllProjectConversations,

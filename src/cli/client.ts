@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, promises as fs, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -10,6 +10,7 @@ import { io, type Socket } from 'socket.io-client';
 import type {
   CliCommandEnvelope,
   CliCommandResult,
+  CliRegisterPayload,
   CliRegisterResult,
   GetRuntimeSnapshotResultPayload,
   ListProjectSessionsResultPayload,
@@ -27,10 +28,11 @@ const __dirname = path.dirname(__filename);
 const DEFAULT_ROOT_DIR = path.resolve(__dirname, '../..');
 const CONFIG_DIR = path.join(os.homedir(), '.pty-remote');
 const CLI_ID_FILE = path.join(CONFIG_DIR, 'cli-id');
+const ALL_PROVIDERS: ProviderId[] = ['claude', 'codex'];
 
 const SOCKET_URL = process.env.SOCKET_URL ?? `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? '3001'}`;
 const execFileAsync = promisify(execFile);
-const PROVIDER_ID = resolveProviderId(process.env.PTY_REMOTE_PROVIDER);
+const SUPPORTED_PROVIDERS = resolveSupportedProviders(process.env.PTY_REMOTE_PROVIDERS ?? process.env.PTY_REMOTE_PROVIDER);
 const CLI_ID = resolveCliId();
 const CLI_LABEL = resolveCliLabel();
 const PTY_BACKEND_NAME = 'node-pty';
@@ -99,41 +101,16 @@ const codexRuntimeOptions: CodexProviderRuntimeOptions = {
   sessionsRootPath: process.env.CODEX_SESSIONS_ROOT_PATH?.trim() || undefined
 };
 
-function createRuntime(): ProviderRuntime {
-  if (PROVIDER_ID === 'codex') {
-    return createCodexProviderRuntime(codexRuntimeOptions, {
-      emitMessagesUpsert(payload) {
-        if (!socketClient?.connected) {
-          return;
-        }
-        socketClient.emit('cli:messages-upsert', {
-          ...payload,
-          cliId: CLI_ID
-        });
-      },
-      emitSnapshot(snapshot) {
-        if (!socketClient?.connected) {
-          return;
-        }
-        socketClient.emit('cli:snapshot', {
-          cliId: CLI_ID,
-          snapshot
-        } satisfies RuntimeSnapshotPayload);
-      },
-      emitTerminalChunk(payload) {
-        if (!socketClient?.connected) {
-          return;
-        }
-        socketClient.emit('cli:terminal-chunk', {
-          ...payload,
-          cliId: CLI_ID
-        });
-      }
-    });
-  }
-
-  return createClaudeProviderRuntime(runtimeOptions, {
-    emitMessagesUpsert(payload) {
+function createRuntime(providerId: ProviderId): ProviderRuntime {
+  const callbacks = {
+    emitMessagesUpsert(payload: {
+      providerId: ProviderId | null;
+      conversationKey: string | null;
+      sessionId: string | null;
+      upserts: ReturnType<ProviderRuntime['getSnapshot']>['messages'];
+      recentMessageIds: string[];
+      hasOlderMessages: boolean;
+    }) {
       if (!socketClient?.connected) {
         return;
       }
@@ -142,28 +119,38 @@ function createRuntime(): ProviderRuntime {
         cliId: CLI_ID
       });
     },
-    emitSnapshot(snapshot) {
+    emitSnapshot(snapshot: ReturnType<ProviderRuntime['getSnapshot']>) {
       if (!socketClient?.connected) {
         return;
       }
       socketClient.emit('cli:snapshot', {
         cliId: CLI_ID,
+        providerId,
         snapshot
       } satisfies RuntimeSnapshotPayload);
     },
-    emitTerminalChunk(payload) {
+    emitTerminalChunk(payload: { conversationKey: string | null; data: string; offset: number; sessionId: string | null }) {
       if (!socketClient?.connected) {
         return;
       }
       socketClient.emit('cli:terminal-chunk', {
         ...payload,
-        cliId: CLI_ID
+        cliId: CLI_ID,
+        providerId
       });
     }
-  });
+  };
+
+  if (providerId === 'codex') {
+    return createCodexProviderRuntime(codexRuntimeOptions, callbacks);
+  }
+
+  return createClaudeProviderRuntime(runtimeOptions, callbacks);
 }
 
-const runtime: ProviderRuntime = createRuntime();
+const runtimes = Object.fromEntries(
+  SUPPORTED_PROVIDERS.map((providerId) => [providerId, createRuntime(providerId)])
+) as Record<ProviderId, ProviderRuntime>;
 
 function sanitizeIdentifier(value: string): string {
   return value.trim().replace(/[^a-zA-Z0-9._-]+/g, '-');
@@ -207,11 +194,16 @@ function resolveCliLabel(): string {
     }
   }
 
-  return os.hostname() || path.basename(DEFAULT_ROOT_DIR) || `${PROVIDER_ID}-cli`;
+  return os.hostname() || path.basename(DEFAULT_ROOT_DIR) || 'pty-remote-cli';
 }
 
 function execFileSyncSafe(command: string, args: string[]): string {
   return `${execFileSync(command, args, { encoding: 'utf8' })}`.trim();
+}
+
+async function resolveProjectCwd(rawCwd: string): Promise<string> {
+  const resolvedCwd = path.resolve(rawCwd);
+  return fs.realpath(resolvedCwd).catch(() => resolvedCwd);
 }
 
 function sanitizePermissionMode(value: string | undefined): string {
@@ -222,32 +214,50 @@ function sanitizePermissionMode(value: string | undefined): string {
   return 'bypassPermissions';
 }
 
-function resolveProviderId(value: string | undefined): ProviderId {
-  const normalized = value?.trim().toLowerCase();
-  if (normalized === 'codex') {
-    return 'codex';
+function resolveSupportedProviders(value: string | undefined): ProviderId[] {
+  const normalizedProviders = (value ?? '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean);
+  const providers = ALL_PROVIDERS.filter((providerId) => normalizedProviders.includes(providerId));
+  return providers.length > 0 ? providers : [...ALL_PROVIDERS];
+}
+
+function getRuntime(providerId: ProviderId): ProviderRuntime {
+  const runtime = runtimes[providerId];
+  if (!runtime) {
+    throw new Error(`Provider ${providerId} is not enabled on this CLI`);
   }
-  return 'claude';
+  return runtime;
+}
+
+function requireTargetProviderId(envelope: CliCommandEnvelope): ProviderId {
+  const providerId = envelope.targetProviderId ?? null;
+  if (!providerId) {
+    throw new Error('Provider is not selected');
+  }
+  return providerId;
 }
 
 async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCommandResult> {
   try {
     if (envelope.name === 'send-message') {
-      await runtime.dispatchMessage((envelope.payload as { content: string }).content);
+      await getRuntime(requireTargetProviderId(envelope)).dispatchMessage((envelope.payload as { content: string }).content);
       return { ok: true, payload: null };
     }
 
     if (envelope.name === 'stop-message') {
-      await runtime.stopActiveRun();
+      await getRuntime(requireTargetProviderId(envelope)).stopActiveRun();
       return { ok: true, payload: null };
     }
 
     if (envelope.name === 'reset-session') {
-      await runtime.resetActiveConversation();
+      await getRuntime(requireTargetProviderId(envelope)).resetActiveConversation();
       return { ok: true, payload: null };
     }
 
     if (envelope.name === 'get-runtime-snapshot') {
+      const runtime = getRuntime(requireTargetProviderId(envelope));
       await runtime.replayActiveState();
       return {
         ok: true,
@@ -259,6 +269,7 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
 
     if (envelope.name === 'get-older-messages') {
       const payload = envelope.payload as { beforeMessageId?: string; maxMessages?: number };
+      const runtime = getRuntime(requireTargetProviderId(envelope));
       return {
         ok: true,
         payload: await runtime.getOlderMessages(payload.beforeMessageId, payload.maxMessages)
@@ -273,6 +284,7 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
         conversationKey: string;
         clientRequestId?: string | null;
       };
+      const runtime = getRuntime(requireTargetProviderId(envelope));
       return {
         ok: true,
         payload: {
@@ -289,13 +301,15 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
 
     if (envelope.name === 'list-project-conversations') {
       const payload = envelope.payload as { cwd: string; maxSessions?: number };
+      const runtime = getRuntime(requireTargetProviderId(envelope));
+      const cwd = await resolveProjectCwd(payload.cwd);
       return {
         ok: true,
         payload: {
           providerId: runtime.providerId,
-          cwd: payload.cwd,
-          label: path.basename(payload.cwd) || payload.cwd,
-          sessions: await runtime.listProjectConversations(payload.cwd, payload.maxSessions)
+          cwd,
+          label: path.basename(cwd) || cwd,
+          sessions: await runtime.listProjectConversations(cwd, payload.maxSessions)
         } satisfies ListProjectSessionsResultPayload
       };
     }
@@ -333,7 +347,7 @@ async function pickProjectDirectory(): Promise<PickProjectDirectoryResultPayload
       throw error;
     }
 
-    const cwd = stdout.trim().replace(/\/+$/, '') || '/';
+    const cwd = await resolveProjectCwd(stdout.trim().replace(/\/+$/, '') || '/');
     return {
       cwd,
       label: path.basename(cwd) || cwd
@@ -355,18 +369,20 @@ function connectSocketClient(): void {
   socketClient = socket;
 
   socket.on('connect', () => {
-    const registration = runtime.getRegistrationPayload();
+    const registrations = Object.fromEntries(
+      SUPPORTED_PROVIDERS.map((providerId) => [providerId, getRuntime(providerId).getRegistrationPayload()])
+    ) as CliRegisterPayload['runtimes'];
+    const primaryRegistration = registrations[SUPPORTED_PROVIDERS[0]];
     socket.emit(
       'cli:register',
       {
         cliId: CLI_ID,
-        providerId: PROVIDER_ID,
         label: CLI_LABEL,
-        cwd: registration.cwd,
-        conversationKey: registration.conversationKey,
-        sessionId: registration.sessionId,
+        cwd: primaryRegistration?.cwd ?? DEFAULT_ROOT_DIR,
+        supportedProviders: SUPPORTED_PROVIDERS,
+        runtimes: registrations,
         runtimeBackend: PTY_BACKEND_NAME
-      },
+      } satisfies CliRegisterPayload,
       (result: CliRegisterResult) => {
         if (!result.ok) {
           const message = result.error || `CLI ${CLI_ID} registration was rejected`;
@@ -376,7 +392,7 @@ function connectSocketClient(): void {
         }
 
         console.log(`cli registered as ${result.cliId}`);
-        void runtime.replayActiveState();
+        void Promise.all(SUPPORTED_PROVIDERS.map((providerId) => getRuntime(providerId).replayActiveState()));
       }
     );
   });
@@ -385,8 +401,12 @@ function connectSocketClient(): void {
     callback?.(await handleSocketCommand(envelope));
   });
 
-  socket.on('cli:terminal-resize', (payload: { cols: number; rows: number }) => {
-    runtime.updateTerminalSize(payload.cols, payload.rows);
+  socket.on('cli:terminal-resize', (payload: { cols: number; rows: number; targetProviderId?: ProviderId | null }) => {
+    const providerId = payload.targetProviderId ?? null;
+    if (!providerId) {
+      return;
+    }
+    getRuntime(providerId).updateTerminalSize(payload.cols, payload.rows);
   });
 
   socket.on('disconnect', (reason) => {
@@ -409,7 +429,7 @@ async function shutdownCliClient(reason: string, exitCode = 0): Promise<void> {
   shuttingDown = true;
   shutdownPromise = (async () => {
     console.log(`shutting down cli client (${reason})`);
-    await runtime.shutdown();
+    await Promise.all(SUPPORTED_PROVIDERS.map((providerId) => getRuntime(providerId).shutdown()));
     socketClient?.removeAllListeners();
     socketClient?.disconnect();
     socketClient = null;

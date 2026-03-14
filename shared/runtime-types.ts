@@ -52,16 +52,21 @@ export interface RuntimeSnapshot {
   lastError: string | null;
 }
 
-export interface CliDescriptor {
-  cliId: string;
-  providerId: ProviderId;
-  label: string;
+export interface CliProviderRuntimeDescriptor {
   cwd: string;
   conversationKey: string | null;
-  runtimeBackend: string;
-  connected: boolean;
   status: RuntimeStatus;
   sessionId: string | null;
+}
+
+export interface CliDescriptor {
+  cliId: string;
+  label: string;
+  cwd: string;
+  supportedProviders: ProviderId[];
+  runtimes: Partial<Record<ProviderId, CliProviderRuntimeDescriptor>>;
+  runtimeBackend: string;
+  connected: boolean;
   connectedAt: string | null;
   lastSeenAt: string | null;
 }

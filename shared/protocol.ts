@@ -2,12 +2,17 @@ import type { ChatMessage, CliDescriptor, ProviderId, RuntimeSnapshot } from './
 
 export interface CliRegisterPayload {
   cliId?: string;
-  providerId: ProviderId;
   label?: string;
   cwd: string;
-  conversationKey?: string | null;
-  sessionId?: string | null;
+  supportedProviders: ProviderId[];
+  runtimes: Partial<Record<ProviderId, ProviderRuntimeRegistration>>;
   runtimeBackend: string;
+}
+
+export interface ProviderRuntimeRegistration {
+  cwd: string;
+  sessionId: string | null;
+  conversationKey: string | null;
 }
 
 export interface CliRegisterResult {
@@ -103,6 +108,7 @@ export interface CliCommandResultPayloadMap {
 
 export interface CliCommandEnvelope<TName extends CliCommandName = CliCommandName> {
   requestId: string;
+  targetProviderId?: ProviderId | null;
   name: TName;
   payload: CliCommandPayloadMap[TName];
 }
@@ -115,24 +121,36 @@ export interface CliCommandResult<TName extends CliCommandName = CliCommandName>
 
 export interface TerminalChunkPayload {
   cliId: string;
+  providerId: ProviderId;
+  conversationKey: string | null;
   data: string;
   offset: number;
   sessionId: string | null;
 }
 
+export interface RuntimeSubscriptionPayload {
+  targetCliId: string | null;
+  targetProviderId: ProviderId | null;
+  conversationKey: string | null;
+  sessionId: string | null;
+}
+
 export interface TerminalResumeRequestPayload {
   targetCliId: string | null;
+  targetProviderId: ProviderId | null;
   lastOffset: number;
   sessionId: string | null;
 }
 
 export interface TerminalResizePayload {
   targetCliId: string | null;
+  targetProviderId: ProviderId | null;
   cols: number;
   rows: number;
 }
 
 export interface TerminalResumeResultPayload {
+  providerId: ProviderId | null;
   data: string;
   mode: 'delta' | 'reset';
   offset: number;
@@ -141,6 +159,7 @@ export interface TerminalResumeResultPayload {
 
 export interface RuntimeSnapshotPayload {
   cliId: string;
+  providerId: ProviderId;
   snapshot: RuntimeSnapshot;
 }
 
@@ -164,6 +183,7 @@ export interface CliStatusPayload {
 
 export interface WebCommandEnvelope<TName extends CliCommandName = CliCommandName> {
   targetCliId: string | null;
+  targetProviderId?: ProviderId | null;
   name: TName;
   payload: CliCommandPayloadMap[TName];
 }

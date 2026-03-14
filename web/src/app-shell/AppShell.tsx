@@ -89,7 +89,7 @@ export function AppShell({ chat, composer, mobilePane, renderHeader, sidebar, te
               className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-0 md:gap-4 md:pr-1"
             >
               {renderHeader({ mobileTitleVisible })}
-              <section className="min-h-0 flex flex-1 flex-col gap-0 lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)] lg:gap-4">
+              <section className="min-h-0 flex flex-1 flex-col gap-0 lg:grid lg:grid-cols-2 lg:gap-4">
                 {chat}
                 {terminal}
               </section>

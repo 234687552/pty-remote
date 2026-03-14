@@ -12,6 +12,7 @@ import type {
   CliRegisterResult,
   CliStatusPayload,
   MessagesUpsertPayload,
+  RuntimeSubscriptionPayload,
   RuntimeSnapshotPayload,
   TerminalChunkPayload,
   TerminalResizePayload,
@@ -20,7 +21,7 @@ import type {
   WebCommandEnvelope,
   WebInitPayload
 } from '../../shared/protocol.ts';
-import type { CliDescriptor, RuntimeSnapshot } from '../../shared/runtime-types.ts';
+import type { CliDescriptor, CliProviderRuntimeDescriptor, ProviderId, RuntimeSnapshot, RuntimeStatus } from '../../shared/runtime-types.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,16 +42,21 @@ const MIME_TYPES: Record<string, string> = {
   '.json': 'application/json; charset=utf-8'
 };
 
-interface CliRuntimeRecord {
-  socket: Socket;
-  descriptor: CliDescriptor;
+interface CliProviderRuntimeRecord {
   snapshot: RuntimeSnapshot | null;
   terminalReplay: Buffer;
   terminalReplayOffset: number;
   terminalReplaySessionId: string | null;
 }
 
+interface CliRuntimeRecord {
+  socket: Socket;
+  descriptor: CliDescriptor;
+  runtimes: Partial<Record<ProviderId, CliProviderRuntimeRecord>>;
+}
+
 const cliRecords = new Map<string, CliRuntimeRecord>();
+const webRuntimeSubscriptions = new Map<string, RuntimeSubscriptionPayload>();
 
 let httpServer: http.Server | null = null;
 
@@ -110,18 +116,49 @@ function resolvePublicAssetPath(urlPathname: string): string | null {
   return resolvedPath;
 }
 
+function normalizeSupportedProviders(payload: CliRegisterPayload): ProviderId[] {
+  return [...new Set(payload.supportedProviders)].sort();
+}
+
+function createProviderRuntimeDescriptor(
+  payload: CliRegisterPayload,
+  providerId: ProviderId
+): CliProviderRuntimeDescriptor {
+  const registration = payload.runtimes[providerId];
+  return {
+    cwd: registration?.cwd ?? payload.cwd,
+    conversationKey: registration?.conversationKey ?? null,
+    status: 'idle',
+    sessionId: registration?.sessionId ?? null
+  };
+}
+
+function createProviderRuntimeRecord(
+  payload: CliRegisterPayload,
+  providerId: ProviderId,
+  previous?: CliProviderRuntimeRecord | null
+): CliProviderRuntimeRecord {
+  return {
+    snapshot: previous?.snapshot ?? null,
+    terminalReplay: previous?.terminalReplay ?? Buffer.alloc(0),
+    terminalReplayOffset: previous?.terminalReplayOffset ?? 0,
+    terminalReplaySessionId: previous?.terminalReplaySessionId ?? null
+  };
+}
+
 function createCliDescriptor(cliId: string, payload: CliRegisterPayload): CliDescriptor {
   const now = new Date().toISOString();
+  const supportedProviders = normalizeSupportedProviders(payload);
   return {
     cliId,
-    providerId: payload.providerId,
     label: payload.label?.trim() || path.basename(payload.cwd) || cliId,
     cwd: payload.cwd,
-    conversationKey: payload.conversationKey ?? null,
+    supportedProviders,
+    runtimes: Object.fromEntries(
+      supportedProviders.map((providerId) => [providerId, createProviderRuntimeDescriptor(payload, providerId)])
+    ),
     runtimeBackend: payload.runtimeBackend,
     connected: true,
-    status: 'idle',
-    sessionId: payload.sessionId ?? null,
     connectedAt: now,
     lastSeenAt: now
   };
@@ -133,27 +170,38 @@ function listCliDescriptors(): CliDescriptor[] {
     .sort((left, right) => left.label.localeCompare(right.label) || left.cliId.localeCompare(right.cliId));
 }
 
-function updateDescriptorFromSnapshot(record: CliRuntimeRecord): void {
-  if (!record.snapshot) {
+function getProviderRecord(record: CliRuntimeRecord, providerId: ProviderId): CliProviderRuntimeRecord | null {
+  return record.runtimes[providerId] ?? null;
+}
+
+function updateDescriptorFromSnapshot(record: CliRuntimeRecord, providerId: ProviderId): void {
+  const providerRecord = getProviderRecord(record, providerId);
+  if (!providerRecord?.snapshot) {
     return;
   }
 
   record.descriptor = {
     ...record.descriptor,
-    conversationKey: record.snapshot.conversationKey,
-    status: record.snapshot.status,
-    sessionId: record.snapshot.sessionId,
+    runtimes: {
+      ...record.descriptor.runtimes,
+      [providerId]: {
+        cwd: record.descriptor.runtimes[providerId]?.cwd ?? record.descriptor.cwd,
+        conversationKey: providerRecord.snapshot.conversationKey,
+        status: providerRecord.snapshot.status,
+        sessionId: providerRecord.snapshot.sessionId
+      }
+    },
     lastSeenAt: new Date().toISOString()
   };
 }
 
-function clearTerminalReplay(record: CliRuntimeRecord, sessionId: string | null): void {
+function clearTerminalReplay(record: CliProviderRuntimeRecord, sessionId: string | null): void {
   record.terminalReplay = Buffer.alloc(0);
   record.terminalReplayOffset = 0;
   record.terminalReplaySessionId = sessionId;
 }
 
-function setTerminalReplay(record: CliRuntimeRecord, offset: number, data: Buffer): void {
+function setTerminalReplay(record: CliProviderRuntimeRecord, offset: number, data: Buffer): void {
   if (data.length <= TERMINAL_REPLAY_MAX_BYTES) {
     record.terminalReplay = data;
     record.terminalReplayOffset = offset;
@@ -165,14 +213,14 @@ function setTerminalReplay(record: CliRuntimeRecord, offset: number, data: Buffe
   record.terminalReplayOffset = offset + start;
 }
 
-function syncTerminalReplaySession(record: CliRuntimeRecord, sessionId: string | null): void {
+function syncTerminalReplaySession(record: CliProviderRuntimeRecord, sessionId: string | null): void {
   if (record.terminalReplaySessionId === sessionId) {
     return;
   }
   clearTerminalReplay(record, sessionId);
 }
 
-function appendTerminalReplay(record: CliRuntimeRecord, chunkOffset: number, chunk: string): void {
+function appendTerminalReplay(record: CliProviderRuntimeRecord, chunkOffset: number, chunk: string): void {
   const chunkBytes = Buffer.from(chunk, 'utf8');
   const replayEndOffset = getTerminalReplayEndOffset(record);
 
@@ -195,11 +243,11 @@ function appendTerminalReplay(record: CliRuntimeRecord, chunkOffset: number, chu
   setTerminalReplay(record, record.terminalReplayOffset, Buffer.concat([record.terminalReplay, chunkBytes]));
 }
 
-function getTerminalReplayEndOffset(record: CliRuntimeRecord): number {
+function getTerminalReplayEndOffset(record: CliProviderRuntimeRecord): number {
   return record.terminalReplayOffset + record.terminalReplay.length;
 }
 
-function getTerminalSessionId(record: CliRuntimeRecord | null): string | null {
+function getTerminalSessionId(record: CliProviderRuntimeRecord | null): string | null {
   return record?.terminalReplaySessionId ?? record?.snapshot?.sessionId ?? null;
 }
 
@@ -221,11 +269,186 @@ function getConnectedCliRecord(cliId: string | null | undefined): CliRuntimeReco
   return record;
 }
 
-function createTerminalResumeResult(payload: TerminalResumeRequestPayload): TerminalResumeResultPayload {
+function isProviderId(value: unknown): value is ProviderId {
+  return value === 'claude' || value === 'codex';
+}
+
+function normalizeRuntimeSubscription(payload?: Partial<RuntimeSubscriptionPayload> | null): RuntimeSubscriptionPayload {
+  const targetCliId =
+    typeof payload?.targetCliId === 'string' && payload.targetCliId.trim().length > 0 ? payload.targetCliId.trim() : null;
+  const targetProviderId = isProviderId(payload?.targetProviderId) ? payload.targetProviderId : null;
+  const conversationKey =
+    typeof payload?.conversationKey === 'string' && payload.conversationKey.trim().length > 0 ? payload.conversationKey.trim() : null;
+  const sessionId =
+    typeof payload?.sessionId === 'string' && payload.sessionId.trim().length > 0 ? payload.sessionId.trim() : null;
+  return {
+    targetCliId,
+    targetProviderId,
+    conversationKey,
+    sessionId
+  };
+}
+
+function hasRuntimeSubscriptionTarget(subscription: RuntimeSubscriptionPayload): boolean {
+  return subscription.targetCliId !== null && subscription.targetProviderId !== null;
+}
+
+function hasRuntimeSubscriptionConversation(subscription: RuntimeSubscriptionPayload): boolean {
+  return subscription.conversationKey !== null || subscription.sessionId !== null;
+}
+
+function matchesRuntimeSnapshotSubscription(subscription: RuntimeSubscriptionPayload, payload: RuntimeSnapshotPayload): boolean {
+  if (!hasRuntimeSubscriptionTarget(subscription)) {
+    return false;
+  }
+  if (!hasRuntimeSubscriptionConversation(subscription)) {
+    return false;
+  }
+  if (payload.cliId !== subscription.targetCliId || payload.providerId !== subscription.targetProviderId) {
+    return false;
+  }
+  if (subscription.conversationKey !== null && payload.snapshot.conversationKey !== subscription.conversationKey) {
+    return false;
+  }
+  if (subscription.sessionId !== null && payload.snapshot.sessionId !== subscription.sessionId) {
+    return false;
+  }
+  return true;
+}
+
+function matchesMessagesUpsertSubscription(subscription: RuntimeSubscriptionPayload, payload: MessagesUpsertPayload): boolean {
+  if (!hasRuntimeSubscriptionTarget(subscription)) {
+    return false;
+  }
+  if (!hasRuntimeSubscriptionConversation(subscription)) {
+    return false;
+  }
+  if (payload.cliId !== subscription.targetCliId || payload.providerId !== subscription.targetProviderId) {
+    return false;
+  }
+  if (subscription.conversationKey !== null && payload.conversationKey !== subscription.conversationKey) {
+    return false;
+  }
+  if (subscription.sessionId !== null && payload.sessionId !== subscription.sessionId) {
+    return false;
+  }
+  return true;
+}
+
+function matchesTerminalChunkSubscription(subscription: RuntimeSubscriptionPayload, payload: TerminalChunkPayload): boolean {
+  if (!hasRuntimeSubscriptionTarget(subscription)) {
+    return false;
+  }
+  if (!hasRuntimeSubscriptionConversation(subscription)) {
+    return false;
+  }
+  if (payload.cliId !== subscription.targetCliId || payload.providerId !== subscription.targetProviderId) {
+    return false;
+  }
+  if (subscription.conversationKey !== null && payload.conversationKey !== subscription.conversationKey) {
+    return false;
+  }
+  if (subscription.sessionId !== null && payload.sessionId !== subscription.sessionId) {
+    return false;
+  }
+  return true;
+}
+
+function matchesProviderRuntimeSubscription(
+  subscription: RuntimeSubscriptionPayload,
+  cliId: string,
+  providerId: ProviderId,
+  providerRecord: CliProviderRuntimeRecord
+): boolean {
+  if (!hasRuntimeSubscriptionTarget(subscription)) {
+    return false;
+  }
+  if (!hasRuntimeSubscriptionConversation(subscription)) {
+    return false;
+  }
+  if (subscription.targetCliId !== cliId || subscription.targetProviderId !== providerId) {
+    return false;
+  }
+
+  const snapshotConversationKey = providerRecord.snapshot?.conversationKey ?? null;
+  const terminalSessionId = getTerminalSessionId(providerRecord);
+
+  if (subscription.conversationKey !== null && snapshotConversationKey !== subscription.conversationKey) {
+    return false;
+  }
+  if (subscription.sessionId !== null && terminalSessionId !== subscription.sessionId) {
+    return false;
+  }
+  return true;
+}
+
+function emitCurrentRuntimeSnapshotToSocket(socket: Socket, subscription: RuntimeSubscriptionPayload): void {
+  if (!hasRuntimeSubscriptionTarget(subscription)) {
+    return;
+  }
+
+  const record = getConnectedCliRecord(subscription.targetCliId);
+  const providerId = subscription.targetProviderId;
+  if (!record || !providerId) {
+    return;
+  }
+
+  const providerRecord = getProviderRecord(record, providerId);
+  if (!providerRecord?.snapshot || !matchesProviderRuntimeSubscription(subscription, record.descriptor.cliId, providerId, providerRecord)) {
+    return;
+  }
+
+  socket.emit('runtime:snapshot', {
+    cliId: record.descriptor.cliId,
+    providerId,
+    snapshot: cloneValue(providerRecord.snapshot)
+  } satisfies RuntimeSnapshotPayload);
+}
+
+function emitRuntimeSnapshotToSubscribers(io: SocketIOServer, payload: RuntimeSnapshotPayload): void {
+  for (const socket of io.of('/web').sockets.values()) {
+    const subscription = webRuntimeSubscriptions.get(socket.id);
+    if (!subscription || !matchesRuntimeSnapshotSubscription(subscription, payload)) {
+      continue;
+    }
+    socket.emit('runtime:snapshot', payload);
+  }
+}
+
+function emitMessagesUpsertToSubscribers(io: SocketIOServer, payload: MessagesUpsertPayload): void {
+  for (const socket of io.of('/web').sockets.values()) {
+    const subscription = webRuntimeSubscriptions.get(socket.id);
+    if (!subscription || !matchesMessagesUpsertSubscription(subscription, payload)) {
+      continue;
+    }
+    socket.emit('runtime:messages-upsert', payload);
+  }
+}
+
+function emitTerminalChunkToSubscribers(io: SocketIOServer, payload: TerminalChunkPayload): void {
+  for (const socket of io.of('/web').sockets.values()) {
+    const subscription = webRuntimeSubscriptions.get(socket.id);
+    if (!subscription || !matchesTerminalChunkSubscription(subscription, payload)) {
+      continue;
+    }
+    socket.emit('terminal:chunk', payload);
+  }
+}
+
+function createTerminalResumeResult(socket: Socket, payload: TerminalResumeRequestPayload): TerminalResumeResultPayload {
+  const subscription = webRuntimeSubscriptions.get(socket.id);
   const record = getConnectedCliRecord(payload.targetCliId);
-  const sessionId = getTerminalSessionId(record);
-  if (!record || !sessionId) {
+  const providerId = payload.targetProviderId ?? null;
+  const providerRecord = record && providerId ? getProviderRecord(record, providerId) : null;
+  if (
+    !record ||
+    !providerId ||
+    !providerRecord ||
+    !subscription ||
+    !matchesProviderRuntimeSubscription(subscription, record.descriptor.cliId, providerId, providerRecord)
+  ) {
     return {
+      providerId,
       mode: 'reset',
       sessionId: null,
       offset: 0,
@@ -233,24 +456,37 @@ function createTerminalResumeResult(payload: TerminalResumeRequestPayload): Term
     };
   }
 
-  const replayStartOffset = record.terminalReplayOffset;
-  const replayEndOffset = getTerminalReplayEndOffset(record);
+  const sessionId = getTerminalSessionId(providerRecord);
+  if (!sessionId) {
+    return {
+      providerId,
+      mode: 'reset',
+      sessionId: null,
+      offset: 0,
+      data: ''
+    };
+  }
+
+  const replayStartOffset = providerRecord.terminalReplayOffset;
+  const replayEndOffset = getTerminalReplayEndOffset(providerRecord);
 
   if (payload.sessionId === sessionId && payload.lastOffset >= replayStartOffset && payload.lastOffset <= replayEndOffset) {
     const byteOffset = payload.lastOffset - replayStartOffset;
     return {
+      providerId,
       mode: 'delta',
       sessionId,
       offset: payload.lastOffset,
-      data: record.terminalReplay.subarray(byteOffset).toString('utf8')
+      data: providerRecord.terminalReplay.subarray(byteOffset).toString('utf8')
     };
   }
 
   return {
+    providerId,
     mode: 'reset',
     sessionId,
     offset: replayStartOffset,
-    data: record.terminalReplay.toString('utf8')
+    data: providerRecord.terminalReplay.toString('utf8')
   };
 }
 
@@ -327,19 +563,32 @@ async function routeWebCommand(command: WebCommandEnvelope, io: SocketIOServer):
 
   const result = await forwardCliCommand(record, {
     requestId: randomUUID(),
+    targetProviderId: command.targetProviderId ?? null,
     name: command.name,
     payload: command.payload
   } satisfies CliCommandEnvelope);
 
   if (result.ok && command.name === 'select-conversation') {
+    const providerId = command.targetProviderId ?? null;
     const payload = result.payload as { conversationKey?: string | null; sessionId?: string | null } | undefined;
     const cwd = path.resolve((command.payload as { cwd: string }).cwd);
+    const currentRuntime = providerId ? record.descriptor.runtimes[providerId] : null;
     record.descriptor = {
       ...record.descriptor,
-      cwd,
-      conversationKey:
-        payload?.conversationKey ?? (command.payload as { conversationKey?: string }).conversationKey ?? null,
-      sessionId: payload?.sessionId ?? null,
+      cwd: providerId && providerId === record.descriptor.supportedProviders[0] ? cwd : record.descriptor.cwd,
+      runtimes:
+        providerId === null
+          ? record.descriptor.runtimes
+          : {
+              ...record.descriptor.runtimes,
+              [providerId]: {
+                cwd,
+                conversationKey:
+                  payload?.conversationKey ?? (command.payload as { conversationKey?: string }).conversationKey ?? null,
+                sessionId: payload?.sessionId ?? null,
+                status: currentRuntime?.status ?? 'idle'
+              }
+            },
       lastSeenAt: new Date().toISOString()
     };
     emitCliStatus(io);
@@ -398,14 +647,18 @@ export async function startSocketServer(): Promise<void> {
       const record: CliRuntimeRecord = {
         socket,
         descriptor: createCliDescriptor(cliId, payload),
-        snapshot: previous?.snapshot ?? null,
-        terminalReplay: previous?.terminalReplay ?? Buffer.alloc(0),
-        terminalReplayOffset: previous?.terminalReplayOffset ?? 0,
-        terminalReplaySessionId: previous?.terminalReplaySessionId ?? null
+        runtimes: Object.fromEntries(
+          normalizeSupportedProviders(payload).map((providerId) => [
+            providerId,
+            createProviderRuntimeRecord(payload, providerId, previous ? getProviderRecord(previous, providerId) : null)
+          ])
+        )
       };
 
       cliRecords.set(cliId, record);
-      updateDescriptorFromSnapshot(record);
+      for (const providerId of record.descriptor.supportedProviders) {
+        updateDescriptorFromSnapshot(record, providerId);
+      }
       emitCliStatus(io);
       callback?.({
         ok: true,
@@ -423,14 +676,21 @@ export async function startSocketServer(): Promise<void> {
         return;
       }
 
+      const providerRecord = getProviderRecord(record, payload.providerId);
+      if (!providerRecord) {
+        return;
+      }
+
       record.descriptor.connected = true;
-      syncTerminalReplaySession(record, payload.snapshot.sessionId);
-      record.snapshot = cloneValue(payload.snapshot);
-      updateDescriptorFromSnapshot(record);
-      io.of('/web').emit('runtime:snapshot', {
+      syncTerminalReplaySession(providerRecord, payload.snapshot.sessionId);
+      providerRecord.snapshot = cloneValue(payload.snapshot);
+      updateDescriptorFromSnapshot(record, payload.providerId);
+      const snapshotPayload = {
         cliId,
+        providerId: payload.providerId,
         snapshot: cloneValue(payload.snapshot)
-      } satisfies RuntimeSnapshotPayload);
+      } satisfies RuntimeSnapshotPayload;
+      emitRuntimeSnapshotToSubscribers(io, snapshotPayload);
       emitCliStatus(io);
     });
 
@@ -446,10 +706,11 @@ export async function startSocketServer(): Promise<void> {
 
       record.descriptor.connected = true;
       record.descriptor.lastSeenAt = new Date().toISOString();
-      io.of('/web').emit('runtime:messages-upsert', {
+      const messagesPayload = {
         ...cloneValue(payload),
         cliId
-      } satisfies MessagesUpsertPayload);
+      } satisfies MessagesUpsertPayload;
+      emitMessagesUpsertToSubscribers(io, messagesPayload);
     });
 
     socket.on('cli:terminal-chunk', (payload: TerminalChunkPayload) => {
@@ -462,14 +723,20 @@ export async function startSocketServer(): Promise<void> {
         return;
       }
 
+      const providerRecord = getProviderRecord(record, payload.providerId);
+      if (!providerRecord) {
+        return;
+      }
+
       record.descriptor.connected = true;
-      syncTerminalReplaySession(record, payload.sessionId);
-      appendTerminalReplay(record, payload.offset, payload.data);
+      syncTerminalReplaySession(providerRecord, payload.sessionId);
+      appendTerminalReplay(providerRecord, payload.offset, payload.data);
       record.descriptor.lastSeenAt = new Date().toISOString();
-      io.of('/web').emit('terminal:chunk', {
+      const terminalChunkPayload = {
         ...cloneValue(payload),
         cliId
-      } satisfies TerminalChunkPayload);
+      } satisfies TerminalChunkPayload;
+      emitTerminalChunkToSubscribers(io, terminalChunkPayload);
     });
 
     socket.on('disconnect', () => {
@@ -482,7 +749,20 @@ export async function startSocketServer(): Promise<void> {
       record.descriptor = {
         ...record.descriptor,
         connected: false,
-        status: 'idle',
+        runtimes: Object.fromEntries(
+          record.descriptor.supportedProviders.map((providerId) => [
+            providerId,
+            {
+              ...(record.descriptor.runtimes[providerId] ?? {
+                cwd: record.descriptor.cwd,
+                conversationKey: null,
+                sessionId: null,
+                status: 'idle' as RuntimeStatus
+              }),
+              status: 'idle' as RuntimeStatus
+            }
+          ])
+        ),
         lastSeenAt: new Date().toISOString()
       };
       emitCliStatus(io);
@@ -490,7 +770,14 @@ export async function startSocketServer(): Promise<void> {
   });
 
   io.of('/web').on('connection', (socket) => {
+    webRuntimeSubscriptions.set(socket.id, normalizeRuntimeSubscription());
     socket.emit('web:init', buildWebInitPayload());
+
+    socket.on('web:runtime-subscribe', (payload: RuntimeSubscriptionPayload) => {
+      const subscription = normalizeRuntimeSubscription(payload);
+      webRuntimeSubscriptions.set(socket.id, subscription);
+      emitCurrentRuntimeSnapshotToSocket(socket, subscription);
+    });
 
     socket.on('web:command', async (command: WebCommandEnvelope, callback?: (result: CliCommandResult) => void) => {
       try {
@@ -504,7 +791,7 @@ export async function startSocketServer(): Promise<void> {
     });
 
     socket.on('web:terminal-resume', (payload: TerminalResumeRequestPayload, callback?: (result: TerminalResumeResultPayload) => void) => {
-      callback?.(createTerminalResumeResult(payload));
+      callback?.(createTerminalResumeResult(socket, payload));
     });
 
     socket.on('web:terminal-resize', (payload: TerminalResizePayload) => {
@@ -514,9 +801,14 @@ export async function startSocketServer(): Promise<void> {
       }
 
       record.socket.emit('cli:terminal-resize', {
+        targetProviderId: payload.targetProviderId,
         cols: payload.cols,
         rows: payload.rows
       } satisfies Omit<TerminalResizePayload, 'targetCliId'>);
+    });
+
+    socket.on('disconnect', () => {
+      webRuntimeSubscriptions.delete(socket.id);
     });
   });
 

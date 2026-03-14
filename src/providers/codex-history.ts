@@ -301,6 +301,48 @@ export async function findLatestCodexSessionForCwdSince(
     };
   }
 
+  const sessionFiles = await collectSessionFiles(sessionsRootPath);
+  const fallbackMatches = await Promise.all(
+    sessionFiles.map(async (filePath) => {
+      const sessionMeta = await parseSessionMeta(filePath);
+      if (!sessionMeta?.id || !sessionMeta.cwd || path.resolve(sessionMeta.cwd) !== normalizedProjectRoot) {
+        return null;
+      }
+
+      let timestampMs = new Date(sessionMeta.timestamp ?? 0).getTime();
+      if (!Number.isFinite(timestampMs) || timestampMs <= 0) {
+        try {
+          const stat = await fs.stat(filePath);
+          timestampMs = stat.mtimeMs;
+        } catch {
+          timestampMs = 0;
+        }
+      }
+
+      if (timestampMs < minTimestampMs) {
+        return null;
+      }
+
+      return {
+        filePath,
+        sessionId: sessionMeta.id,
+        timestampMs,
+        timestamp: sessionMeta.timestamp ?? null
+      };
+    })
+  );
+
+  const latestFallback = fallbackMatches
+    .filter(Boolean)
+    .sort((left, right) => (right?.timestampMs ?? 0) - (left?.timestampMs ?? 0))[0];
+  if (latestFallback) {
+    return {
+      filePath: latestFallback.filePath,
+      sessionId: latestFallback.sessionId,
+      timestamp: latestFallback.timestamp
+    };
+  }
+
   return null;
 }
 
@@ -341,5 +383,42 @@ export async function listCodexProjectSessions(projectRoot: string, maxSessions 
     }
   }
 
-  return results;
+  if (results.length > 0) {
+    return results;
+  }
+
+  const fallbackMatches = await Promise.all(
+    sessionFiles.map(async (filePath) => {
+      const sessionMeta = await parseSessionMeta(filePath);
+      if (!sessionMeta?.id || !sessionMeta.cwd || path.resolve(sessionMeta.cwd) !== normalizedProjectRoot) {
+        return null;
+      }
+
+      let updatedAt = sessionMeta.timestamp ?? null;
+      if (!updatedAt) {
+        try {
+          const stat = await fs.stat(filePath);
+          updatedAt = stat.mtime.toISOString();
+        } catch {
+          updatedAt = new Date().toISOString();
+        }
+      }
+
+      const sessionSummary = await summarizeSessionFile(filePath);
+      const titleSource = normalizePreview(sessionSummary.latestUserMessage) || sessionMeta.id;
+      return {
+        providerId: 'codex' as const,
+        sessionId: sessionMeta.id,
+        title: compactTitle(titleSource),
+        preview: titleSource,
+        updatedAt: sessionSummary.latestTimestamp ?? updatedAt,
+        messageCount: sessionSummary.messageCount
+      };
+    })
+  );
+
+  return fallbackMatches
+    .filter(Boolean)
+    .sort((left, right) => new Date(right?.updatedAt ?? 0).getTime() - new Date(left?.updatedAt ?? 0).getTime())
+    .slice(0, normalizedMax) as ProjectSessionSummary[];
 }

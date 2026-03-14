@@ -123,6 +123,8 @@ function tailOutput(text: string, maxChars = 8_000): string {
 const RUNNING_LINE_PATTERN = /(^|\n)\s*[•◦]\s+[^\n]*esc to interrupt[^\n]*$/gimu;
 const PROMPT_LINE_PATTERN = /(^|\n)\s*[›>]\s*(?:Use \/skills[^\n]*)?$/gimu;
 const PROMPT_HINT_PATTERN = /Use \/skills to list available skills|\? for shortcuts|% left/gi;
+const DIRECTORY_TRUST_PROMPT_PATTERN = /Do you trust the contents of this directory\?|Press enter to continue/i;
+const STARTER_PROMPT_PATTERN = /Improve documentation in @filename|To get started, describe a task/i;
 
 function findLastMatchIndex(pattern: RegExp, text: string): number {
   let lastIndex = -1;
@@ -153,4 +155,12 @@ export function getCodexPtyLifecycle(output: string): CodexPtyLifecycle {
 
 export function looksReadyForInput(output: string): boolean {
   return getCodexPtyLifecycle(output) === 'idle';
+}
+
+export function looksLikeDirectoryTrustPrompt(output: string): boolean {
+  return DIRECTORY_TRUST_PROMPT_PATTERN.test(tailOutput(output));
+}
+
+export function showsStarterPrompt(output: string): boolean {
+  return STARTER_PROMPT_PATTERN.test(tailOutput(output));
 }

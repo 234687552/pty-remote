@@ -6,6 +6,7 @@ import { Terminal } from 'xterm';
 import type { Socket } from 'socket.io-client';
 
 import type { TerminalChunkPayload, TerminalResizePayload, TerminalResumeRequestPayload, TerminalResumeResultPayload } from '@shared/protocol.ts';
+import type { ProviderId } from '@shared/runtime-types.ts';
 
 import {
   MOBILE_TERMINAL_BREAKPOINT,
@@ -15,6 +16,7 @@ import {
 
 interface UseTerminalBridgeOptions {
   activeCliId: string | null;
+  activeProviderId: ProviderId | null;
   socketRef: React.RefObject<Socket | null>;
   setError: Dispatch<SetStateAction<string>>;
 }
@@ -38,7 +40,7 @@ export interface TerminalBridge {
 
 type TerminalBridgeMethods = Omit<TerminalBridge, 'terminalViewportRef' | 'terminalHostRef'>;
 
-export function useTerminalBridge({ activeCliId, socketRef, setError }: UseTerminalBridgeOptions): TerminalBridge {
+export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, setError }: UseTerminalBridgeOptions): TerminalBridge {
   const terminalViewportRef = useRef<HTMLDivElement | null>(null);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
   const terminalInstanceRef = useRef<Terminal | null>(null);
@@ -147,6 +149,7 @@ export function useTerminalBridge({ activeCliId, socketRef, setError }: UseTermi
     lastTerminalSizeRef.current = nextSize;
     socket.emit('web:terminal-resize', {
       targetCliId: activeCliId,
+      targetProviderId: activeProviderId,
       ...nextSize
     } satisfies TerminalResizePayload);
   }
@@ -171,11 +174,13 @@ export function useTerminalBridge({ activeCliId, socketRef, setError }: UseTermi
       appliedSessionIdRef.current === targetSessionId
         ? {
             targetCliId: activeCliId,
+            targetProviderId: activeProviderId,
             sessionId: appliedSessionIdRef.current,
             lastOffset: appliedTerminalOffsetRef.current
           }
         : {
             targetCliId: activeCliId,
+            targetProviderId: activeProviderId,
             sessionId: null,
             lastOffset: 0
           };
@@ -185,6 +190,7 @@ export function useTerminalBridge({ activeCliId, socketRef, setError }: UseTermi
         resolve(
           resumePayload ?? {
             mode: 'reset',
+            providerId: activeProviderId,
             sessionId: targetSessionId,
             offset: 0,
             data: ''
@@ -198,6 +204,8 @@ export function useTerminalBridge({ activeCliId, socketRef, setError }: UseTermi
     } else {
       applyTerminalChunk({
         cliId: activeCliId ?? '',
+        providerId: result.providerId ?? activeProviderId ?? 'claude',
+        conversationKey: null,
         data: result.data,
         offset: result.offset,
         sessionId: result.sessionId

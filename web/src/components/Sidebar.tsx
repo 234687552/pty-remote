@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { PROVIDER_LABELS, PROVIDER_ORDER, type CliDescriptor, type ProviderId } from '@shared/runtime-types.ts';
 
@@ -21,6 +21,7 @@ interface SidebarProps {
   projectsRefreshing: boolean;
   onActivateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => void;
   onAddProject: (input: { cwd: string; providerId: ProviderId }) => Promise<void>;
+  onDeleteProject: (project: ProjectEntry) => Promise<void>;
   onPickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
   onMobileOpenChange: (open: boolean) => void;
   onRefreshAllProjects: () => void;
@@ -28,6 +29,8 @@ interface SidebarProps {
   onSelectProject: (project: ProjectEntry) => void;
   onSelectProvider: (project: ProjectEntry, providerId: ProviderId) => void;
 }
+
+const PROJECT_DELETE_LONG_PRESS_DELAY_MS = 650;
 
 interface ProviderSection {
   id: ProviderId;
@@ -84,7 +87,7 @@ function buildProviderSections(
   const conversationProviderIds = Object.keys(projectConversationsByKey)
     .filter((key) => key.startsWith(`${project.id}:`))
     .map((key) => key.split(':')[1] as ProviderId);
-  const connectedProviderIds = clis.filter((cli) => cli.connected).map((cli) => cli.providerId);
+  const connectedProviderIds = clis.filter((cli) => cli.connected).flatMap((cli) => cli.supportedProviders);
   const providerIds = [...new Set([...connectedProviderIds, ...conversationProviderIds])].sort(
     (left, right) => PROVIDER_ORDER.indexOf(left) - PROVIDER_ORDER.indexOf(right)
   );
@@ -114,6 +117,7 @@ export function Sidebar({
   projectsRefreshing,
   onActivateConversation,
   onAddProject,
+  onDeleteProject,
   onPickProjectDirectory,
   onMobileOpenChange,
   onRefreshAllProjects,
@@ -127,12 +131,23 @@ export function Sidebar({
   const [draftProviderId, setDraftProviderId] = useState<ProviderId>(activeProviderId ?? 'claude');
   const [addProjectPending, setAddProjectPending] = useState(false);
   const [pickDirectoryPending, setPickDirectoryPending] = useState(false);
+  const [deleteProjectPendingId, setDeleteProjectPendingId] = useState<string | null>(null);
   const [addProjectError, setAddProjectError] = useState('');
+  const projectDeletePressTimeoutRef = useRef<number | null>(null);
+  const longPressTriggeredProjectIdRef = useRef<string | null>(null);
   const providerSectionsByProject = useMemo(
     () =>
       Object.fromEntries(projects.map((project) => [project.id, buildProviderSections(project, clis, projectConversationsByKey)])),
     [clis, projectConversationsByKey, projects]
   );
+  useEffect(() => {
+    return () => {
+      if (projectDeletePressTimeoutRef.current !== null) {
+        window.clearTimeout(projectDeletePressTimeoutRef.current);
+      }
+    };
+  }, []);
+
   useEffect(() => {
     if (!isAddDialogOpen) {
       return;
@@ -164,6 +179,54 @@ export function Sidebar({
       ...current,
       [projectId]: providerId
     }));
+  }
+
+  function clearProjectDeletePressTimeout(): void {
+    if (projectDeletePressTimeoutRef.current !== null) {
+      window.clearTimeout(projectDeletePressTimeoutRef.current);
+      projectDeletePressTimeoutRef.current = null;
+    }
+  }
+
+  function handleProjectPressStart(project: ProjectEntry, event: React.PointerEvent<HTMLButtonElement>): void {
+    if (deleteProjectPendingId !== null) {
+      return;
+    }
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return;
+    }
+
+    clearProjectDeletePressTimeout();
+    longPressTriggeredProjectIdRef.current = null;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+
+    projectDeletePressTimeoutRef.current = window.setTimeout(() => {
+      projectDeletePressTimeoutRef.current = null;
+      longPressTriggeredProjectIdRef.current = project.id;
+      const confirmed = window.confirm(`删除项目“${project.label}”？`);
+      if (!confirmed) {
+        return;
+      }
+
+      setDeleteProjectPendingId(project.id);
+      void onDeleteProject(project).finally(() => {
+        setDeleteProjectPendingId((current) => (current === project.id ? null : current));
+      });
+    }, PROJECT_DELETE_LONG_PRESS_DELAY_MS);
+  }
+
+  function handleProjectPressEnd(event: React.PointerEvent<HTMLButtonElement>): void {
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    clearProjectDeletePressTimeout();
+  }
+
+  function handleProjectPressCancel(event: React.PointerEvent<HTMLButtonElement>): void {
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    clearProjectDeletePressTimeout();
   }
 
   function openAddProjectDialog(): void {
@@ -249,8 +312,20 @@ export function Sidebar({
                 <div className="flex items-start justify-between gap-2">
                   <button
                     type="button"
-                    onClick={() => onSelectProject(project)}
+                    onClick={() => {
+                      if (longPressTriggeredProjectIdRef.current === project.id) {
+                        longPressTriggeredProjectIdRef.current = null;
+                        return;
+                      }
+                      onSelectProject(project);
+                    }}
+                    onPointerDown={(event) => handleProjectPressStart(project, event)}
+                    onPointerUp={handleProjectPressEnd}
+                    onPointerCancel={handleProjectPressCancel}
+                    onPointerLeave={handleProjectPressCancel}
                     className="min-w-0 text-left"
+                    disabled={deleteProjectPendingId === project.id}
+                    title="长按删除项目"
                   >
                     <div className="truncate text-[13px] font-semibold">{project.label}</div>
                     <div
@@ -262,6 +337,9 @@ export function Sidebar({
                       {project.cwd}
                     </div>
                   </button>
+                  {deleteProjectPendingId === project.id ? (
+                    <span className="shrink-0 text-[10px] font-medium text-zinc-500">删除中...</span>
+                  ) : null}
                 </div>
 
                 <div className="mt-1.5 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
@@ -353,8 +431,8 @@ export function Sidebar({
           >
             <option value="">选择 CLI</option>
             {clis.map((entry) => (
-              <option key={entry.cliId} value={entry.cliId}>
-                {entry.label} ({entry.providerId})
+            <option key={entry.cliId} value={entry.cliId}>
+                {entry.label} ({entry.supportedProviders.join(' / ')})
               </option>
             ))}
           </select>

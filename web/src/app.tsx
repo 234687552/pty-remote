@@ -8,24 +8,44 @@ import { HeaderFeature } from '@/features/header/HeaderFeature.tsx';
 import { SidebarFeature } from '@/features/sidebar/SidebarFeature.tsx';
 import { TerminalFeature } from '@/features/terminal/TerminalFeature.tsx';
 import { useWorkspaceController } from '@/features/workspace/controller.ts';
-import { selectActiveCliId } from '@/features/workspace/selectors.ts';
+import { selectActiveCliId, selectActiveProviderId } from '@/features/workspace/selectors.ts';
 import { useWorkspaceStore } from '@/features/workspace/store.ts';
 import { useCliSocket } from '@/hooks/useCliSocket.ts';
 import { useTerminalBridge } from '@/hooks/useTerminalBridge.ts';
+import { getProjectProviderKey } from '@/lib/workspace.ts';
 export function App() {
   const store = useWorkspaceStore();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const activeCliId = selectActiveCliId(store.workspaceState);
+  const activeProviderId = selectActiveProviderId(store.workspaceState);
+  const activeProjectId = store.workspaceState.activeProjectId;
+  const activeConversationId = store.workspaceState.activeConversationId;
+  const activeConversationKeyStorageKey =
+    activeProjectId && activeProviderId ? getProjectProviderKey(activeProjectId, activeProviderId) : null;
+  const activeConversation =
+    activeConversationId && activeConversationKeyStorageKey
+      ? (store.projectConversationsByKey[activeConversationKeyStorageKey] ?? []).find(
+          (conversation) => conversation.id === activeConversationId
+        ) ?? null
+      : null;
+  const activeConversationKey = activeConversation?.conversationKey ?? null;
+  const activeSessionId =
+    activeConversation?.sessionId ??
+    (store.snapshot.conversationKey === activeConversationKey ? store.snapshot.sessionId : null);
   const socketRef = useRef<Socket | null>(null);
 
   const terminal = useTerminalBridge({
     activeCliId,
+    activeProviderId,
     socketRef,
     setError: store.setError
   });
 
   const { socketConnected, clis, sendCommand } = useCliSocket({
     activeCliId,
+    activeProviderId,
+    activeConversationKey,
+    activeSessionId,
     socketRef,
     onConnect: () => {
       terminal.handleSocketConnected();

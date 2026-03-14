@@ -20,6 +20,7 @@ import {
 import {
   appendRecentOutput,
   appendReplayChunk,
+  getClaudePtyLifecycle,
   looksLikeBypassPrompt,
   looksReadyForInput,
   resizeClaudePtySession,
@@ -52,7 +53,7 @@ export interface PtyManagerOptions {
 interface PtyManagerCallbacks {
   emitMessagesUpsert(payload: Omit<MessagesUpsertPayload, 'cliId'>): void;
   emitSnapshot(snapshot: RuntimeSnapshot): void;
-  emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId'>): void;
+  emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId' | 'providerId'>): void;
 }
 
 export interface PtyManagerSelection {
@@ -430,6 +431,7 @@ export class PtyManager {
     }
 
     this.callbacks.emitTerminalChunk({
+      conversationKey: handle.threadKey,
       data: handle.runtime.terminalReplay,
       offset: 0,
       sessionId: handle.sessionId
@@ -477,11 +479,13 @@ export class PtyManager {
   }
 
   private async normalizeSelection(selection: PtyManagerSelection): Promise<PtyManagerSelection> {
-    const cwd = path.resolve(selection.cwd);
-    const stat = await fs.stat(cwd);
+    const resolvedCwd = path.resolve(selection.cwd);
+    const stat = await fs.stat(resolvedCwd);
     if (!stat.isDirectory()) {
       throw new Error('Selected project is not a directory');
     }
+
+    const cwd = await fs.realpath(resolvedCwd).catch(() => resolvedCwd);
 
     return {
       cwd,
@@ -599,15 +603,24 @@ export class PtyManager {
       return 'error';
     }
 
-    if (runtimePhase === 'running' || handle.awaitingJsonlTurn) {
+    const ptyLifecycle = handle.pty ? getClaudePtyLifecycle(handle.pty.recentOutput) : 'not_ready';
+    if (runtimePhase === 'running' || handle.awaitingJsonlTurn || ptyLifecycle === 'running') {
       return 'running';
     }
 
-    if (handle.pty && handle.runtime.status === 'starting' && handle.runtime.allMessages.length === 0) {
+    if (handle.pty && ptyLifecycle === 'not_ready' && handle.runtime.allMessages.length === 0) {
       return 'starting';
     }
 
     return 'idle';
+  }
+
+  private shouldContinueJsonlRefresh(handle: PtyHandle): boolean {
+    if (!this.isActiveHandle(handle) || !handle.pty) {
+      return false;
+    }
+
+    return handle.awaitingJsonlTurn || handle.runtime.status === 'starting' || handle.runtime.status === 'running';
   }
 
   private applyStreamingStatus(messages: ChatMessage[], isRunning: boolean): ChatMessage[] {
@@ -805,10 +818,17 @@ export class PtyManager {
         }
         this.scheduleSnapshotEmit(statusChanged ? 0 : this.options.snapshotEmitDebounceMs);
       }
+
+      if (this.shouldContinueJsonlRefresh(handle)) {
+        this.scheduleJsonlRefresh(Math.max(this.options.jsonlRefreshDebounceMs, 250));
+      }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') {
         handle.jsonlMissingSince ??= Date.now();
+        if (this.shouldContinueJsonlRefresh(handle)) {
+          this.scheduleJsonlRefresh(Math.max(this.options.jsonlRefreshDebounceMs, 250));
+        }
         return;
       }
       this.setLastError(handle, error instanceof Error ? error.message : 'Failed to read Claude jsonl');
@@ -1012,6 +1032,7 @@ export class PtyManager {
     }
 
     this.callbacks.emitTerminalChunk({
+      conversationKey: handle.threadKey,
       data: chunk,
       offset: chunkOffset,
       sessionId: handle.sessionId
@@ -1097,6 +1118,8 @@ export class PtyManager {
     }
 
     await sleep(this.options.promptSubmitDelayMs);
+    handle.pty.pty.write('\x1b');
+    await sleep(80);
     handle.pty.pty.write('\r');
   }
 
