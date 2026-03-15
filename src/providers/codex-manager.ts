@@ -225,8 +225,9 @@ export class CodexManager {
       handle.sessionFilePath = await findCodexSessionFile(handle.sessionId, this.options);
     }
 
-    if (handle.sessionId && !handle.pty) {
-      this.startHandleSession(handle);
+    if (!handle.pty) {
+      this.clearLastError(handle);
+      await this.ensureHandleSession(handle);
     } else {
       this.ensureJsonlWatcher(handle, handle.sessionFilePath);
     }

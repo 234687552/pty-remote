@@ -35,6 +35,7 @@ interface CodexEventMsgPayload {
   type?: string;
   message?: string;
   text?: string;
+  phase?: string;
 }
 
 interface CodexJsonlRecord {
@@ -51,6 +52,7 @@ export interface CodexJsonlMessagesState {
   runtimePhase: CodexJsonlRuntimePhase;
   activityRevision: number;
   messageSequence: number;
+  seenAssistantTextKeys: Set<string>;
 }
 
 export function createCodexJsonlMessagesState(): CodexJsonlMessagesState {
@@ -59,8 +61,55 @@ export function createCodexJsonlMessagesState(): CodexJsonlMessagesState {
     messagesById: new Map<string, ChatMessage>(),
     runtimePhase: 'idle',
     activityRevision: 0,
-    messageSequence: 0
+    messageSequence: 0,
+    seenAssistantTextKeys: new Set<string>()
   };
+}
+
+function normalizeAssistantText(text: string): string {
+  return text.trim();
+}
+
+function hashText(input: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function createStableTextMessageId(kind: string, timestamp: string | undefined, text: string, sequence: number): string {
+  const normalized = text.trim();
+  const digest = hashText(normalized);
+  const normalizedTimestamp = timestamp?.trim();
+  if (normalizedTimestamp) {
+    return `${kind}:${normalizedTimestamp}:${digest}`;
+  }
+  return `${kind}:seq:${sequence}:${digest}`;
+}
+
+function rememberAssistantText(
+  state: CodexJsonlMessagesState,
+  timestamp: string | undefined,
+  text: string
+): boolean {
+  const normalizedText = normalizeAssistantText(text);
+  if (!normalizedText) {
+    return false;
+  }
+
+  const parsedTimestampMs = new Date(timestamp ?? '').getTime();
+  const timestampBucket = Number.isFinite(parsedTimestampMs)
+    ? String(Math.floor(parsedTimestampMs / 1_000))
+    : `seq:${Math.floor(state.messageSequence / 4)}`;
+  const dedupeKey = `${timestampBucket}\u0000${normalizedText}`;
+  if (state.seenAssistantTextKeys.has(dedupeKey)) {
+    return false;
+  }
+
+  state.seenAssistantTextKeys.add(dedupeKey);
+  return true;
 }
 
 function stringifyUnknown(value: unknown): string {
@@ -273,8 +322,9 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
   const payloadType = payload?.type;
   if (payloadType === 'user_message') {
     const sequence = state.messageSequence++;
-    const messageId = `codex:user:${sequence}`;
-    const textBlock = createTextBlock(messageId, payload?.message ?? '');
+    const messageText = payload?.message ?? '';
+    const messageId = createStableTextMessageId('codex:user', timestamp, messageText, sequence);
+    const textBlock = createTextBlock(messageId, messageText);
     if (!textBlock) {
       return;
     }
@@ -294,10 +344,39 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
     if (!reasoningText) {
       return;
     }
+    if (!rememberAssistantText(state, timestamp, reasoningText)) {
+      return;
+    }
 
     const sequence = state.messageSequence++;
-    const messageId = `codex:assistant_reasoning:${sequence}`;
+    const messageId = createStableTextMessageId('codex:assistant_reasoning', timestamp, reasoningText, sequence);
     const textBlock = createTextBlock(messageId, reasoningText);
+    if (!textBlock) {
+      return;
+    }
+
+    upsertMessage(state, {
+      id: messageId,
+      role: 'assistant',
+      blocks: [textBlock],
+      status: 'complete',
+      createdAt: normalizeCreatedAt(timestamp, sequence)
+    });
+    return;
+  }
+
+  if (payloadType === 'agent_message') {
+    const messageText = typeof payload?.message === 'string' ? payload.message.trim() : '';
+    if (!messageText) {
+      return;
+    }
+    if (!rememberAssistantText(state, timestamp, messageText)) {
+      return;
+    }
+
+    const sequence = state.messageSequence++;
+    const messageId = createStableTextMessageId('codex:assistant_text', timestamp, messageText, sequence);
+    const textBlock = createTextBlock(messageId, messageText);
     if (!textBlock) {
       return;
     }
@@ -345,16 +424,30 @@ function applyResponseItem(
     }
 
     const sequence = state.messageSequence++;
-    const messageId = `codex:assistant:${sequence}`;
-    const blocks = extractTextBlocks(payload.content, messageId);
+    const provisionalMessageId = `codex:assistant:${sequence}`;
+    const blocks = extractTextBlocks(payload.content, provisionalMessageId);
     if (blocks.length === 0) {
+      return;
+    }
+    const messageText = blocks
+      .filter((block): block is TextChatMessageBlock => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+      .trim();
+    if (!rememberAssistantText(state, timestamp, messageText)) {
+      return;
+    }
+
+    const stableMessageId = createStableTextMessageId('codex:assistant_text', timestamp, messageText, sequence);
+    const stableBlocks = extractTextBlocks(payload.content, stableMessageId);
+    if (stableBlocks.length === 0) {
       return;
     }
 
     upsertMessage(state, {
-      id: messageId,
+      id: stableMessageId,
       role: 'assistant',
-      blocks,
+      blocks: stableBlocks,
       status: 'complete',
       createdAt: normalizeCreatedAt(timestamp, sequence)
     });

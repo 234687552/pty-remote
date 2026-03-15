@@ -227,7 +227,7 @@ export function mergeProjectConversations(
     return {
       ...(existing ?? createConversationFromSession(session)),
       providerId,
-      conversationKey: session.sessionId,
+      conversationKey: existing?.conversationKey ?? session.sessionId,
       sessionId: session.sessionId,
       title: session.title,
       preview: session.preview,

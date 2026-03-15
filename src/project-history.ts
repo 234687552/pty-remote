@@ -7,6 +7,8 @@ import type { ProjectSessionSummary } from '../shared/protocol.ts';
 import { parseClaudeJsonlMessages, resolveClaudeProjectFilesPath } from './cli/jsonl.ts';
 
 const DEFAULT_MAX_SESSIONS = 12;
+const PENDING_INPUT_LABEL = '待输入';
+const CLAUDE_SESSION_FILE_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i;
 
 interface SessionFileEntry {
   filePath: string;
@@ -70,12 +72,13 @@ function compactTitle(text: string): string {
 async function summarizeSessionFile(filePath: string): Promise<ProjectSessionSummary | null> {
   const rawJsonl = await fs.readFile(filePath, 'utf8');
   const messages = parseClaudeJsonlMessages(rawJsonl);
-  const lastUserMessage = getLatestUserTextMessage(messages);
-  const preview = getUserMessageText(lastUserMessage);
-  const updatedAt = lastUserMessage?.createdAt ?? null;
-  if (!preview || !updatedAt) {
+  if (messages.length === 0) {
     return null;
   }
+  const lastUserMessage = getLatestUserTextMessage(messages);
+  const preview = getUserMessageText(lastUserMessage) || PENDING_INPUT_LABEL;
+  const stat = await fs.stat(filePath);
+  const updatedAt = lastUserMessage?.createdAt ?? new Date(stat.mtimeMs).toISOString();
 
   return {
     providerId: 'claude',
@@ -101,7 +104,7 @@ async function listSessionFiles(projectFilesPath: string): Promise<SessionFileEn
 
   const sessionFiles: SessionFileEntry[] = [];
   for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.jsonl')) {
+    if (!entry.isFile() || !CLAUDE_SESSION_FILE_PATTERN.test(entry.name)) {
       continue;
     }
 
@@ -117,6 +120,9 @@ async function listSessionFiles(projectFilesPath: string): Promise<SessionFileEn
       throw error;
     }
     if (!stat.isFile()) {
+      continue;
+    }
+    if (stat.size <= 0) {
       continue;
     }
 

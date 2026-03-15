@@ -21,6 +21,7 @@ import {
   getThreadLabel,
   hydrateConversationFromSnapshot,
   mergeProjectConversations,
+  sortConversations,
   sortProjects,
   type ProjectConversationEntry,
   type ProjectEntry
@@ -542,6 +543,19 @@ export function useWorkspaceController({
         providerId
       );
       const selectPayload = result.payload as SelectConversationResultPayload | undefined;
+      if (selectPayload?.sessionId) {
+        store.setProjectConversations(project.id, providerId, (conversations) =>
+          conversations.map((entry) =>
+            entry.id === conversation.id
+              ? {
+                  ...entry,
+                  sessionId: selectPayload.sessionId,
+                  draft: false
+                }
+              : entry
+          )
+        );
+      }
       const acknowledgedRequestToken = selectPayload?.clientRequestId ?? null;
       const activationState = conversationActivationRef.current;
       if (
@@ -619,18 +633,16 @@ export function useWorkspaceController({
         history.sessions,
         selectedProviderId
       );
-      const resolvedConversations =
-        mergedConversations.length > 0 ? mergedConversations : [createDraftConversation(selectedProviderId)];
-      const nextConversation =
-        resolvedConversations.find((conversation) => conversation.sessionId === history.sessions[0]?.sessionId) ??
-        resolvedConversations[0] ??
-        null;
+      const nextConversation = createDraftConversation(selectedProviderId);
+      const resolvedConversations = sortConversations([
+        ...mergedConversations.filter((conversation) => !(conversation.draft && !conversation.sessionId)),
+        nextConversation
+      ]);
 
       store.setProjectConversations(selectedProject.id, selectedProviderId, () => resolvedConversations);
 
-      if (nextConversation) {
-        await activateConversation(selectedProject, selectedProviderId, nextConversation);
-      }
+      await activateConversation(selectedProject, selectedProviderId, nextConversation);
+      await refreshProjectConversations(selectedProject, selectedProviderId, targetCli.cliId);
     } catch (addProjectError) {
       const message = addProjectError instanceof Error ? addProjectError.message : '添加项目失败';
       store.setError(message);

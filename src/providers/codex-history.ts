@@ -10,6 +10,7 @@ const DEFAULT_MAX_SESSIONS = 12;
 const DEFAULT_HISTORY_TAIL_MAX_BYTES = 8 * 1024 * 1024;
 const DEFAULT_HISTORY_TAIL_CHUNK_BYTES = 256 * 1024;
 const SESSION_ID_PATTERN = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i;
+const PENDING_INPUT_LABEL = '待输入';
 
 interface SessionMetaPayload {
   id?: string;
@@ -22,6 +23,11 @@ interface HistoryEntry {
   tsMs: number;
   text: string;
   filePath: string;
+}
+
+interface PendingSessionEntry {
+  sessionId: string;
+  updatedAt: string;
 }
 
 function normalizePreview(text: string): string {
@@ -148,6 +154,50 @@ async function resolveSessionFilePath(
     return fromIndex;
   }
   return findSessionFileById(sessionsRootPath, sessionId);
+}
+
+async function listPendingProjectSessions(
+  projectRoot: string,
+  sessionsRootPath: string
+): Promise<PendingSessionEntry[]> {
+  const pendingEntries: PendingSessionEntry[] = [];
+
+  await walkSessionFiles(sessionsRootPath, async (filePath, fileName) => {
+    const meta = await parseSessionMeta(filePath);
+    if (!meta || typeof meta.cwd !== 'string') {
+      return false;
+    }
+
+    const normalizedCwd = path.resolve(meta.cwd);
+    if (normalizedCwd !== projectRoot) {
+      return false;
+    }
+
+    const sessionId =
+      (typeof meta.id === 'string' && meta.id.trim()) ||
+      extractSessionIdFromName(fileName);
+    if (!sessionId) {
+      return false;
+    }
+
+    const parsedTimestamp = typeof meta.timestamp === 'string' ? Date.parse(meta.timestamp) : Number.NaN;
+    let updatedAt = Number.isFinite(parsedTimestamp) ? new Date(parsedTimestamp).toISOString() : '';
+    if (!updatedAt) {
+      const stat = await fs.stat(filePath);
+      updatedAt = new Date(stat.mtimeMs).toISOString();
+    }
+
+    pendingEntries.push({
+      sessionId,
+      updatedAt
+    });
+    return false;
+  });
+
+  return pendingEntries.sort((left, right) => {
+    const timestampDiff = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+    return timestampDiff || right.sessionId.localeCompare(left.sessionId);
+  });
 }
 
 function coerceHistoryTimestampMs(value: unknown): number | null {
@@ -343,21 +393,38 @@ export async function listCodexProjectSessions(
   const { historyPath, sessionsRootPath } = resolveCodexHistoryPaths(options);
 
   const matches = await readHistoryTailForProject(historyPath, sessionsRootPath, canonicalProjectRoot, normalizedMax);
-  if (matches.length === 0) {
-    return [];
+  const summaries = new Map<string, ProjectSessionSummary>();
+
+  for (const entry of matches.sort((left, right) => right.tsMs - left.tsMs)) {
+    const preview = normalizePreview(entry.text);
+    summaries.set(entry.sessionId, {
+      providerId: 'codex',
+      sessionId: entry.sessionId,
+      title: compactTitle(preview),
+      preview,
+      updatedAt: new Date(entry.tsMs).toISOString(),
+      messageCount: 0
+    });
   }
 
-  return matches
-    .sort((left, right) => right.tsMs - left.tsMs)
-    .map((entry) => {
-      const preview = normalizePreview(entry.text);
-      return {
-        providerId: 'codex',
-        sessionId: entry.sessionId,
-        title: compactTitle(preview),
-        preview,
-        updatedAt: new Date(entry.tsMs).toISOString(),
-        messageCount: 0
-      };
+  for (const entry of await listPendingProjectSessions(canonicalProjectRoot, sessionsRootPath)) {
+    if (summaries.has(entry.sessionId)) {
+      continue;
+    }
+    summaries.set(entry.sessionId, {
+      providerId: 'codex',
+      sessionId: entry.sessionId,
+      title: PENDING_INPUT_LABEL,
+      preview: PENDING_INPUT_LABEL,
+      updatedAt: entry.updatedAt,
+      messageCount: 0
     });
+  }
+
+  return [...summaries.values()]
+    .sort((left, right) => {
+      const timestampDiff = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      return timestampDiff || right.sessionId.localeCompare(left.sessionId);
+    })
+    .slice(0, normalizedMax);
 }

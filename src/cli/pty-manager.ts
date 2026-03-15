@@ -220,7 +220,7 @@ export class PtyManager {
 
     await this.refreshMessagesFromJsonl(handle);
 
-    if (handle.sessionId && !handle.pty) {
+    if (!handle.pty) {
       this.startHandleSession(handle, { emitSnapshot: false });
     } else {
       this.ensureJsonlWatcher(handle, handle.sessionId);

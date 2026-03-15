@@ -540,8 +540,10 @@ export function Sidebar({
                           type="button"
                           onClick={() => setDraftProviderId(providerId)}
                           className={[
-                            'rounded-2xl border px-3 py-3 text-left transition',
-                            selected ? 'border-zinc-900 bg-zinc-900 text-white' : 'border-zinc-300 bg-white text-zinc-900 hover:border-zinc-400'
+                            'min-h-24 rounded-xl border px-4 py-4 text-center shadow-sm transition',
+                            selected
+                              ? 'border-sky-500 bg-sky-50 text-sky-950 shadow-[0_8px_22px_rgba(14,165,233,0.12)]'
+                              : 'border-zinc-300 bg-white text-zinc-900 hover:border-zinc-400 hover:bg-zinc-50'
                           ].join(' ')}
                           aria-pressed={selected}
                         >

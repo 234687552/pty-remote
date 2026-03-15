@@ -792,13 +792,7 @@ export async function startSocketServer(): Promise<void> {
       const previous = cliRecords.get(cliId);
 
       if (previous?.descriptor.connected && previous.socket.id !== socket.id) {
-        callback?.({
-          ok: false,
-          cliId,
-          error: `CLI ${cliId} is already connected`
-        });
-        socket.disconnect(true);
-        return;
+        previous.socket.disconnect(true);
       }
 
       (socket.data as { cliId?: string }).cliId = cliId;

@@ -627,6 +627,27 @@ function getStructuredToolInputField(input: string, field: string): string | nul
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function extractPatchFileLabels(input: string, maxFiles = 2): string[] {
+  const files: string[] = [];
+  const seen = new Set<string>();
+  const matcher = /^\*\*\* (?:Update|Add|Delete) File:\s+(.+)$/gm;
+  let match: RegExpExecArray | null = null;
+
+  while ((match = matcher.exec(input)) !== null) {
+    const filePath = (match[1] ?? '').trim();
+    if (!filePath || seen.has(filePath)) {
+      continue;
+    }
+    seen.add(filePath);
+    files.push(filePath);
+    if (files.length >= maxFiles) {
+      break;
+    }
+  }
+
+  return files;
+}
+
 type ToolVariantTone = 'generic' | 'mcp' | 'shell' | 'web';
 
 function getToolVariant(toolName: string | undefined): { tone: ToolVariantTone } {
@@ -637,7 +658,13 @@ function getToolVariant(toolName: string | undefined): { tone: ToolVariantTone }
     return { tone: 'generic' };
   }
 
-  if (lower.includes('bash') || lower.includes('shell') || lower.includes('terminal')) {
+  if (
+    lower.includes('bash') ||
+    lower.includes('shell') ||
+    lower.includes('terminal') ||
+    lower === 'exec_command' ||
+    lower.endsWith('.exec_command')
+  ) {
     return { tone: 'shell' };
   }
 
@@ -654,6 +681,7 @@ function getToolVariant(toolName: string | undefined): { tone: ToolVariantTone }
 
 function getCompactToolTitle(toolName: string | undefined, input: string): string {
   const normalized = (toolName || '').trim();
+  const lower = normalized.toLowerCase();
 
   if (normalized === 'Task') {
     const subagentType = getStructuredToolInputField(input, 'subagent_type');
@@ -672,6 +700,14 @@ function getCompactToolTitle(toolName: string | undefined, input: string): strin
     }
   }
 
+  if (lower === 'exec_command' || lower.endsWith('.exec_command') || lower === 'shell_command' || lower.endsWith('.shell_command')) {
+    return 'Ran';
+  }
+
+  if (lower === 'apply_patch' || lower.endsWith('.apply_patch')) {
+    return 'Edited';
+  }
+
   if (!normalized) {
     return 'Tool';
   }
@@ -681,11 +717,29 @@ function getCompactToolTitle(toolName: string | undefined, input: string): strin
 
 function getCompactToolPreview(toolName: string | undefined, input: string, maxChars = 180): string {
   const normalized = (toolName || '').trim();
+  const lower = normalized.toLowerCase();
 
   if (normalized === 'Task') {
     const prompt = getStructuredToolInputField(input, 'prompt');
     if (prompt) {
       return getToolInputPreview(prompt, maxChars);
+    }
+  }
+
+  if (lower === 'exec_command' || lower.endsWith('.exec_command') || lower === 'shell_command' || lower.endsWith('.shell_command')) {
+    const command = getStructuredToolInputField(input, 'cmd') ?? getStructuredToolInputField(input, 'command');
+    if (command) {
+      return getToolInputPreview(command, maxChars);
+    }
+  }
+
+  if (lower === 'apply_patch' || lower.endsWith('.apply_patch')) {
+    const patchFiles = extractPatchFileLabels(input, 2);
+    if (patchFiles.length === 1) {
+      return patchFiles[0];
+    }
+    if (patchFiles.length > 1) {
+      return `${patchFiles.join(', ')} ...`;
     }
   }
 

@@ -48,28 +48,39 @@ export function getUtf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
-export function mergeChronologicalMessages(left: ChatMessage[], right: ChatMessage[]): ChatMessage[] {
-  const messages = [...left, ...right];
-  messages.sort((a, b) => {
-    const leftTimestamp = new Date(a.createdAt).getTime();
-    const rightTimestamp = new Date(b.createdAt).getTime();
-    if (leftTimestamp !== rightTimestamp) {
-      return leftTimestamp - rightTimestamp;
-    }
-    return a.id.localeCompare(b.id);
-  });
+function compareMessageChronology(left: ChatMessage, right: ChatMessage): number {
+  const leftTimestamp = new Date(left.createdAt).getTime();
+  const rightTimestamp = new Date(right.createdAt).getTime();
+  if (leftTimestamp !== rightTimestamp) {
+    return leftTimestamp - rightTimestamp;
+  }
+  return left.id.localeCompare(right.id);
+}
 
-  const uniqueMessages = new Map<string, ChatMessage>();
-  for (const message of messages) {
-    uniqueMessages.set(message.id, message);
+function createMessageSemanticKey(message: ChatMessage): string {
+  const blocksSignature = message.blocks
+    .map((block) => {
+      if (block.type === 'text') {
+        return `text:${block.text.trim()}`;
+      }
+      if (block.type === 'tool_use') {
+        return `tool_use:${block.toolCallId ?? ''}:${block.toolName.trim()}:${block.input.trim()}`;
+      }
+      return `tool_result:${block.toolCallId ?? ''}:${block.isError ? '1' : '0'}:${block.content.trim()}`;
+    })
+    .join('|');
+  return `${message.role}|${message.createdAt}|${blocksSignature}`;
+}
+
+export function mergeChronologicalMessages(left: ChatMessage[], right: ChatMessage[]): ChatMessage[] {
+  const bySemanticKey = new Map<string, ChatMessage>();
+
+  for (const message of left) {
+    bySemanticKey.set(createMessageSemanticKey(message), message);
+  }
+  for (const message of right) {
+    bySemanticKey.set(createMessageSemanticKey(message), message);
   }
 
-  return [...uniqueMessages.values()].sort((a, b) => {
-    const leftTimestamp = new Date(a.createdAt).getTime();
-    const rightTimestamp = new Date(b.createdAt).getTime();
-    if (leftTimestamp !== rightTimestamp) {
-      return leftTimestamp - rightTimestamp;
-    }
-    return a.id.localeCompare(b.id);
-  });
+  return [...bySemanticKey.values()].sort(compareMessageChronology);
 }
