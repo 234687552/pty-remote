@@ -21,6 +21,7 @@ import type { ProviderId } from '../../shared/runtime-types.ts';
 import { createClaudeProviderRuntime } from '../providers/claude.ts';
 import { createCodexProviderRuntime, type CodexProviderRuntimeOptions } from '../providers/codex.ts';
 import type { ProviderRuntime } from '../providers/provider-runtime.ts';
+import { loadCliConfig } from './cli-config.ts';
 import type { PtyManagerOptions } from './pty-manager.ts';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,36 +31,70 @@ const CONFIG_DIR = path.join(os.homedir(), '.pty-remote');
 const CLI_ID_FILE = path.join(CONFIG_DIR, 'cli-id');
 const ALL_PROVIDERS: ProviderId[] = ['claude', 'codex'];
 
-const SOCKET_URL = process.env.SOCKET_URL ?? `http://${process.env.HOST ?? '127.0.0.1'}:${process.env.PORT ?? '3001'}`;
+const cliConfig = loadCliConfig();
+
+function getConfigValue(key: string): string | undefined {
+  const envValue = process.env[key];
+  if (typeof envValue === 'string' && envValue.trim()) {
+    return envValue.trim();
+  }
+  const configValue = cliConfig[key];
+  if (typeof configValue === 'string' && configValue.trim()) {
+    return configValue.trim();
+  }
+  return undefined;
+}
+
+function getConfigInt(key: string, fallback: number, min = 0): number {
+  const raw = getConfigValue(key);
+  if (!raw) {
+    return fallback;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < min) {
+    return fallback;
+  }
+  return parsed;
+}
+
+const configCodexHome = getConfigValue('CODEX_HOME');
+if (configCodexHome && !process.env.CODEX_HOME) {
+  process.env.CODEX_HOME = configCodexHome;
+}
+
+const SOCKET_URL =
+  getConfigValue('SOCKET_URL') ?? `http://${getConfigValue('HOST') ?? '127.0.0.1'}:${getConfigValue('PORT') ?? '3001'}`;
 const execFileAsync = promisify(execFile);
-const SUPPORTED_PROVIDERS = resolveSupportedProviders(process.env.PTY_REMOTE_PROVIDERS ?? process.env.PTY_REMOTE_PROVIDER);
+const SUPPORTED_PROVIDERS = resolveSupportedProviders(
+  getConfigValue('PTY_REMOTE_PROVIDERS') ?? getConfigValue('PTY_REMOTE_PROVIDER')
+);
 const CLI_ID = resolveCliId();
 const CLI_LABEL = resolveCliLabel();
 const PTY_BACKEND_NAME = 'node-pty';
-const TERMINAL_REPLAY_MAX_BYTES = 1024 * 1024;
-const RECENT_OUTPUT_MAX_CHARS = 12_000;
-const CLAUDE_READY_TIMEOUT_MS = 20_000;
-const CODEX_READY_TIMEOUT_MS = 20_000;
-const PROMPT_SUBMIT_DELAY_MS = 120;
-const JSONL_REFRESH_DEBOUNCE_MS = 120;
-const SNAPSHOT_EMIT_DEBOUNCE_MS = 200;
-const SNAPSHOT_MESSAGES_MAX = 40;
-const OLDER_MESSAGES_PAGE_MAX = 40;
-const TERMINAL_COLS = 120;
-const TERMINAL_ROWS = 32;
-const DETACHED_PTY_TTL_MS = 12 * 60 * 60 * 1000;
-const DETACHED_DRAFT_TTL_MS = 5 * 60 * 1000;
-const DETACHED_JSONL_MISSING_TTL_MS = 2 * 60 * 1000;
-const GC_INTERVAL_MS = 5 * 60 * 1000;
-const MAX_DETACHED_PTYS = Number.parseInt(process.env.PTY_REMOTE_MAX_DETACHED_PTYS ?? '5', 10);
-const CLAUDE_PERMISSION_MODE = sanitizePermissionMode(process.env.CLAUDE_PERMISSION_MODE);
+const TERMINAL_REPLAY_MAX_BYTES = getConfigInt('TERMINAL_REPLAY_MAX_BYTES', 1024 * 1024, 1);
+const RECENT_OUTPUT_MAX_CHARS = getConfigInt('RECENT_OUTPUT_MAX_CHARS', 12_000, 1);
+const CLAUDE_READY_TIMEOUT_MS = getConfigInt('CLAUDE_READY_TIMEOUT_MS', 20_000, 0);
+const CODEX_READY_TIMEOUT_MS = getConfigInt('CODEX_READY_TIMEOUT_MS', 20_000, 0);
+const PROMPT_SUBMIT_DELAY_MS = getConfigInt('PROMPT_SUBMIT_DELAY_MS', 120, 0);
+const JSONL_REFRESH_DEBOUNCE_MS = getConfigInt('JSONL_REFRESH_DEBOUNCE_MS', 120, 0);
+const SNAPSHOT_EMIT_DEBOUNCE_MS = getConfigInt('SNAPSHOT_EMIT_DEBOUNCE_MS', 200, 0);
+const SNAPSHOT_MESSAGES_MAX = getConfigInt('SNAPSHOT_MESSAGES_MAX', 40, 1);
+const OLDER_MESSAGES_PAGE_MAX = getConfigInt('OLDER_MESSAGES_PAGE_MAX', 40, 1);
+const TERMINAL_COLS = getConfigInt('TERMINAL_COLS', 120, 1);
+const TERMINAL_ROWS = getConfigInt('TERMINAL_ROWS', 32, 1);
+const DETACHED_PTY_TTL_MS = getConfigInt('DETACHED_PTY_TTL_MS', 12 * 60 * 60 * 1000, 0);
+const DETACHED_DRAFT_TTL_MS = getConfigInt('DETACHED_DRAFT_TTL_MS', 5 * 60 * 1000, 0);
+const DETACHED_JSONL_MISSING_TTL_MS = getConfigInt('DETACHED_JSONL_MISSING_TTL_MS', 2 * 60 * 1000, 0);
+const GC_INTERVAL_MS = getConfigInt('GC_INTERVAL_MS', 5 * 60 * 1000, 0);
+const MAX_DETACHED_PTYS = getConfigInt('PTY_REMOTE_MAX_DETACHED_PTYS', 5, 1);
+const CLAUDE_PERMISSION_MODE = sanitizePermissionMode(getConfigValue('CLAUDE_PERMISSION_MODE'));
 
 let socketClient: Socket | null = null;
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | null = null;
 
 const runtimeOptions: PtyManagerOptions = {
-  claudeBin: process.env.CLAUDE_BIN ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude'),
+  claudeBin: getConfigValue('CLAUDE_BIN') ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude'),
   permissionMode: CLAUDE_PERMISSION_MODE,
   defaultCwd: DEFAULT_ROOT_DIR,
   terminalCols: TERMINAL_COLS,
@@ -76,11 +111,11 @@ const runtimeOptions: PtyManagerOptions = {
   detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
   detachedJsonlMissingTtlMs: DETACHED_JSONL_MISSING_TTL_MS,
   detachedPtyTtlMs: DETACHED_PTY_TTL_MS,
-  maxDetachedPtys: Number.isFinite(MAX_DETACHED_PTYS) && MAX_DETACHED_PTYS > 0 ? MAX_DETACHED_PTYS : 5
+  maxDetachedPtys: MAX_DETACHED_PTYS
 };
 
 const codexRuntimeOptions: CodexProviderRuntimeOptions = {
-  codexBin: process.env.CODEX_BIN ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/codex' : 'codex'),
+  codexBin: getConfigValue('CODEX_BIN') ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/codex' : 'codex'),
   defaultCwd: DEFAULT_ROOT_DIR,
   terminalCols: TERMINAL_COLS,
   terminalRows: TERMINAL_ROWS,
@@ -96,9 +131,9 @@ const codexRuntimeOptions: CodexProviderRuntimeOptions = {
   detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
   detachedJsonlMissingTtlMs: DETACHED_JSONL_MISSING_TTL_MS,
   detachedPtyTtlMs: DETACHED_PTY_TTL_MS,
-  maxDetachedPtys: Number.isFinite(MAX_DETACHED_PTYS) && MAX_DETACHED_PTYS > 0 ? MAX_DETACHED_PTYS : 5,
-  indexPath: process.env.CODEX_SESSION_INDEX_PATH?.trim() || undefined,
-  sessionsRootPath: process.env.CODEX_SESSIONS_ROOT_PATH?.trim() || undefined
+  maxDetachedPtys: MAX_DETACHED_PTYS,
+  historyPath: getConfigValue('CODEX_HISTORY_PATH')?.trim() || undefined,
+  sessionsRootPath: getConfigValue('CODEX_SESSIONS_ROOT_PATH')?.trim() || undefined
 };
 
 function createRuntime(providerId: ProviderId): ProviderRuntime {
@@ -157,7 +192,7 @@ function sanitizeIdentifier(value: string): string {
 }
 
 function resolveCliId(): string {
-  const explicit = process.env.PTY_REMOTE_CLI_ID?.trim();
+  const explicit = getConfigValue('PTY_REMOTE_CLI_ID');
   if (explicit) {
     return sanitizeIdentifier(explicit);
   }

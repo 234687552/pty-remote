@@ -157,6 +157,10 @@ function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPa
         hasOlderMessages: false
       };
 
+  if (isSameConversation && payload.sessionId && baseSnapshot.sessionId !== payload.sessionId) {
+    baseSnapshot.sessionId = payload.sessionId;
+  }
+
   const messagesById = new Map(baseSnapshot.messages.map((message) => [message.id, message]));
   for (const message of payload.upserts) {
     messagesById.set(message.id, message);

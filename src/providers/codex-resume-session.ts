@@ -218,17 +218,12 @@ function buildSessionMetaRecord(
   };
 }
 
-async function appendSessionIndexEntry(indexPath: string, sessionId: string, updatedAt: string): Promise<void> {
-  await fs.mkdir(path.dirname(indexPath), { recursive: true });
-  await fs.appendFile(indexPath, `${JSON.stringify({ id: sessionId, updated_at: updatedAt })}\n`, 'utf8');
-}
-
 export async function prepareCodexResumeSession(
   cwd: string,
   options: CodexResumeSessionOptions = {}
 ): Promise<PreparedCodexResumeSession> {
   const resolvedCwd = path.resolve(cwd);
-  const { indexPath, sessionsRootPath } = resolveCodexHistoryPaths(options);
+  const { sessionsRootPath } = resolveCodexHistoryPaths(options);
   const template = await readTemplateRecord();
   const sessionId = randomUUID();
   const now = new Date();
@@ -251,8 +246,6 @@ export async function prepareCodexResumeSession(
   await fs.mkdir(rolloutDir, { recursive: true });
   await fs.copyFile(TEMPLATE_FILE_PATH, filePath);
   await fs.writeFile(filePath, `${JSON.stringify(nextRecord)}\n`, 'utf8');
-  await appendSessionIndexEntry(indexPath, sessionId, timestamp);
-
   return {
     filePath,
     sessionId

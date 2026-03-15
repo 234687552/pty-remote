@@ -32,12 +32,12 @@ export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChang
       onDeleteProject={controller.deleteProject}
       onPickProjectDirectory={controller.pickProjectDirectory}
       onMobileOpenChange={onMobileOpenChange}
+      onRefreshProjectConversations={(project, providerId) => controller.refreshProjectConversations(project, providerId)}
       onRefreshAllProjects={() => {
         void controller.refreshAllProjectConversations();
       }}
       onSelectCli={controller.selectCli}
       onSelectProject={controller.selectProject}
-      onSelectProvider={controller.selectProvider}
     />
   );
 }

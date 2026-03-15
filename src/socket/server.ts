@@ -32,11 +32,11 @@ const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
 const WEB_BUILD_DIR = path.join(PUBLIC_DIR, 'build');
 const WEB_BUILD_INDEX_FILE = path.join(WEB_BUILD_DIR, 'index.html');
 
-const PORT = Number.parseInt(process.env.PORT ?? '3001', 10);
-const HOST = process.env.HOST ?? '127.0.0.1';
-const TERMINAL_REPLAY_MAX_BYTES = 256 * 1024;
-
 const relayConfig = loadRelayConfig(ROOT_DIR);
+const PORT = Number.parseInt(process.env.PORT ?? String(relayConfig.port), 10);
+const HOST = process.env.HOST ?? relayConfig.host;
+const TERMINAL_REPLAY_MAX_BYTES = relayConfig.terminalReplayMaxBytes;
+const CLI_COMMAND_TIMEOUT_MS = relayConfig.cliCommandTimeoutMs;
 
 const MIME_TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -700,7 +700,7 @@ function forwardCliCommand(record: CliRuntimeRecord, envelope: CliCommandEnvelop
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       resolve({ ok: false, error: 'CLI command timeout' });
-    }, 30_000);
+    }, CLI_COMMAND_TIMEOUT_MS);
 
     record.socket.emit('cli:command', envelope, (result?: CliCommandResult) => {
       clearTimeout(timer);

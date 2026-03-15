@@ -35,6 +35,7 @@ export interface WorkspaceController {
   deleteProject: (project: ProjectEntry) => Promise<void>;
   loadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
   pickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
+  refreshProjectConversations: (project: ProjectEntry, providerId: ProviderId) => Promise<void>;
   refreshAllProjectConversations: () => Promise<void>;
   selectCli: (cliId: string | null) => void;
   selectProject: (project: ProjectEntry) => void;
@@ -93,8 +94,6 @@ export function useWorkspaceController({
     { status: 'idle' } | { requestId: number; requestKey: string; requestToken: string; status: 'selecting' }
   >({ status: 'idle' });
   const conversationActivationSeqRef = useRef(0);
-  const sidebarRefreshTriggeredRef = useRef(false);
-  const previousSidebarCollapsedRef = useRef(store.workspaceState.sidebarCollapsed);
   const sidebarToggleTopRef = useRef(store.sidebarToggleTop);
 
   const {
@@ -118,7 +117,6 @@ export function useWorkspaceController({
   );
   const activeCliConnected = Boolean(activeCli?.connected);
   const connectedProviderIds = useMemo(() => getProviderIds(clis), [clis]);
-  const connectedProviderIdsKey = connectedProviderIds.join('|');
 
   sidebarToggleTopRef.current = store.sidebarToggleTop;
 
@@ -127,8 +125,8 @@ export function useWorkspaceController({
       return;
     }
 
-    void terminal.resumeSession(store.snapshot.sessionId);
-  }, [socketConnected, store.snapshot.sessionId]);
+    void terminal.resumeSession(activeConversation?.sessionId ?? null);
+  }, [activeConversation?.sessionId, socketConnected, terminal]);
 
   useEffect(() => {
     if (!activeConversation || !activeProviderId) {
@@ -311,70 +309,13 @@ export function useWorkspaceController({
       .then(async (result) => {
         const nextSnapshot = (result.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
         store.setSnapshot(nextSnapshot);
-        await terminal.resumeSession(nextSnapshot.sessionId, { force: true });
+        await terminal.resumeSession(activeConversation?.sessionId ?? null, { force: true });
       })
       .catch((runtimeError) => {
         terminal.clearTerminal();
         store.setError(runtimeError instanceof Error ? runtimeError.message : '加载 CLI 运行态失败');
       });
-  }, [activeCliConnected, activeCliId, activeProviderId, sendCommand, socketConnected, terminal]);
-
-  useEffect(() => {
-    if (!socketConnected || store.workspaceState.sidebarCollapsed || store.projectsRefreshing) {
-      return;
-    }
-
-    const nextTarget = store.workspaceState.projects
-      .flatMap((project) =>
-        connectedProviderIds.map((providerId) => ({
-          project,
-          providerId,
-          storageKey: getProjectProviderKey(project.id, providerId)
-        }))
-      )
-      .find(
-        (target) =>
-          !store.projectConversationsByKey[target.storageKey] && store.projectLoadingId !== target.storageKey
-      );
-    if (!nextTarget) {
-      return;
-    }
-
-    void refreshProjectConversations(nextTarget.project, nextTarget.providerId).catch((refreshError) => {
-      store.setError(
-        refreshError instanceof Error ? refreshError.message : `刷新项目 ${nextTarget.project.label} 失败`
-      );
-    });
-  }, [
-    connectedProviderIdsKey,
-    socketConnected,
-    store.projectConversationsByKey,
-    store.projectLoadingId,
-    store.projectsRefreshing,
-    store.workspaceState.projects,
-    store.workspaceState.sidebarCollapsed
-  ]);
-
-  useEffect(() => {
-    const wasCollapsed = previousSidebarCollapsedRef.current;
-    previousSidebarCollapsedRef.current = store.workspaceState.sidebarCollapsed;
-
-    if (store.workspaceState.sidebarCollapsed || store.workspaceState.projects.length === 0 || store.projectLoadingId || store.projectsRefreshing) {
-      return;
-    }
-
-    if (!wasCollapsed && sidebarRefreshTriggeredRef.current) {
-      return;
-    }
-
-    sidebarRefreshTriggeredRef.current = true;
-    void refreshAllProjectConversations();
-  }, [
-    store.projectLoadingId,
-    store.projectsRefreshing,
-    store.workspaceState.projects.length,
-    store.workspaceState.sidebarCollapsed
-  ]);
+  }, [activeCliConnected, activeCliId, activeConversation?.sessionId, activeProviderId, sendCommand, socketConnected, terminal]);
 
   useEffect(() => {
     if (!socketConnected || !activeCli?.connected || !activeProject || !activeConversation || !activeProviderId) {
@@ -431,18 +372,30 @@ export function useWorkspaceController({
           sessions: []
         };
 
-        store.patchWorkspace((current) => ({
-          ...current,
-          projects: current.projects.map((entry) =>
-            entry.id !== project.id
-              ? entry
-              : {
-                  ...entry,
-                  cwd: normalizedPayload.cwd,
-                  label: normalizedPayload.label
-                }
-          )
-        }));
+        store.patchWorkspace((current) => {
+          let changed = false;
+          const nextProjects = current.projects.map((entry) => {
+            if (entry.id !== project.id) {
+              return entry;
+            }
+            if (entry.cwd === normalizedPayload.cwd && entry.label === normalizedPayload.label) {
+              return entry;
+            }
+            changed = true;
+            return {
+              ...entry,
+              cwd: normalizedPayload.cwd,
+              label: normalizedPayload.label
+            };
+          });
+
+          return changed
+            ? {
+                ...current,
+                projects: nextProjects
+              }
+            : current;
+        });
 
         store.setProjectConversations(project.id, normalizedPayload.providerId, (conversations) =>
           mergeProjectConversations(conversations, normalizedPayload.sessions, normalizedPayload.providerId)
@@ -456,6 +409,15 @@ export function useWorkspaceController({
 
     projectRefreshInFlightRef.current.set(storageKey, request);
     return request;
+  }
+
+  async function refreshProjectConversationList(project: ProjectEntry, providerId: ProviderId): Promise<void> {
+    try {
+      store.setError('');
+      await refreshProjectConversations(project, providerId);
+    } catch (refreshError) {
+      store.setError(refreshError instanceof Error ? refreshError.message : `刷新项目 ${project.label} 失败`);
+    }
   }
 
   async function refreshAllProjectConversations(): Promise<void> {
@@ -841,6 +803,7 @@ export function useWorkspaceController({
     deleteProject,
     loadOlderMessages,
     pickProjectDirectory,
+    refreshProjectConversations: refreshProjectConversationList,
     refreshAllProjectConversations,
     selectCli,
     selectProject,

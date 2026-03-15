@@ -30,9 +30,7 @@ export function App() {
         ) ?? null
       : null;
   const activeConversationKey = activeConversation?.conversationKey ?? null;
-  const activeSessionId =
-    activeConversation?.sessionId ??
-    (store.snapshot.conversationKey === activeConversationKey ? store.snapshot.sessionId : null);
+  const activeSessionId = activeConversation?.sessionId ?? null;
   const socketRef = useRef<Socket | null>(null);
 
   const terminal = useTerminalBridge({

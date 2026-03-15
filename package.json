@@ -1,7 +1,7 @@
 {
-  "name": "pty-remote",
+  "name": "@lzdi/pty-remote",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "type": "module",
   "engines": {
     "node": ">=23.0.0"
@@ -22,7 +22,7 @@
     "start:cli": "node --disable-warning=ExperimentalWarning src/cli-main.ts",
     "start:cli:claude": "PTY_REMOTE_PROVIDER=claude node --disable-warning=ExperimentalWarning src/cli-main.ts",
     "start:cli:codex": "PTY_REMOTE_PROVIDER=codex node --disable-warning=ExperimentalWarning src/cli-main.ts",
-    "postinstall": "node scripts/ensure-node-pty-helper.js"
+    "postinstall": "node scripts/ensure-node-pty-helper.js && npm run build:web"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.2.1",
@@ -46,5 +46,8 @@
     "@types/react-dom": "^19.2.3",
     "concurrently": "^9.2.1",
     "typescript": "^5.9.3"
+  },
+  "bin": {
+    "pty-remote": "bin/pty-remote.js"
   }
 }

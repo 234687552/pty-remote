@@ -24,10 +24,10 @@ interface SidebarProps {
   onDeleteProject: (project: ProjectEntry) => Promise<void>;
   onPickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
   onMobileOpenChange: (open: boolean) => void;
+  onRefreshProjectConversations: (project: ProjectEntry, providerId: ProviderId) => Promise<void>;
   onRefreshAllProjects: () => void;
   onSelectCli: (cliId: string | null) => void;
   onSelectProject: (project: ProjectEntry) => void;
-  onSelectProvider: (project: ProjectEntry, providerId: ProviderId) => void;
 }
 
 const PROJECT_DELETE_LONG_PRESS_DELAY_MS = 650;
@@ -87,10 +87,10 @@ export function Sidebar({
   onDeleteProject,
   onPickProjectDirectory,
   onMobileOpenChange,
+  onRefreshProjectConversations,
   onRefreshAllProjects,
   onSelectCli,
-  onSelectProject,
-  onSelectProvider
+  onSelectProject
 }: SidebarProps) {
   const [selectedProviderId, setSelectedProviderId] = useState<ProviderId>(activeProviderId ?? PROVIDER_ORDER[0]);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -102,6 +102,13 @@ export function Sidebar({
   const [addProjectError, setAddProjectError] = useState('');
   const projectDeletePressTimeoutRef = useRef<number | null>(null);
   const longPressTriggeredProjectIdRef = useRef<string | null>(null);
+  const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
+  const sidebarVisible = mobileOpen || !collapsed;
+  const connectedCliKeyForSelectedProvider = clis
+    .filter((cli) => cli.connected && cli.supportedProviders.includes(selectedProviderId))
+    .map((cli) => cli.cliId)
+    .join('|');
+
   useEffect(() => {
     return () => {
       if (projectDeletePressTimeoutRef.current !== null) {
@@ -135,6 +142,14 @@ export function Sidebar({
 
     setDraftProviderId(activeProviderId ?? 'claude');
   }, [activeProviderId, isAddDialogOpen]);
+
+  useEffect(() => {
+    if (!sidebarVisible || !activeProject) {
+      return;
+    }
+
+    void onRefreshProjectConversations(activeProject, selectedProviderId);
+  }, [activeProject?.cwd, activeProject?.id, connectedCliKeyForSelectedProvider, selectedProviderId, sidebarVisible]);
 
   function handleProviderTabSelect(providerId: ProviderId): void {
     setSelectedProviderId(providerId);
