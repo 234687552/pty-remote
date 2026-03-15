@@ -17,6 +17,7 @@ import type {
 import type { CliDescriptor, ProviderId, RuntimeSnapshot } from '@shared/runtime-types.ts';
 
 import { getSocketBaseUrl } from '@/lib/runtime.ts';
+import { readCachedLastSeq } from '@/lib/messages-cache.ts';
 
 interface UseCliSocketOptions {
   activeCliId: string | null;
@@ -99,11 +100,17 @@ export function useCliSocket({
       if (!socket?.connected) {
         return;
       }
+      const lastSeq = readCachedLastSeq(
+        activeProviderIdRef.current,
+        activeConversationKeyRef.current,
+        activeSessionIdRef.current
+      );
       socket.emit('web:runtime-subscribe', {
         targetCliId: activeCliIdRef.current,
         targetProviderId: activeProviderIdRef.current,
         conversationKey: activeConversationKeyRef.current,
-        sessionId: activeSessionIdRef.current
+        sessionId: activeSessionIdRef.current,
+        lastSeq
       } satisfies RuntimeSubscriptionPayload);
     }
 
@@ -172,7 +179,8 @@ export function useCliSocket({
       targetCliId: activeCliId,
       targetProviderId: activeProviderId,
       conversationKey: activeConversationKey,
-      sessionId: activeSessionId
+      sessionId: activeSessionId,
+      lastSeq: readCachedLastSeq(activeProviderId, activeConversationKey, activeSessionId)
     } satisfies RuntimeSubscriptionPayload);
   }, [activeCliId, activeProviderId, activeConversationKey, activeSessionId, socketRef]);
 

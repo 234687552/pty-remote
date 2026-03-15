@@ -133,6 +133,7 @@ export interface RuntimeSubscriptionPayload {
   targetProviderId: ProviderId | null;
   conversationKey: string | null;
   sessionId: string | null;
+  lastSeq?: number | null;
 }
 
 export interface TerminalResumeRequestPayload {
@@ -171,6 +172,7 @@ export interface MessagesUpsertPayload {
   upserts: ChatMessage[];
   recentMessageIds: string[];
   hasOlderMessages: boolean;
+  seq?: number;
 }
 
 export interface WebInitPayload {

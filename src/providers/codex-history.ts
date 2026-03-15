@@ -196,7 +196,7 @@ async function readSessionIndex(indexPath: string): Promise<CodexSessionIndexEnt
     throw error;
   }
 
-  const entries: CodexSessionIndexEntry[] = [];
+  const entriesById = new Map<string, CodexSessionIndexEntry>();
   for (const line of raw.split('\n')) {
     const trimmed = line.trim();
     if (!trimmed) {
@@ -205,14 +205,24 @@ async function readSessionIndex(indexPath: string): Promise<CodexSessionIndexEnt
     try {
       const parsed = JSON.parse(trimmed) as CodexSessionIndexEntry;
       if (parsed.id) {
-        entries.push(parsed);
+        const previous = entriesById.get(parsed.id);
+        if (!previous) {
+          entriesById.set(parsed.id, parsed);
+          continue;
+        }
+
+        const previousUpdatedAt = new Date(previous.updated_at ?? 0).getTime();
+        const nextUpdatedAt = new Date(parsed.updated_at ?? 0).getTime();
+        if (Number.isFinite(nextUpdatedAt) && (!Number.isFinite(previousUpdatedAt) || nextUpdatedAt >= previousUpdatedAt)) {
+          entriesById.set(parsed.id, parsed);
+        }
       }
     } catch {
       // Skip malformed lines from local index.
     }
   }
 
-  return entries.sort((left, right) => {
+  return [...entriesById.values()].sort((left, right) => {
     const diff = new Date(right.updated_at ?? 0).getTime() - new Date(left.updated_at ?? 0).getTime();
     if (diff !== 0) {
       return diff;
@@ -244,8 +254,8 @@ export interface CodexSessionLookupResult {
   timestamp: string | null;
 }
 
-function resolveHistoryPaths(options: CodexHistoryOptions): { indexPath: string; sessionsRootPath: string } {
-  const codexRoot = path.join(os.homedir(), '.codex');
+export function resolveCodexHistoryPaths(options: CodexHistoryOptions): { indexPath: string; sessionsRootPath: string } {
+  const codexRoot = process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex');
   return {
     indexPath: options.indexPath ?? path.join(codexRoot, 'session_index.jsonl'),
     sessionsRootPath: options.sessionsRootPath ?? path.join(codexRoot, 'sessions')
@@ -258,7 +268,7 @@ export async function findCodexSessionFile(sessionId: string, options: CodexHist
     return null;
   }
 
-  const { sessionsRootPath } = resolveHistoryPaths(options);
+  const { sessionsRootPath } = resolveCodexHistoryPaths(options);
   return findSessionFileById(sessionsRootPath, normalized);
 }
 
@@ -268,7 +278,7 @@ export async function findLatestCodexSessionForCwdSince(
   options: CodexHistoryOptions = {}
 ): Promise<CodexSessionLookupResult | null> {
   const normalizedProjectRoot = path.resolve(projectRoot);
-  const { indexPath, sessionsRootPath } = resolveHistoryPaths(options);
+  const { indexPath, sessionsRootPath } = resolveCodexHistoryPaths(options);
   const toleranceMs = 15_000;
   const minTimestampMs = Math.max(0, sinceMs - toleranceMs);
   const indexEntries = await readSessionIndex(indexPath);
@@ -349,7 +359,7 @@ export async function findLatestCodexSessionForCwdSince(
 export async function listCodexProjectSessions(projectRoot: string, maxSessions = DEFAULT_MAX_SESSIONS, options: CodexHistoryOptions = {}): Promise<ProjectSessionSummary[]> {
   const normalizedProjectRoot = path.resolve(projectRoot);
   const normalizedMax = normalizeMaxSessions(maxSessions);
-  const { indexPath, sessionsRootPath } = resolveHistoryPaths(options);
+  const { indexPath, sessionsRootPath } = resolveCodexHistoryPaths(options);
   const indexEntries = await readSessionIndex(indexPath);
   const sessionFiles = await collectSessionFiles(sessionsRootPath);
   const fileBySessionId = buildSessionFileMap(sessionFiles);

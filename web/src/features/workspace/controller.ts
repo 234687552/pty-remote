@@ -8,11 +8,12 @@ import type {
   PickProjectDirectoryResultPayload,
   SelectConversationResultPayload
 } from '@shared/protocol.ts';
-import { PROVIDER_LABELS, type CliDescriptor, type ProviderId } from '@shared/runtime-types.ts';
+import { PROVIDER_LABELS, type CliDescriptor, type ProviderId, type RuntimeSnapshot } from '@shared/runtime-types.ts';
 
 import type { CliSocketController } from '@/hooks/useCliSocket.ts';
 import type { TerminalBridge } from '@/hooks/useTerminalBridge.ts';
 import { createEmptySnapshot } from '@/lib/runtime.ts';
+import { readConversationCache } from '@/lib/messages-cache.ts';
 import {
   clampSidebarToggleTop,
   createDraftConversation,
@@ -128,6 +129,38 @@ export function useWorkspaceController({
 
     void terminal.resumeSession(store.snapshot.sessionId);
   }, [socketConnected, store.snapshot.sessionId]);
+
+  useEffect(() => {
+    if (!activeConversation || !activeProviderId) {
+      return;
+    }
+    if (
+      store.snapshot.providerId === activeProviderId &&
+      store.snapshot.conversationKey === activeConversation.conversationKey
+    ) {
+      return;
+    }
+
+    const cached = readConversationCache(
+      activeProviderId,
+      activeConversation.conversationKey,
+      activeConversation.sessionId
+    );
+    if (!cached || cached.messages.length === 0) {
+      return;
+    }
+
+    const cachedSnapshot: RuntimeSnapshot = {
+      providerId: activeProviderId,
+      conversationKey: activeConversation.conversationKey,
+      sessionId: activeConversation.sessionId ?? cached.sessionId ?? null,
+      status: 'idle',
+      messages: cached.messages,
+      hasOlderMessages: activeConversation.messageCount > cached.messages.length,
+      lastError: null
+    };
+    store.setSnapshot(cachedSnapshot);
+  }, [activeConversation, activeProviderId, store, store.snapshot.conversationKey, store.snapshot.providerId]);
 
   useEffect(() => {
     if (store.mobilePane === 'terminal') {
@@ -520,6 +553,20 @@ export function useWorkspaceController({
         activeProviderId: providerId,
         activeConversationId: conversation.id
       }));
+
+      const cached = readConversationCache(providerId, conversation.conversationKey, conversation.sessionId);
+      if (cached && cached.messages.length > 0) {
+        const cachedSnapshot: RuntimeSnapshot = {
+          providerId,
+          conversationKey: conversation.conversationKey,
+          sessionId: conversation.sessionId ?? cached.sessionId ?? null,
+          status: 'idle',
+          messages: cached.messages,
+          hasOlderMessages: conversation.messageCount > cached.messages.length,
+          lastError: null
+        };
+        store.setSnapshot(cachedSnapshot);
+      }
 
       const result = await sendCommand(
         'select-conversation',

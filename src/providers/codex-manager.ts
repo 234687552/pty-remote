@@ -28,6 +28,7 @@ import {
   stopCodexPtySession,
   type CodexPtySession
 } from './codex-pty.ts';
+import { prepareCodexResumeSession } from './codex-resume-session.ts';
 import { findCodexSessionFile, findLatestCodexSessionForCwdSince, type CodexHistoryOptions } from './codex-history.ts';
 
 export interface CodexManagerOptions extends CodexHistoryOptions {
@@ -1023,6 +1024,16 @@ export class CodexManager {
   private async ensureHandleSession(handle: CodexHandle): Promise<void> {
     if (handle.pty) {
       return;
+    }
+
+    if (!handle.sessionId) {
+      const prepared = await prepareCodexResumeSession(handle.cwd, this.options);
+      handle.sessionId = prepared.sessionId;
+      handle.sessionFilePath = prepared.filePath;
+      handle.discoveryStartedAt = null;
+      handle.jsonlMissingSince = null;
+      handle.runtime.sessionId = prepared.sessionId;
+      this.resetJsonlParsingState(handle, prepared.sessionId);
     }
 
     this.clearLastError(handle);

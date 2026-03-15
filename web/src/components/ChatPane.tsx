@@ -10,6 +10,7 @@ import type {
   ChatMessage,
   ChatMessageBlock,
   MessageStatus,
+  ProviderId,
   ToolResultChatMessageBlock,
   ToolUseChatMessageBlock
 } from '@shared/runtime-types.ts';
@@ -38,6 +39,7 @@ interface ToolCallMeta {
 }
 
 interface ChatPaneProps {
+  activeProviderId: ProviderId | null;
   connected: boolean;
   hasOlderMessages: boolean;
   messages: ChatMessage[];
@@ -473,19 +475,31 @@ const MessageMarkdown = memo(function MessageMarkdown({
   tone = 'default'
 }: {
   content: string;
-  tone?: 'default' | 'inverse';
+  tone?: 'default' | 'inverse' | 'muted';
 }) {
   const isInverse = tone === 'inverse';
+  const isMuted = tone === 'muted';
 
   return (
-    <div className={`markdown-body space-y-3 leading-6 ${isInverse ? 'text-zinc-950' : 'text-zinc-800'}`}>
+    <div
+      className={[
+        'markdown-body space-y-3 leading-6',
+        isInverse ? 'text-zinc-950' : isMuted ? 'text-zinc-500 italic' : 'text-zinc-800'
+      ].join(' ')}
+    >
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           a: ({ ...props }) => (
             <a
               {...props}
-              className={isInverse ? 'text-sky-900 underline underline-offset-2' : 'text-blue-700 underline underline-offset-2'}
+              className={
+                isInverse
+                  ? 'text-sky-900 underline underline-offset-2'
+                  : isMuted
+                    ? 'text-zinc-500 underline underline-offset-2'
+                    : 'text-blue-700 underline underline-offset-2'
+              }
               target="_blank"
               rel="noreferrer"
             />
@@ -493,7 +507,13 @@ const MessageMarkdown = memo(function MessageMarkdown({
           blockquote: ({ ...props }) => (
             <blockquote
               {...props}
-              className={isInverse ? 'border-l-2 border-sky-300 pl-4 text-zinc-700' : 'border-l-2 border-zinc-300 pl-4 text-zinc-600'}
+              className={
+                isInverse
+                  ? 'border-l-2 border-sky-300 pl-4 text-zinc-700'
+                  : isMuted
+                    ? 'border-l-2 border-zinc-200 pl-4 text-zinc-500'
+                    : 'border-l-2 border-zinc-300 pl-4 text-zinc-600'
+              }
             />
           ),
           code: ({ children, className, ...props }) => {
@@ -504,7 +524,9 @@ const MessageMarkdown = memo(function MessageMarkdown({
                 className,
                 isInverse
                   ? 'block overflow-x-auto rounded-xl border border-sky-200 bg-sky-100 px-4 py-3 text-xs leading-5 text-zinc-900'
-                  : 'block overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-3 text-xs leading-5 text-zinc-800'
+                  : isMuted
+                    ? 'block overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-3 text-xs leading-5 text-zinc-600 not-italic'
+                    : 'block overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-3 text-xs leading-5 text-zinc-800'
               ]
                 .filter(Boolean)
                 .join(' ');
@@ -522,16 +544,24 @@ const MessageMarkdown = memo(function MessageMarkdown({
                 className={
                   isInverse
                     ? 'rounded bg-sky-100 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
-                    : 'rounded bg-zinc-200 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
+                    : isMuted
+                      ? 'rounded bg-zinc-100 px-1.5 py-0.5 text-[0.85em] text-zinc-600 not-italic'
+                      : 'rounded bg-zinc-200 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
                 }
               >
                 {children}
               </code>
             );
           },
-          h1: ({ ...props }) => <h1 {...props} className="text-lg font-semibold text-zinc-950" />,
-          h2: ({ ...props }) => <h2 {...props} className="text-base font-semibold text-zinc-950" />,
-          h3: ({ ...props }) => <h3 {...props} className="text-sm font-semibold text-zinc-950" />,
+          h1: ({ ...props }) => (
+            <h1 {...props} className={isMuted ? 'text-lg font-semibold text-zinc-600 italic' : 'text-lg font-semibold text-zinc-950'} />
+          ),
+          h2: ({ ...props }) => (
+            <h2 {...props} className={isMuted ? 'text-base font-semibold text-zinc-600 italic' : 'text-base font-semibold text-zinc-950'} />
+          ),
+          h3: ({ ...props }) => (
+            <h3 {...props} className={isMuted ? 'text-sm font-semibold text-zinc-600 italic' : 'text-sm font-semibold text-zinc-950'} />
+          ),
           li: ({ ...props }) => <li {...props} className="ml-5 list-item" />,
           ol: ({ ...props }) => <ol {...props} className="list-decimal space-y-1 pl-5" />,
           p: ({ ...props }) => <p {...props} className="whitespace-pre-wrap break-words" />,
@@ -547,7 +577,9 @@ const MessageMarkdown = memo(function MessageMarkdown({
                 className={
                   isInverse
                     ? 'overflow-x-auto rounded-xl border border-sky-200 bg-sky-100'
-                    : 'overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100'
+                    : isMuted
+                      ? 'overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 text-zinc-600 not-italic'
+                      : 'overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100'
                 }
               >
                 {children}
@@ -769,7 +801,7 @@ function TextBlockContent({
   tone
 }: {
   block: Extract<ChatMessageBlock, { type: 'text' }>;
-  tone?: 'default' | 'inverse';
+  tone?: 'default' | 'inverse' | 'muted';
 }) {
   return <MessageMarkdown content={block.text} tone={tone} />;
 }
@@ -923,10 +955,16 @@ function ToolUseBlockContent({
   );
 }
 
+function isCodexReasoningMessage(message: ChatMessage): boolean {
+  return message.id.startsWith('codex:assistant_reasoning:');
+}
+
 function MessageContent({ message, toolCallIndex }: { message: ChatMessage; toolCallIndex: Map<string, ToolCallMeta> }) {
   if (message.blocks.length === 0) {
     return null;
   }
+
+  const isReasoning = isCodexReasoningMessage(message);
 
   return (
     <div className="space-y-2">
@@ -936,7 +974,7 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
             <TextBlockContent
               key={block.id}
               block={block}
-              tone={message.role === 'user' ? 'inverse' : 'default'}
+              tone={isReasoning ? 'muted' : message.role === 'user' ? 'inverse' : 'default'}
             />
           );
         }
@@ -959,7 +997,7 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
   );
 }
 
-export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesLoading, visible, onLoadOlderMessages }: ChatPaneProps) {
+export function ChatPane({ activeProviderId, connected, hasOlderMessages, messages, olderMessagesLoading, visible, onLoadOlderMessages }: ChatPaneProps) {
   const setMobileHeaderVisible = useContext(MobileHeaderVisibilityContext);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
@@ -968,6 +1006,8 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
   const questionMessageRefs = useRef(new Map<string, HTMLDivElement>());
   const previousMessagesScrollTopRef = useRef(0);
   const touchStartYRef = useRef<number | null>(null);
+  const [isNearTop, setIsNearTop] = useState(true);
+  const showOlderMessagesButton = hasOlderMessages && (activeProviderId !== 'codex' || isNearTop);
 
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
   const toolCallIndex = useMemo(() => createToolCallIndex(renderableMessages), [renderableMessages]);
@@ -998,10 +1038,12 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
     if (preservedScroll) {
       messagesElement.scrollTop = preservedScroll.scrollTop + (messagesElement.scrollHeight - preservedScroll.scrollHeight);
       preserveMessagesScrollRef.current = null;
+      setIsNearTop(messagesElement.scrollTop <= 12);
       return;
     }
 
     messagesElement.scrollTo({ top: messagesElement.scrollHeight });
+    setIsNearTop(false);
   }, [renderableMessages]);
 
   function setQuestionMessageRef(messageId: string, node: HTMLDivElement | null): void {
@@ -1060,6 +1102,11 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
     const previousTop = previousMessagesScrollTopRef.current;
     const delta = nextTop - previousTop;
     previousMessagesScrollTopRef.current = nextTop;
+
+    const nextNearTop = nextTop <= 12;
+    if (nextNearTop !== isNearTop) {
+      setIsNearTop(nextNearTop);
+    }
 
     if (Math.abs(delta) < 6) {
       return;
@@ -1193,7 +1240,7 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
             <div>
               <h2 className="text-lg font-semibold">Messages</h2>
             </div>
-            {hasOlderMessages ? (
+            {showOlderMessagesButton ? (
               <button
                 type="button"
                 onClick={() => {
@@ -1207,7 +1254,7 @@ export function ChatPane({ connected, hasOlderMessages, messages, olderMessagesL
             ) : null}
           </div>
         </div>
-        {hasOlderMessages ? (
+        {showOlderMessagesButton ? (
           <div className="px-1 pb-2 lg:hidden">
             <button
               type="button"

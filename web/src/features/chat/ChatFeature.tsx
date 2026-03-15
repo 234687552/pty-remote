@@ -15,13 +15,14 @@ interface ChatFeatureProps {
 }
 
 export function ChatFeature({ clis, controller, socketConnected, store }: ChatFeatureProps) {
-  const { connected, visibleMessages } = useMemo(
+  const { activeProviderId, connected, visibleMessages } = useMemo(
     () => selectWorkspaceDerivedState(store, clis, socketConnected),
     [clis, socketConnected, store.olderMessages, store.projectConversationsByKey, store.snapshot, store.workspaceState]
   );
 
   return (
     <ChatPane
+      activeProviderId={activeProviderId}
       connected={connected}
       hasOlderMessages={store.hasOlderMessages}
       messages={visibleMessages}

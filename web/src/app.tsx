@@ -13,6 +13,7 @@ import { useWorkspaceStore } from '@/features/workspace/store.ts';
 import { useCliSocket } from '@/hooks/useCliSocket.ts';
 import { useTerminalBridge } from '@/hooks/useTerminalBridge.ts';
 import { getProjectProviderKey } from '@/lib/workspace.ts';
+import { readCachedLastSeq, updateCachedLastSeq, writeConversationCache } from '@/lib/messages-cache.ts';
 export function App() {
   const store = useWorkspaceStore();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -56,9 +57,26 @@ export function App() {
     },
     onMessagesUpsert: (payload) => {
       store.applyMessagesUpsert(payload);
+      if (payload.seq != null) {
+        updateCachedLastSeq(payload.providerId ?? null, payload.conversationKey ?? null, payload.sessionId ?? null, payload.seq);
+      }
     },
     onSnapshot: (nextSnapshot) => {
       store.setSnapshot(nextSnapshot);
+      if (nextSnapshot.providerId) {
+        const lastSeq = readCachedLastSeq(
+          nextSnapshot.providerId,
+          nextSnapshot.conversationKey ?? null,
+          nextSnapshot.sessionId ?? null
+        );
+        writeConversationCache({
+          providerId: nextSnapshot.providerId,
+          conversationKey: nextSnapshot.conversationKey ?? null,
+          sessionId: nextSnapshot.sessionId ?? null,
+          messages: nextSnapshot.messages,
+          lastSeq
+        });
+      }
     },
     onTerminalChunk: (payload) => {
       terminal.handleTerminalChunk(payload);

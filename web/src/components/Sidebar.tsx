@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { PROVIDER_LABELS, PROVIDER_ORDER, type CliDescriptor, type ProviderId } from '@shared/runtime-types.ts';
 
@@ -31,14 +31,6 @@ interface SidebarProps {
 }
 
 const PROJECT_DELETE_LONG_PRESS_DELAY_MS = 650;
-
-interface ProviderSection {
-  id: ProviderId;
-  label: string;
-  count: number;
-  conversations: ProjectConversationEntry[];
-  emptyText: string;
-}
 
 function formatRelativeTime(value: string): string {
   const timestamp = new Date(value).getTime();
@@ -79,31 +71,6 @@ function formatRelativeTime(value: string): string {
   return `${Math.abs(diffYears)} 年前`;
 }
 
-function buildProviderSections(
-  project: ProjectEntry,
-  clis: CliDescriptor[],
-  projectConversationsByKey: Record<string, ProjectConversationEntry[]>
-): ProviderSection[] {
-  const conversationProviderIds = Object.keys(projectConversationsByKey)
-    .filter((key) => key.startsWith(`${project.id}:`))
-    .map((key) => key.split(':')[1] as ProviderId);
-  const connectedProviderIds = clis.filter((cli) => cli.connected).flatMap((cli) => cli.supportedProviders);
-  const providerIds = [...new Set([...connectedProviderIds, ...conversationProviderIds])].sort(
-    (left, right) => PROVIDER_ORDER.indexOf(left) - PROVIDER_ORDER.indexOf(right)
-  );
-
-  return providerIds.map((providerId) => {
-    const allConversations = projectConversationsByKey[getProjectProviderKey(project.id, providerId)] ?? [];
-    return {
-      id: providerId,
-      label: PROVIDER_LABELS[providerId],
-      count: allConversations.length,
-      conversations: allConversations.slice(0, 5),
-      emptyText: '这个 provider 还没有可用 conversation。'
-    };
-  });
-}
-
 export function Sidebar({
   activeCliId,
   activeProjectId,
@@ -125,7 +92,7 @@ export function Sidebar({
   onSelectProject,
   onSelectProvider
 }: SidebarProps) {
-  const [expandedProvidersByProject, setExpandedProvidersByProject] = useState<Record<string, ProviderId | null>>({});
+  const [selectedProviderId, setSelectedProviderId] = useState<ProviderId>(activeProviderId ?? PROVIDER_ORDER[0]);
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
   const [draftCwd, setDraftCwd] = useState('');
   const [draftProviderId, setDraftProviderId] = useState<ProviderId>(activeProviderId ?? 'claude');
@@ -135,11 +102,6 @@ export function Sidebar({
   const [addProjectError, setAddProjectError] = useState('');
   const projectDeletePressTimeoutRef = useRef<number | null>(null);
   const longPressTriggeredProjectIdRef = useRef<string | null>(null);
-  const providerSectionsByProject = useMemo(
-    () =>
-      Object.fromEntries(projects.map((project) => [project.id, buildProviderSections(project, clis, projectConversationsByKey)])),
-    [clis, projectConversationsByKey, projects]
-  );
   useEffect(() => {
     return () => {
       if (projectDeletePressTimeoutRef.current !== null) {
@@ -174,11 +136,8 @@ export function Sidebar({
     setDraftProviderId(activeProviderId ?? 'claude');
   }, [activeProviderId, isAddDialogOpen]);
 
-  function selectProvider(projectId: string, providerId: ProviderId): void {
-    setExpandedProvidersByProject((current) => ({
-      ...current,
-      [projectId]: providerId
-    }));
+  function handleProviderTabSelect(providerId: ProviderId): void {
+    setSelectedProviderId(providerId);
   }
 
   function clearProjectDeletePressTimeout(): void {
@@ -285,7 +244,31 @@ export function Sidebar({
 
   const sidebarContent = (
     <>
-      <div className="flex-1 space-y-2.5 overflow-auto p-2.5 pt-2.5">
+      <div className="border-b border-zinc-200/80 bg-white/90 px-3 pt-2 pb-1.5 backdrop-blur-sm">
+        <div className="flex items-center gap-3">
+          {PROVIDER_ORDER.map((providerId) => {
+            const selected = selectedProviderId === providerId;
+            return (
+              <button
+                key={providerId}
+                type="button"
+                onClick={() => handleProviderTabSelect(providerId)}
+                className={[
+                  'border-b-2 px-1.5 pb-2 text-xs font-medium transition',
+                  selected
+                    ? 'border-zinc-900 text-zinc-900'
+                    : 'border-transparent text-zinc-500 hover:border-zinc-300 hover:text-zinc-800'
+                ].join(' ')}
+                aria-pressed={selected}
+              >
+                {PROVIDER_LABELS[providerId]}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="flex-1 space-y-2.5 overflow-auto p-2.5">
         {projects.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
             先添加一个项目目录，再在目录下切换历史 conversation。
@@ -293,11 +276,9 @@ export function Sidebar({
         ) : (
           projects.map((project) => {
             const isActiveProject = project.id === activeProjectId;
-            const providerSections = providerSectionsByProject[project.id] ?? [];
-            const defaultProviderId = isActiveProject ? activeProviderId : providerSections[0]?.id ?? null;
-            const selectedProviderId = expandedProvidersByProject[project.id] ?? defaultProviderId;
-            const selectedProvider =
-              providerSections.find((provider) => provider.id === selectedProviderId) ?? providerSections[0] ?? null;
+            const allConversations =
+              selectedProviderId ? projectConversationsByKey[getProjectProviderKey(project.id, selectedProviderId)] ?? [] : [];
+            const conversations = allConversations.slice(0, 5);
 
             return (
               <section
@@ -342,53 +323,29 @@ export function Sidebar({
                   ) : null}
                 </div>
 
-                <div className="mt-1.5 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
-                  <div className="flex min-w-max items-center gap-2">
-                    {providerSections.map((provider) => {
-                      const isSelected = selectedProviderId === provider.id;
-                      return (
-                        <button
-                          key={provider.id}
-                          type="button"
-                          onClick={() => {
-                            onSelectProvider(project, provider.id);
-                            selectProvider(project.id, provider.id);
-                          }}
-                          className={[
-                            'inline-flex items-center gap-0.5 px-0.5 py-0.5 text-[9px] font-medium transition',
-                            isSelected ? 'text-zinc-700' : 'text-zinc-500 hover:text-zinc-700'
-                          ].join(' ')}
-                          aria-pressed={isSelected}
-                        >
-                          <span className="underline underline-offset-[2px]">{provider.label}</span>
-                          <span>[{provider.count}]</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
                 <div className="mt-2 space-y-1">
-                  {!selectedProvider || selectedProvider.conversations.length === 0 ? (
+                  {conversations.length === 0 ? (
                     <div
                       className={[
                         'rounded-xl border px-2.5 py-2 text-[11px]',
                         isActiveProject ? 'border-zinc-300 bg-white/70 text-zinc-600' : 'border-zinc-200 text-zinc-500'
                       ].join(' ')}
                     >
-                      {selectedProvider?.emptyText ?? '这个 project 还没有可用 conversation。'}
+                      {selectedProviderId
+                        ? `这个目录在 ${PROVIDER_LABELS[selectedProviderId]} 下还没有可用 conversation。`
+                        : '这个目录还没有可用 conversation。'}
                     </div>
                   ) : (
-                    selectedProvider.conversations.map((conversation) => {
+                    conversations.map((conversation) => {
                       const isActiveConversation =
                         isActiveProject &&
-                        selectedProvider.id === activeProviderId &&
+                        selectedProviderId === activeProviderId &&
                         conversation.id === activeConversationId;
                       return (
                         <button
                           key={conversation.id}
                           type="button"
-                          onClick={() => onActivateConversation(project, selectedProvider.id, conversation)}
+                          onClick={() => onActivateConversation(project, conversation.providerId, conversation)}
                           className={[
                             'block w-full rounded-xl border px-2.5 py-2 text-left transition',
                             isActiveConversation
@@ -431,7 +388,7 @@ export function Sidebar({
           >
             <option value="">选择 CLI</option>
             {clis.map((entry) => (
-            <option key={entry.cliId} value={entry.cliId}>
+              <option key={entry.cliId} value={entry.cliId}>
                 {entry.label} ({entry.supportedProviders.join(' / ')})
               </option>
             ))}

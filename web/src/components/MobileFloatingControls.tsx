@@ -33,6 +33,14 @@ function FloatingToggleIcon() {
   );
 }
 
+function MenuIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-5 w-5">
+      <path d="M4 6h12M4 10h12M4 14h12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function MobilePaneIcon({ pane }: { pane: WorkspacePane }) {
   if (pane === 'terminal') {
     return (
@@ -211,7 +219,7 @@ export function MobileFloatingControls({
             title={mobileControlsExpanded ? '打开边栏' : '展开移动控制条'}
             aria-pressed={mobileControlsExpanded}
           >
-            <FloatingToggleIcon />
+            {mobileControlsExpanded ? <MenuIcon /> : <FloatingToggleIcon />}
           </button>
 
           {mobileControlsExpanded ? (

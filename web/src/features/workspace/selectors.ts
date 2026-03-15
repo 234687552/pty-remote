@@ -101,7 +101,14 @@ export function selectWorkspaceDerivedState(
     activeProviderId
   );
   const activeConversation = selectActiveConversation(store.workspaceState, activeProjectConversations);
-  const visibleMessages = activeProject && activeConversation ? selectVisibleMessages(store) : [];
+  const conversationMatchesRuntime =
+    Boolean(activeConversation) &&
+    store.snapshot.providerId === activeProviderId &&
+    store.snapshot.conversationKey === activeConversation!.conversationKey;
+  const visibleMessages =
+    activeProject && activeConversation && conversationMatchesRuntime
+      ? selectVisibleMessages(store)
+      : [];
   const connected = Boolean(socketConnected && activeCli?.connected);
   const busy = isBusyStatus(store.snapshot.status);
 
@@ -121,13 +128,11 @@ export function selectWorkspaceDerivedState(
 }
 
 export function selectFooterErrorText(store: WorkspaceStore): string {
-  if (store.error && !isCliOfflineMessage(store.error)) {
-    return store.error;
-  }
-  if (store.snapshot.lastError && !isCliOfflineMessage(store.snapshot.lastError)) {
-    return store.snapshot.lastError;
-  }
-  return '';
+  const candidates = [store.error, store.snapshot.lastError];
+  const next = candidates.find(
+    (message) => message && !isCliOfflineMessage(message) && !isCliCommandTimeoutMessage(message)
+  );
+  return next ?? '';
 }
 
 export function selectHeaderSummary(store: WorkspaceStore, clis: CliDescriptor[]): string[] {
@@ -157,9 +162,17 @@ export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescript
   const { activeCli, activeCliId, activeProject, activeProviderId, activeConversation, busy, canSend, canStop, connected } =
     selectWorkspaceDerivedState(store, clis, socketConnected);
   const providerLabel = activeProviderId ? PROVIDER_LABELS[activeProviderId] : 'provider';
+  const hasCliCommandTimeout =
+    isCliCommandTimeoutMessage(store.error) || isCliCommandTimeoutMessage(store.snapshot.lastError);
 
   const conversationBadge: StatusBadge =
-    !activeProject || !activeConversation
+    hasCliCommandTimeout
+      ? {
+          label: 'status',
+          value: 'timeout',
+          className: 'bg-amber-100 text-amber-700'
+        }
+      : !activeProject || !activeConversation
       ? {
           label: 'status',
           value: 'unselected',
@@ -214,6 +227,10 @@ export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescript
     placeholder,
     socketBadge
   };
+}
+
+function isCliCommandTimeoutMessage(message: string | null | undefined): boolean {
+  return (message ?? '').trim().toLowerCase() === 'cli command timeout';
 }
 
 export function selectSnapshotOrEmpty(snapshot = createEmptySnapshot()) {

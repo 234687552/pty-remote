@@ -28,7 +28,7 @@ export function createCodexLaunchConfig(
   args: string[];
   command: string;
 } {
-  const args = ['--no-alt-screen', '-C', cwd];
+  const args = ['-C', cwd];
   if (resumeSessionId) {
     args.push('resume', resumeSessionId);
   }

@@ -23,6 +23,8 @@ import type {
 } from '../../shared/protocol.ts';
 import type { CliDescriptor, CliProviderRuntimeDescriptor, ProviderId, RuntimeSnapshot, RuntimeStatus } from '../../shared/runtime-types.ts';
 
+import { loadRelayConfig } from './relay-config.ts';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '../..');
@@ -33,6 +35,8 @@ const WEB_BUILD_INDEX_FILE = path.join(WEB_BUILD_DIR, 'index.html');
 const PORT = Number.parseInt(process.env.PORT ?? '3001', 10);
 const HOST = process.env.HOST ?? '127.0.0.1';
 const TERMINAL_REPLAY_MAX_BYTES = 256 * 1024;
+
+const relayConfig = loadRelayConfig(ROOT_DIR);
 
 const MIME_TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -57,6 +61,26 @@ interface CliRuntimeRecord {
 
 const cliRecords = new Map<string, CliRuntimeRecord>();
 const webRuntimeSubscriptions = new Map<string, RuntimeSubscriptionPayload>();
+
+interface RelayReplayEntry {
+  seq: number;
+  payload: MessagesUpsertPayload;
+}
+
+interface RelayReplayBuffer {
+  nextSeq: number;
+  entries: RelayReplayEntry[];
+  lastAccessedAt: number;
+}
+
+interface RelaySnapshotCacheEntry {
+  payload: RuntimeSnapshotPayload;
+  size: number;
+  lastAccessedAt: number;
+}
+
+const relayReplayBuffers = new Map<string, RelayReplayBuffer>();
+const relaySnapshotCache = new Map<string, RelaySnapshotCacheEntry>();
 
 let httpServer: http.Server | null = null;
 
@@ -118,6 +142,139 @@ function resolvePublicAssetPath(urlPathname: string): string | null {
 
 function normalizeSupportedProviders(payload: CliRegisterPayload): ProviderId[] {
   return [...new Set(payload.supportedProviders)].sort();
+}
+
+function resolveConversationCacheKey(
+  cliId: string | null,
+  providerId: ProviderId | null,
+  conversationKey: string | null,
+  sessionId: string | null
+): string | null {
+  if (!cliId || !providerId) {
+    return null;
+  }
+  if (conversationKey) {
+    return `${cliId}:${providerId}:conversation:${conversationKey}`;
+  }
+  if (sessionId) {
+    return `${cliId}:${providerId}:session:${sessionId}`;
+  }
+  return null;
+}
+
+function getReplayBuffer(cacheKey: string): RelayReplayBuffer {
+  const existing = relayReplayBuffers.get(cacheKey);
+  if (existing) {
+    existing.lastAccessedAt = Date.now();
+    return existing;
+  }
+  const created: RelayReplayBuffer = {
+    nextSeq: 0,
+    entries: [],
+    lastAccessedAt: Date.now()
+  };
+  relayReplayBuffers.set(cacheKey, created);
+  return created;
+}
+
+function recordReplayEntry(cacheKey: string, payload: MessagesUpsertPayload): MessagesUpsertPayload {
+  const buffer = getReplayBuffer(cacheKey);
+  const seq = buffer.nextSeq + 1;
+  buffer.nextSeq = seq;
+  const enriched = { ...payload, seq };
+  buffer.entries.push({ seq, payload: enriched });
+  if (buffer.entries.length > relayConfig.replayBufferSize) {
+    buffer.entries.splice(0, buffer.entries.length - relayConfig.replayBufferSize);
+  }
+  buffer.lastAccessedAt = Date.now();
+  return enriched;
+}
+
+function cacheSnapshot(payload: RuntimeSnapshotPayload): void {
+  const cacheKey = resolveConversationCacheKey(
+    payload.cliId,
+    payload.providerId,
+    payload.snapshot.conversationKey,
+    payload.snapshot.sessionId
+  );
+  if (!cacheKey) {
+    return;
+  }
+  const size = Buffer.byteLength(JSON.stringify(payload), 'utf8');
+  if (size > relayConfig.snapshotMaxBytes) {
+    relaySnapshotCache.delete(cacheKey);
+    return;
+  }
+  relaySnapshotCache.set(cacheKey, {
+    payload: cloneValue(payload),
+    size,
+    lastAccessedAt: Date.now()
+  });
+  if (relaySnapshotCache.size <= relayConfig.snapshotCacheMax) {
+    return;
+  }
+  const entries = [...relaySnapshotCache.entries()].sort((left, right) => left[1].lastAccessedAt - right[1].lastAccessedAt);
+  const excess = relaySnapshotCache.size - relayConfig.snapshotCacheMax;
+  for (let i = 0; i < excess; i += 1) {
+    relaySnapshotCache.delete(entries[i]?.[0] ?? '');
+  }
+}
+
+function emitCachedSnapshotToSocket(socket: Socket, subscription: RuntimeSubscriptionPayload): boolean {
+  if (!hasRuntimeSubscriptionTarget(subscription) || !hasRuntimeSubscriptionConversation(subscription)) {
+    return false;
+  }
+  const cacheKey = resolveConversationCacheKey(
+    subscription.targetCliId,
+    subscription.targetProviderId,
+    subscription.conversationKey,
+    subscription.sessionId
+  );
+  if (!cacheKey) {
+    return false;
+  }
+  const cached = relaySnapshotCache.get(cacheKey);
+  if (!cached) {
+    return false;
+  }
+  cached.lastAccessedAt = Date.now();
+  socket.emit('runtime:snapshot', cloneValue(cached.payload));
+  return true;
+}
+
+function replayMessagesToSocket(socket: Socket, subscription: RuntimeSubscriptionPayload): boolean {
+  if (!hasRuntimeSubscriptionTarget(subscription) || !hasRuntimeSubscriptionConversation(subscription)) {
+    return false;
+  }
+  if (subscription.lastSeq == null) {
+    return false;
+  }
+  const cacheKey = resolveConversationCacheKey(
+    subscription.targetCliId,
+    subscription.targetProviderId,
+    subscription.conversationKey,
+    subscription.sessionId
+  );
+  if (!cacheKey) {
+    return false;
+  }
+  const buffer = relayReplayBuffers.get(cacheKey);
+  if (!buffer || buffer.entries.length === 0) {
+    return false;
+  }
+  const oldestSeq = buffer.entries[0]?.seq ?? null;
+  if (oldestSeq === null || subscription.lastSeq < oldestSeq) {
+    return false;
+  }
+  const entries = buffer.entries.filter((entry) => entry.seq > (subscription.lastSeq ?? 0));
+  if (entries.length === 0) {
+    return true;
+  }
+  for (const entry of entries) {
+    socket.emit('runtime:messages-upsert', cloneValue(entry.payload));
+  }
+  buffer.lastAccessedAt = Date.now();
+  return true;
 }
 
 function createProviderRuntimeDescriptor(
@@ -281,11 +438,13 @@ function normalizeRuntimeSubscription(payload?: Partial<RuntimeSubscriptionPaylo
     typeof payload?.conversationKey === 'string' && payload.conversationKey.trim().length > 0 ? payload.conversationKey.trim() : null;
   const sessionId =
     typeof payload?.sessionId === 'string' && payload.sessionId.trim().length > 0 ? payload.sessionId.trim() : null;
+  const lastSeq = typeof payload?.lastSeq === 'number' && Number.isFinite(payload.lastSeq) ? payload.lastSeq : null;
   return {
     targetCliId,
     targetProviderId,
     conversationKey,
-    sessionId
+    sessionId,
+    lastSeq
   };
 }
 
@@ -690,6 +849,7 @@ export async function startSocketServer(): Promise<void> {
         providerId: payload.providerId,
         snapshot: cloneValue(payload.snapshot)
       } satisfies RuntimeSnapshotPayload;
+      cacheSnapshot(snapshotPayload);
       emitRuntimeSnapshotToSubscribers(io, snapshotPayload);
       emitCliStatus(io);
     });
@@ -706,10 +866,17 @@ export async function startSocketServer(): Promise<void> {
 
       record.descriptor.connected = true;
       record.descriptor.lastSeenAt = new Date().toISOString();
-      const messagesPayload = {
+      const basePayload = {
         ...cloneValue(payload),
         cliId
       } satisfies MessagesUpsertPayload;
+      const cacheKey = resolveConversationCacheKey(
+        cliId,
+        basePayload.providerId ?? null,
+        basePayload.conversationKey ?? null,
+        basePayload.sessionId ?? null
+      );
+      const messagesPayload = cacheKey ? recordReplayEntry(cacheKey, basePayload) : basePayload;
       emitMessagesUpsertToSubscribers(io, messagesPayload);
     });
 
@@ -776,6 +943,12 @@ export async function startSocketServer(): Promise<void> {
     socket.on('web:runtime-subscribe', (payload: RuntimeSubscriptionPayload) => {
       const subscription = normalizeRuntimeSubscription(payload);
       webRuntimeSubscriptions.set(socket.id, subscription);
+      if (replayMessagesToSocket(socket, subscription)) {
+        return;
+      }
+      if (emitCachedSnapshotToSocket(socket, subscription)) {
+        return;
+      }
       emitCurrentRuntimeSnapshotToSocket(socket, subscription);
     });
 

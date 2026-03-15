@@ -22,11 +22,19 @@ interface CodexResponseItemPayload {
   call_id?: string;
   name?: string;
   status?: string;
+  action?: {
+    type?: string;
+    query?: string;
+    queries?: string[];
+    url?: string;
+    pattern?: string;
+  } | Record<string, unknown>;
 }
 
 interface CodexEventMsgPayload {
   type?: string;
   message?: string;
+  text?: string;
 }
 
 interface CodexJsonlRecord {
@@ -125,6 +133,32 @@ function createToolResultBlock(callId: string, content: string, isError: boolean
     content,
     isError
   };
+}
+
+function getWebSearchQuery(action: CodexResponseItemPayload['action']): string {
+  if (!action || typeof action !== 'object') {
+    return '';
+  }
+
+  const normalizedAction = action as {
+    type?: string;
+    query?: string;
+    queries?: string[];
+  };
+  if (normalizedAction.type !== 'search') {
+    return '';
+  }
+
+  if (typeof normalizedAction.query === 'string' && normalizedAction.query.trim()) {
+    return normalizedAction.query.trim();
+  }
+
+  if (Array.isArray(normalizedAction.queries)) {
+    const firstQuery = normalizedAction.queries.find((query) => typeof query === 'string' && query.trim());
+    return firstQuery?.trim() ?? '';
+  }
+
+  return '';
 }
 
 function mergeMessageBlocks(existingBlocks: ChatMessageBlock[], nextBlocks: ChatMessageBlock[]): ChatMessageBlock[] {
@@ -255,6 +289,29 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
     return;
   }
 
+  if (payloadType === 'agent_reasoning') {
+    const reasoningText = typeof payload?.text === 'string' ? payload.text.trim() : '';
+    if (!reasoningText) {
+      return;
+    }
+
+    const sequence = state.messageSequence++;
+    const messageId = `codex:assistant_reasoning:${sequence}`;
+    const textBlock = createTextBlock(messageId, reasoningText);
+    if (!textBlock) {
+      return;
+    }
+
+    upsertMessage(state, {
+      id: messageId,
+      role: 'assistant',
+      blocks: [textBlock],
+      status: 'complete',
+      createdAt: normalizeCreatedAt(timestamp, sequence)
+    });
+    return;
+  }
+
   let nextPhase: CodexJsonlRuntimePhase | null = null;
 
   if (payloadType === 'task_started') {
@@ -317,6 +374,24 @@ function applyResponseItem(
       blocks: [createToolUseBlock(callId, payload.name ?? 'unknown', stringifyUnknown(rawInput))],
       status: 'streaming',
       createdAt: normalizeCreatedAt(timestamp, state.messageSequence++)
+    });
+    return;
+  }
+
+  if (payloadType === 'web_search_call') {
+    const query = getWebSearchQuery(payload.action);
+    if (!query) {
+      return;
+    }
+
+    const sequence = state.messageSequence++;
+    const callId = `web_search_${sequence}`;
+    upsertMessage(state, {
+      id: `tool:${callId}`,
+      role: 'assistant',
+      blocks: [createToolUseBlock(callId, 'web_search', query)],
+      status: 'complete',
+      createdAt: normalizeCreatedAt(timestamp, sequence)
     });
     return;
   }
