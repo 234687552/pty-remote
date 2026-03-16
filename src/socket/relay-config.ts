@@ -14,13 +14,14 @@ export interface RelayConfig {
 
 const USER_CONFIG_DIR = path.join(os.homedir(), '.pty-remote');
 const USER_CONFIG_PATH = path.join(USER_CONFIG_DIR, 'relay.conf');
+const MIN_TERMINAL_REPLAY_MAX_BYTES = 1024 * 1024;
 const DEFAULTS: RelayConfig = {
   host: '127.0.0.1',
   port: 3001,
   replayBufferSize: 200,
   snapshotCacheMax: 50,
   snapshotMaxBytes: 200_000,
-  terminalReplayMaxBytes: 256 * 1024,
+  terminalReplayMaxBytes: MIN_TERMINAL_REPLAY_MAX_BYTES,
   cliCommandTimeoutMs: 30_000
 };
 
@@ -92,7 +93,10 @@ export function loadRelayConfig(rootDir: string): RelayConfig {
     replayBufferSize: parseNumber(entries.RELAY_REPLAY_BUFFER_SIZE, DEFAULTS.replayBufferSize),
     snapshotCacheMax: parseNumber(entries.RELAY_SNAPSHOT_CACHE_MAX, DEFAULTS.snapshotCacheMax),
     snapshotMaxBytes: parseNumber(entries.RELAY_SNAPSHOT_MAX_BYTES, DEFAULTS.snapshotMaxBytes),
-    terminalReplayMaxBytes: parseNumber(entries.RELAY_TERMINAL_REPLAY_MAX_BYTES, DEFAULTS.terminalReplayMaxBytes),
+    terminalReplayMaxBytes: Math.max(
+      MIN_TERMINAL_REPLAY_MAX_BYTES,
+      parseNumber(entries.RELAY_TERMINAL_REPLAY_MAX_BYTES, DEFAULTS.terminalReplayMaxBytes)
+    ),
     cliCommandTimeoutMs: parseNumber(entries.RELAY_CLI_COMMAND_TIMEOUT_MS, DEFAULTS.cliCommandTimeoutMs)
   };
 }

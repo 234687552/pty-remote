@@ -49,6 +49,8 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
   const lastTerminalSizeRef = useRef<{ cols: number; rows: number } | null>(null);
   const appliedTerminalOffsetRef = useRef(0);
   const appliedSessionIdRef = useRef<string | null>(null);
+  const appliedCliIdRef = useRef<string | null>(null);
+  const appliedProviderIdRef = useRef<ProviderId | null>(null);
   const terminalResumePendingRef = useRef(false);
   const terminalResyncRequestedRef = useRef(false);
   const bufferedTerminalChunksRef = useRef<TerminalChunkPayload[]>([]);
@@ -76,6 +78,16 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
         }
         terminal.refresh(0, terminal.rows - 1);
       });
+    });
+  }
+
+  function ensureTerminalBottom(): void {
+    requestAnimationFrame(() => {
+      const terminal = terminalInstanceRef.current;
+      if (!terminal) {
+        return;
+      }
+      terminal.scrollToBottom();
     });
   }
 
@@ -170,8 +182,13 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
       return;
     }
 
+    const sameTargetContext =
+      appliedSessionIdRef.current === targetSessionId &&
+      appliedCliIdRef.current === activeCliId &&
+      appliedProviderIdRef.current === activeProviderId;
+
     const payload: TerminalResumeRequestPayload =
-      appliedSessionIdRef.current === targetSessionId
+      sameTargetContext
         ? {
             targetCliId: activeCliId,
             targetProviderId: activeProviderId,
@@ -212,9 +229,13 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
       });
     }
 
+    appliedCliIdRef.current = activeCliId;
+    appliedProviderIdRef.current = activeProviderId;
+
     terminalResumePendingRef.current = false;
     setError((current) => (current === '终端流已失步，正在自动重连同步...' ? '' : current));
     flushBufferedTerminalChunks();
+    ensureTerminalBottom();
   }
 
   function scheduleTerminalResync(sessionId: string | null): void {
@@ -236,8 +257,12 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
     if (!terminal) {
       return true;
     }
-    if (!payload.sessionId || payload.sessionId !== appliedSessionIdRef.current) {
+    if (!payload.sessionId) {
       return true;
+    }
+    if (payload.sessionId !== appliedSessionIdRef.current) {
+      scheduleTerminalResync(payload.sessionId);
+      return false;
     }
 
     const chunkEndOffset = payload.offset + getUtf8ByteLength(payload.data);
@@ -263,6 +288,8 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
     bufferedTerminalChunksRef.current = [];
     terminalResumePendingRef.current = false;
     terminalResyncRequestedRef.current = false;
+    appliedCliIdRef.current = null;
+    appliedProviderIdRef.current = null;
     applyTerminalReplay(null, '', 0);
   }
 
@@ -294,7 +321,11 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
       if (terminalResumePendingRef.current) {
         return;
       }
-      if (appliedSessionIdRef.current === targetSessionId) {
+      if (
+        appliedSessionIdRef.current === targetSessionId &&
+        appliedCliIdRef.current === activeCliId &&
+        appliedProviderIdRef.current === activeProviderId
+      ) {
         return;
       }
     }

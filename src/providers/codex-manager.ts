@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import type {
   GetOlderMessagesResultPayload,
+  ManagedPtyHandleSummary,
   MessagesUpsertPayload,
   SelectConversationResultPayload,
   TerminalChunkPayload
@@ -62,6 +63,12 @@ export interface CodexManagerSelection {
   label: string;
   sessionId: string | null;
   conversationKey: string;
+}
+
+interface RuntimeCleanupTarget {
+  cwd: string;
+  conversationKey: string;
+  sessionId: string | null;
 }
 
 interface AgentRuntimeState extends RuntimeSnapshot {
@@ -129,6 +136,8 @@ function sleep(ms: number): Promise<void> {
     setTimeout(resolve, ms);
   });
 }
+
+const AWAITING_JSONL_TURN_STALE_MS = 4000;
 
 export class CodexManager {
   private readonly providerId: ProviderId = 'codex';
@@ -202,6 +211,33 @@ export class CodexManager {
 
     const handle = this.getActiveHandle();
     resizeCodexPtySession(handle?.pty ?? null, nextCols, nextRows);
+  }
+
+  listManagedPtyHandles(): ManagedPtyHandleSummary[] {
+    return [...this.handles.values()]
+      .map((handle) => {
+        const lastActivityAt = this.getLastActivityAt(handle);
+        return {
+          conversationKey: handle.threadKey,
+          sessionId: handle.sessionId,
+          cwd: handle.cwd,
+          label: handle.label,
+          lifecycle: handle.lifecycle,
+          hasPty: handle.pty !== null,
+          lastActivityAt: lastActivityAt > 0 ? lastActivityAt : null
+        };
+      })
+      .sort((left, right) => {
+        if (left.hasPty !== right.hasPty) {
+          return left.hasPty ? -1 : 1;
+        }
+        const leftLastActivityAt = left.lastActivityAt ?? 0;
+        const rightLastActivityAt = right.lastActivityAt ?? 0;
+        if (leftLastActivityAt !== rightLastActivityAt) {
+          return rightLastActivityAt - leftLastActivityAt;
+        }
+        return left.conversationKey.localeCompare(right.conversationKey);
+      });
   }
 
   async activateConversation(selection: CodexManagerSelection): Promise<SelectConversationResultPayload> {
@@ -351,6 +387,30 @@ export class CodexManager {
     this.emitSnapshotNow();
   }
 
+  async cleanupProject(cwd: string): Promise<void> {
+    const normalizedCwd = await this.normalizeProjectCwd(cwd);
+    const targets = [...this.handles.values()].filter((handle) => handle.cwd === normalizedCwd);
+    for (const handle of targets) {
+      this.destroyHandle(handle);
+    }
+  }
+
+  async cleanupConversation(target: RuntimeCleanupTarget): Promise<void> {
+    const normalizedCwd = await this.normalizeProjectCwd(target.cwd);
+    const matches = [...this.handles.values()].filter((handle) => {
+      if (handle.cwd !== normalizedCwd) {
+        return false;
+      }
+      return (
+        handle.threadKey === target.conversationKey ||
+        (target.sessionId !== null && handle.sessionId === target.sessionId)
+      );
+    });
+    for (const handle of matches) {
+      this.destroyHandle(handle);
+    }
+  }
+
   async getOlderMessages(beforeMessageId?: string, maxMessages = this.options.olderMessagesPageMax): Promise<GetOlderMessagesResultPayload> {
     await this.refreshActiveMessages();
     const handle = this.getActiveHandle();
@@ -495,7 +555,7 @@ export class CodexManager {
   }
 
   private async normalizeSelection(selection: CodexManagerSelection): Promise<CodexManagerSelection> {
-    const cwd = path.resolve(selection.cwd);
+    const cwd = await this.normalizeProjectCwd(selection.cwd);
     const stat = await fs.stat(cwd);
     if (!stat.isDirectory()) {
       throw new Error('Selected project is not a directory');
@@ -507,6 +567,11 @@ export class CodexManager {
       sessionId: selection.sessionId,
       conversationKey: selection.conversationKey
     };
+  }
+
+  private async normalizeProjectCwd(cwd: string): Promise<string> {
+    const resolvedCwd = path.resolve(cwd);
+    return fs.realpath(resolvedCwd).catch(() => resolvedCwd);
   }
 
   private syncHandleSelection(handle: CodexHandle, selection: CodexManagerSelection): void {
@@ -614,13 +679,8 @@ export class CodexManager {
       return 'error';
     }
 
-    const ptyLifecycle = handle.pty ? getCodexPtyLifecycle(handle.pty.recentOutput) : 'not_ready';
-    if (runtimePhase === 'running' || handle.awaitingJsonlTurn || ptyLifecycle === 'running') {
+    if (runtimePhase === 'running' || handle.awaitingJsonlTurn) {
       return 'running';
-    }
-
-    if (handle.pty && ptyLifecycle === 'not_ready' && handle.runtime.allMessages.length === 0) {
-      return 'starting';
     }
 
     return 'idle';
@@ -632,6 +692,19 @@ export class CodexManager {
     }
 
     return handle.awaitingJsonlTurn || handle.runtime.status === 'starting' || handle.runtime.status === 'running';
+  }
+
+  private maybeClearStaleAwaitingTurn(handle: CodexHandle): void {
+    if (!handle.awaitingJsonlTurn || !handle.lastUserInputAt) {
+      return;
+    }
+
+    const elapsedMs = Date.now() - handle.lastUserInputAt;
+    if (elapsedMs < AWAITING_JSONL_TURN_STALE_MS) {
+      return;
+    }
+
+    handle.awaitingJsonlTurn = false;
   }
 
   private selectRecentMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -796,6 +869,7 @@ export class CodexManager {
         handle.awaitingJsonlTurn = false;
         handle.lastJsonlActivityAt = Date.now();
       }
+      this.maybeClearStaleAwaitingTurn(handle);
 
       const nextAllMessages = materializeCodexJsonlMessages(handle.jsonlMessagesState);
       const nextMessages = this.selectRecentMessages(nextAllMessages);
@@ -961,6 +1035,28 @@ export class CodexManager {
     }
     if (!handle.pty) {
       this.discardInactiveHandle(handle);
+    }
+  }
+
+  private destroyHandle(handle: CodexHandle): void {
+    const wasActive = this.isActiveHandle(handle);
+    if (wasActive) {
+      this.activeThreadKey = null;
+      this.currentCwd = this.options.defaultCwd;
+    }
+
+    this.closeJsonlWatcher(handle);
+    this.stopHandlePty(handle);
+    this.handles.delete(handle.threadKey);
+
+    if (wasActive) {
+      if (this.jsonlRefreshTimer) {
+        clearTimeout(this.jsonlRefreshTimer);
+        this.jsonlRefreshTimer = null;
+        this.jsonlRefreshDueAt = null;
+        this.jsonlRefreshReason = null;
+      }
+      this.emitSnapshotNow();
     }
   }
 

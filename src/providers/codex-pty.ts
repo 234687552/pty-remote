@@ -124,7 +124,8 @@ const RUNNING_LINE_PATTERN = /(^|\n)\s*[•◦]\s+[^\n]*esc to interrupt[^\n]*$/
 const PROMPT_LINE_PATTERN = /(^|\n)\s*[›>]\s*(?:Use \/skills[^\n]*)?$/gimu;
 const PROMPT_HINT_PATTERN = /Use \/skills to list available skills|\? for shortcuts|% left/gi;
 const DIRECTORY_TRUST_PROMPT_PATTERN = /Do you trust the contents of this directory\?|Press enter to continue/i;
-const STARTER_PROMPT_PATTERN = /Improve documentation in @filename|To get started, describe a task/i;
+const STARTER_PROMPT_PATTERN =
+  /Improve documentation in @filename|To get started, describe a task|Implement\s+\{feature\}|Implement\s+<feature>/i;
 
 function findLastMatchIndex(pattern: RegExp, text: string): number {
   let lastIndex = -1;

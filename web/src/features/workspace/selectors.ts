@@ -136,15 +136,12 @@ export function selectFooterErrorText(store: WorkspaceStore): string {
 }
 
 export function selectHeaderSummary(store: WorkspaceStore, clis: CliDescriptor[]): string[] {
-  const { activeCli, activeProject, activeProviderId, activeConversation } = selectWorkspaceDerivedState(store, clis, true);
+  const { activeCli, activeProject, activeConversation } = selectWorkspaceDerivedState(store, clis, true);
 
   return [
     `CLI ${compactPreview(activeCli?.label ?? 'unselected', 28)}`,
-    `Provider ${compactPreview(activeProviderId ? PROVIDER_LABELS[activeProviderId] : 'unselected', 18)}`,
-    `项目 ${compactPreview(activeProject?.label ?? activeCli?.label ?? 'Workspace', 28)}`,
     `目录 ${compactPreview(activeProject?.cwd ?? activeCli?.cwd ?? '-', 56)}`,
-    `会话 ${compactPreview(activeConversation?.title ?? '-', 36)}`,
-    `Session ${compactPreview(activeConversation?.sessionId ?? '-', 24)}`
+    `Session ${activeConversation?.sessionId ?? '-'}`
   ];
 }
 

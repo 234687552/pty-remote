@@ -15,7 +15,6 @@ const PENDING_INPUT_LABEL = '待输入';
 interface SessionMetaPayload {
   id?: string;
   cwd?: string;
-  timestamp?: string;
 }
 
 interface HistoryEntry {
@@ -23,11 +22,7 @@ interface HistoryEntry {
   tsMs: number;
   text: string;
   filePath: string;
-}
-
-interface PendingSessionEntry {
-  sessionId: string;
-  updatedAt: string;
+  cwd: string;
 }
 
 function normalizePreview(text: string): string {
@@ -156,50 +151,6 @@ async function resolveSessionFilePath(
   return findSessionFileById(sessionsRootPath, sessionId);
 }
 
-async function listPendingProjectSessions(
-  projectRoot: string,
-  sessionsRootPath: string
-): Promise<PendingSessionEntry[]> {
-  const pendingEntries: PendingSessionEntry[] = [];
-
-  await walkSessionFiles(sessionsRootPath, async (filePath, fileName) => {
-    const meta = await parseSessionMeta(filePath);
-    if (!meta || typeof meta.cwd !== 'string') {
-      return false;
-    }
-
-    const normalizedCwd = path.resolve(meta.cwd);
-    if (normalizedCwd !== projectRoot) {
-      return false;
-    }
-
-    const sessionId =
-      (typeof meta.id === 'string' && meta.id.trim()) ||
-      extractSessionIdFromName(fileName);
-    if (!sessionId) {
-      return false;
-    }
-
-    const parsedTimestamp = typeof meta.timestamp === 'string' ? Date.parse(meta.timestamp) : Number.NaN;
-    let updatedAt = Number.isFinite(parsedTimestamp) ? new Date(parsedTimestamp).toISOString() : '';
-    if (!updatedAt) {
-      const stat = await fs.stat(filePath);
-      updatedAt = new Date(stat.mtimeMs).toISOString();
-    }
-
-    pendingEntries.push({
-      sessionId,
-      updatedAt
-    });
-    return false;
-  });
-
-  return pendingEntries.sort((left, right) => {
-    const timestampDiff = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
-    return timestampDiff || right.sessionId.localeCompare(left.sessionId);
-  });
-}
-
 function coerceHistoryTimestampMs(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value > 1e12 ? value : value * 1000;
@@ -213,14 +164,14 @@ function coerceHistoryTimestampMs(value: unknown): number | null {
   return null;
 }
 
-async function readHistoryTailForProject(
+async function readHistoryTail(
   historyPath: string,
   sessionsRootPath: string,
-  projectRoot: string,
   maxSessions: number,
-  minTimestampMs?: number
+  minTimestampMs?: number,
+  projectRoot?: string
 ): Promise<HistoryEntry[]> {
-  const normalizedProjectRoot = path.resolve(projectRoot);
+  const normalizedProjectRoot = projectRoot ? path.resolve(projectRoot) : null;
   const fileIndex = await buildSessionFileIndex(sessionsRootPath);
   const results: HistoryEntry[] = [];
   const seen = new Set<string>();
@@ -254,7 +205,7 @@ async function readHistoryTailForProject(
       scanned += bytesRead;
 
       const chunk = buffer.toString('utf8', 0, bytesRead) + leftover;
-      let lines = chunk.split('\n');
+      const lines = chunk.split('\n');
       if (position > 0) {
         leftover = lines.shift() ?? '';
       } else {
@@ -280,10 +231,6 @@ async function readHistoryTailForProject(
         }
 
         const text = typeof parsed.text === 'string' ? parsed.text.trim() : '';
-        if (!text) {
-          continue;
-        }
-
         const tsMs = coerceHistoryTimestampMs(parsed.ts);
         if (tsMs === null) {
           continue;
@@ -299,17 +246,26 @@ async function readHistoryTailForProject(
         }
 
         const sessionMeta = await parseSessionMeta(filePath);
-        if (!sessionMeta?.id || !sessionMeta.cwd) {
+        const cwd = typeof sessionMeta?.cwd === 'string' ? sessionMeta.cwd.trim() : '';
+        if (!cwd) {
           continue;
         }
-        if (sessionMeta.id !== sessionId) {
-          continue;
-        }
-        if (path.resolve(sessionMeta.cwd) !== normalizedProjectRoot) {
+        const normalizedCwd = path.resolve(cwd);
+        if (normalizedProjectRoot && normalizedCwd !== normalizedProjectRoot) {
           continue;
         }
 
-        results.push({ sessionId, tsMs, text, filePath });
+        if (sessionMeta?.id && sessionMeta.id !== sessionId) {
+          continue;
+        }
+
+        results.push({
+          sessionId,
+          tsMs,
+          text,
+          filePath,
+          cwd: normalizedCwd
+        });
         seen.add(sessionId);
         if (results.length >= maxSessions) {
           break;
@@ -363,13 +319,7 @@ export async function findLatestCodexSessionForCwdSince(
   const toleranceMs = 15_000;
   const minTimestampMs = Math.max(0, sinceMs - toleranceMs);
 
-  const matches = await readHistoryTailForProject(
-    historyPath,
-    sessionsRootPath,
-    canonicalProjectRoot,
-    1,
-    minTimestampMs
-  );
+  const matches = await readHistoryTail(historyPath, sessionsRootPath, 1, minTimestampMs, canonicalProjectRoot);
   if (matches.length === 0) {
     return null;
   }
@@ -382,6 +332,33 @@ export async function findLatestCodexSessionForCwdSince(
   };
 }
 
+export async function listCodexRecentSessions(
+  maxSessions = DEFAULT_MAX_SESSIONS,
+  options: CodexHistoryOptions = {}
+): Promise<ProjectSessionSummary[]> {
+  const normalizedMax = normalizeMaxSessions(maxSessions);
+  const { historyPath, sessionsRootPath } = resolveCodexHistoryPaths(options);
+
+  const matches = await readHistoryTail(historyPath, sessionsRootPath, normalizedMax);
+  return matches
+    .map((entry) => {
+      const preview = normalizePreview(entry.text) || PENDING_INPUT_LABEL;
+      return {
+        providerId: 'codex',
+        sessionId: entry.sessionId,
+        cwd: entry.cwd,
+        title: compactTitle(preview),
+        preview,
+        updatedAt: new Date(entry.tsMs).toISOString(),
+        messageCount: 0
+      } satisfies ProjectSessionSummary;
+    })
+    .sort((left, right) => {
+      const timestampDiff = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
+      return timestampDiff || right.sessionId.localeCompare(left.sessionId);
+    });
+}
+
 export async function listCodexProjectSessions(
   projectRoot: string,
   maxSessions = DEFAULT_MAX_SESSIONS,
@@ -392,39 +369,22 @@ export async function listCodexProjectSessions(
   const normalizedMax = normalizeMaxSessions(maxSessions);
   const { historyPath, sessionsRootPath } = resolveCodexHistoryPaths(options);
 
-  const matches = await readHistoryTailForProject(historyPath, sessionsRootPath, canonicalProjectRoot, normalizedMax);
-  const summaries = new Map<string, ProjectSessionSummary>();
-
-  for (const entry of matches.sort((left, right) => right.tsMs - left.tsMs)) {
-    const preview = normalizePreview(entry.text);
-    summaries.set(entry.sessionId, {
-      providerId: 'codex',
-      sessionId: entry.sessionId,
-      title: compactTitle(preview),
-      preview,
-      updatedAt: new Date(entry.tsMs).toISOString(),
-      messageCount: 0
-    });
-  }
-
-  for (const entry of await listPendingProjectSessions(canonicalProjectRoot, sessionsRootPath)) {
-    if (summaries.has(entry.sessionId)) {
-      continue;
-    }
-    summaries.set(entry.sessionId, {
-      providerId: 'codex',
-      sessionId: entry.sessionId,
-      title: PENDING_INPUT_LABEL,
-      preview: PENDING_INPUT_LABEL,
-      updatedAt: entry.updatedAt,
-      messageCount: 0
-    });
-  }
-
-  return [...summaries.values()]
+  const matches = await readHistoryTail(historyPath, sessionsRootPath, normalizedMax, undefined, canonicalProjectRoot);
+  return matches
+    .map((entry) => {
+      const preview = normalizePreview(entry.text) || PENDING_INPUT_LABEL;
+      return {
+        providerId: 'codex',
+        sessionId: entry.sessionId,
+        cwd: entry.cwd,
+        title: compactTitle(preview),
+        preview,
+        updatedAt: new Date(entry.tsMs).toISOString(),
+        messageCount: 0
+      } satisfies ProjectSessionSummary;
+    })
     .sort((left, right) => {
       const timestampDiff = new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
       return timestampDiff || right.sessionId.localeCompare(left.sessionId);
-    })
-    .slice(0, normalizedMax);
+    });
 }

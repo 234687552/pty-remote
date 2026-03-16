@@ -170,6 +170,10 @@ export function looksReadyForInput(output: string): boolean {
   return getClaudePtyLifecycle(output) === 'idle';
 }
 
+export function isInsertModeVisible(output: string): boolean {
+  return tailOutput(output).toLowerCase().includes('-- insert --');
+}
+
 export function looksLikeBypassPrompt(output: string): boolean {
   const plainText = tailOutput(output).toLowerCase();
   return plainText.includes('bypass permissions') && plainText.includes('yes, i accept');

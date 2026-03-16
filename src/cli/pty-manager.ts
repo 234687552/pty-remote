@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import type {
   GetOlderMessagesResultPayload,
+  ManagedPtyHandleSummary,
   MessagesUpsertPayload,
   SelectConversationResultPayload,
   TerminalChunkPayload
@@ -20,7 +21,7 @@ import {
 import {
   appendRecentOutput,
   appendReplayChunk,
-  getClaudePtyLifecycle,
+  isInsertModeVisible,
   looksLikeBypassPrompt,
   looksReadyForInput,
   resizeClaudePtySession,
@@ -61,6 +62,12 @@ export interface PtyManagerSelection {
   label: string;
   sessionId: string | null;
   conversationKey: string;
+}
+
+interface RuntimeCleanupTarget {
+  cwd: string;
+  conversationKey: string;
+  sessionId: string | null;
 }
 
 interface AgentRuntimeState extends RuntimeSnapshot {
@@ -126,6 +133,8 @@ function sleep(ms: number): Promise<void> {
     setTimeout(resolve, ms);
   });
 }
+
+const AWAITING_JSONL_TURN_STALE_MS = 4000;
 
 export class PtyManager {
   private readonly providerId: ProviderId = 'claude';
@@ -195,6 +204,33 @@ export class PtyManager {
 
     const handle = this.getActiveHandle();
     resizeClaudePtySession(handle?.pty ?? null, nextCols, nextRows);
+  }
+
+  listManagedPtyHandles(): ManagedPtyHandleSummary[] {
+    return [...this.handles.values()]
+      .map((handle) => {
+        const lastActivityAt = this.getLastActivityAt(handle);
+        return {
+          conversationKey: handle.threadKey,
+          sessionId: handle.sessionId,
+          cwd: handle.cwd,
+          label: handle.label,
+          lifecycle: handle.lifecycle,
+          hasPty: handle.pty !== null,
+          lastActivityAt: lastActivityAt > 0 ? lastActivityAt : null
+        };
+      })
+      .sort((left, right) => {
+        if (left.hasPty !== right.hasPty) {
+          return left.hasPty ? -1 : 1;
+        }
+        const leftLastActivityAt = left.lastActivityAt ?? 0;
+        const rightLastActivityAt = right.lastActivityAt ?? 0;
+        if (leftLastActivityAt !== rightLastActivityAt) {
+          return rightLastActivityAt - leftLastActivityAt;
+        }
+        return left.conversationKey.localeCompare(right.conversationKey);
+      });
   }
 
   async activateConversation(selection: PtyManagerSelection): Promise<SelectConversationResultPayload> {
@@ -335,6 +371,30 @@ export class PtyManager {
     handle.lifecycle = 'attached';
     handle.detachedAt = null;
     this.emitSnapshotNow();
+  }
+
+  async cleanupProject(cwd: string): Promise<void> {
+    const normalizedCwd = await this.normalizeProjectCwd(cwd);
+    const targets = [...this.handles.values()].filter((handle) => handle.cwd === normalizedCwd);
+    for (const handle of targets) {
+      this.destroyHandle(handle);
+    }
+  }
+
+  async cleanupConversation(target: RuntimeCleanupTarget): Promise<void> {
+    const normalizedCwd = await this.normalizeProjectCwd(target.cwd);
+    const matches = [...this.handles.values()].filter((handle) => {
+      if (handle.cwd !== normalizedCwd) {
+        return false;
+      }
+      return (
+        handle.threadKey === target.conversationKey ||
+        (target.sessionId !== null && handle.sessionId === target.sessionId)
+      );
+    });
+    for (const handle of matches) {
+      this.destroyHandle(handle);
+    }
   }
 
   async getOlderMessages(beforeMessageId?: string, maxMessages = this.options.olderMessagesPageMax): Promise<GetOlderMessagesResultPayload> {
@@ -479,20 +539,23 @@ export class PtyManager {
   }
 
   private async normalizeSelection(selection: PtyManagerSelection): Promise<PtyManagerSelection> {
-    const resolvedCwd = path.resolve(selection.cwd);
+    const resolvedCwd = await this.normalizeProjectCwd(selection.cwd);
     const stat = await fs.stat(resolvedCwd);
     if (!stat.isDirectory()) {
       throw new Error('Selected project is not a directory');
     }
 
-    const cwd = await fs.realpath(resolvedCwd).catch(() => resolvedCwd);
-
     return {
-      cwd,
-      label: selection.label.trim() || path.basename(cwd) || cwd,
+      cwd: resolvedCwd,
+      label: selection.label.trim() || path.basename(resolvedCwd) || resolvedCwd,
       sessionId: selection.sessionId,
       conversationKey: selection.conversationKey
     };
+  }
+
+  private async normalizeProjectCwd(cwd: string): Promise<string> {
+    const resolvedCwd = path.resolve(cwd);
+    return fs.realpath(resolvedCwd).catch(() => resolvedCwd);
   }
 
   private syncHandleSelection(handle: PtyHandle, selection: PtyManagerSelection): void {
@@ -603,13 +666,8 @@ export class PtyManager {
       return 'error';
     }
 
-    const ptyLifecycle = handle.pty ? getClaudePtyLifecycle(handle.pty.recentOutput) : 'not_ready';
-    if (runtimePhase === 'running' || handle.awaitingJsonlTurn || ptyLifecycle === 'running') {
+    if (runtimePhase === 'running' || handle.awaitingJsonlTurn) {
       return 'running';
-    }
-
-    if (handle.pty && ptyLifecycle === 'not_ready' && handle.runtime.allMessages.length === 0) {
-      return 'starting';
     }
 
     return 'idle';
@@ -621,6 +679,19 @@ export class PtyManager {
     }
 
     return handle.awaitingJsonlTurn || handle.runtime.status === 'starting' || handle.runtime.status === 'running';
+  }
+
+  private maybeClearStaleAwaitingTurn(handle: PtyHandle): void {
+    if (!handle.awaitingJsonlTurn || !handle.lastUserInputAt) {
+      return;
+    }
+
+    const elapsedMs = Date.now() - handle.lastUserInputAt;
+    if (elapsedMs < AWAITING_JSONL_TURN_STALE_MS) {
+      return;
+    }
+
+    handle.awaitingJsonlTurn = false;
   }
 
   private applyStreamingStatus(messages: ChatMessage[], isRunning: boolean): ChatMessage[] {
@@ -776,6 +847,7 @@ export class PtyManager {
         handle.awaitingJsonlTurn = false;
         handle.lastJsonlActivityAt = Date.now();
       }
+      this.maybeClearStaleAwaitingTurn(handle);
 
       const nextRuntimeStatus = this.resolveRuntimeStatusFromJsonl(handle, handle.jsonlMessagesState.runtimePhase);
       const nextAllMessages = this.applyStreamingStatus(
@@ -924,6 +996,26 @@ export class PtyManager {
     }
     if (!handle.pty) {
       this.discardInactiveHandle(handle);
+    }
+  }
+
+  private destroyHandle(handle: PtyHandle): void {
+    const wasActive = this.isActiveHandle(handle);
+    if (wasActive) {
+      this.activeThreadKey = null;
+      this.currentCwd = this.options.defaultCwd;
+    }
+
+    this.closeJsonlWatcher(handle);
+    this.stopHandlePty(handle);
+    this.handles.delete(handle.threadKey);
+
+    if (wasActive) {
+      if (this.jsonlRefreshTimer) {
+        clearTimeout(this.jsonlRefreshTimer);
+        this.jsonlRefreshTimer = null;
+      }
+      this.emitSnapshotNow();
     }
   }
 
@@ -1108,6 +1200,15 @@ export class PtyManager {
       throw new Error('Claude PTY session is not running');
     }
 
+    const needsPromptRefocus = /⏵⏵\s*bypass permissions on/i.test(handle.pty.recentOutput);
+    if (needsPromptRefocus) {
+      // Claude can leave keyboard focus on the bypass-permissions toggle after a turn.
+      // Shift+Tab cycles focus back to the prompt input before typing.
+      handle.pty.pty.write('\x1b[Z');
+      await sleep(120);
+    }
+
+    const shouldExitInsertMode = isInsertModeVisible(handle.pty.recentOutput);
     const normalizedContent = content.replace(/\r\n/g, '\n');
     if (normalizedContent.includes('\n')) {
       handle.pty.pty.write('\x1b[200~');
@@ -1118,8 +1219,10 @@ export class PtyManager {
     }
 
     await sleep(this.options.promptSubmitDelayMs);
-    handle.pty.pty.write('\x1b');
-    await sleep(80);
+    if (shouldExitInsertMode) {
+      handle.pty.pty.write('\x1b');
+      await sleep(80);
+    }
     handle.pty.pty.write('\r');
   }
 

@@ -381,6 +381,14 @@ function appendTerminalReplay(record: CliProviderRuntimeRecord, chunkOffset: num
   const chunkBytes = Buffer.from(chunk, 'utf8');
   const replayEndOffset = getTerminalReplayEndOffset(record);
 
+  // A PTY restart for the same session resets chunk offsets back to 0.
+  // If we keep appending against the previous replay window, terminal history
+  // gets duplicated in resume payloads.
+  if (chunkOffset === 0 && replayEndOffset > 0) {
+    setTerminalReplay(record, 0, chunkBytes);
+    return;
+  }
+
   if (chunkOffset > replayEndOffset) {
     setTerminalReplay(record, chunkOffset, chunkBytes);
     return;
@@ -795,7 +803,13 @@ export async function startSocketServer(): Promise<void> {
       const previous = cliRecords.get(cliId);
 
       if (previous?.descriptor.connected && previous.socket.id !== socket.id) {
-        previous.socket.disconnect(true);
+        callback?.({
+          ok: false,
+          cliId,
+          errorCode: 'conflict',
+          error: `CLI ${cliId} is already connected`
+        });
+        return;
       }
 
       (socket.data as { cliId?: string }).cliId = cliId;

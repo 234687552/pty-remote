@@ -1,5 +1,6 @@
 import type {
   GetOlderMessagesResultPayload,
+  ManagedPtyHandleSummary,
   ProviderRuntimeRegistration,
   ProjectSessionSummary,
   SelectConversationResultPayload,
@@ -30,11 +31,18 @@ export interface ProviderRuntimeCallbacks {
 export interface ProviderRuntime {
   readonly providerId: ProviderId;
   activateConversation(selection: ProviderRuntimeSelection): Promise<SelectConversationResultPayload>;
+  cleanupConversation(target: {
+    cwd: string;
+    conversationKey: string;
+    sessionId: string | null;
+  }): Promise<void>;
+  cleanupProject(cwd: string): Promise<void>;
   dispatchMessage(content: string): Promise<void>;
   getOlderMessages(beforeMessageId?: string, maxMessages?: number): Promise<GetOlderMessagesResultPayload>;
   getRegistrationPayload(): ProviderRuntimeRegistration;
   getSnapshot(): RuntimeSnapshot;
   listProjectConversations(projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]>;
+  listManagedPtyHandles(): Promise<ManagedPtyHandleSummary[]>;
   replayActiveState(): Promise<void>;
   resetActiveConversation(): Promise<void>;
   shutdown(): Promise<void>;

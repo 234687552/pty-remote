@@ -19,15 +19,29 @@ export interface CliRegisterResult {
   ok: boolean;
   cliId: string;
   error?: string;
+  errorCode?: 'conflict';
 }
 
 export interface ProjectSessionSummary {
   providerId: ProviderId;
   sessionId: string;
+  cwd: string;
   title: string;
   preview: string;
   updatedAt: string;
   messageCount: number;
+}
+
+export type ManagedPtyLifecycle = 'attached' | 'detached' | 'exited' | 'error';
+
+export interface ManagedPtyHandleSummary {
+  conversationKey: string;
+  sessionId: string | null;
+  cwd: string;
+  label: string;
+  lifecycle: ManagedPtyLifecycle;
+  hasPty: boolean;
+  lastActivityAt: number | null;
 }
 
 export type CliCommandName =
@@ -38,7 +52,10 @@ export type CliCommandName =
   | 'get-older-messages'
   | 'pick-project-directory'
   | 'list-project-conversations'
-  | 'select-conversation';
+  | 'list-managed-pty-handles'
+  | 'select-conversation'
+  | 'cleanup-project'
+  | 'cleanup-conversation';
 
 export interface CliCommandPayloadMap {
   'send-message': { content: string };
@@ -54,11 +71,20 @@ export interface CliCommandPayloadMap {
     cwd: string;
     maxSessions?: number;
   };
+  'list-managed-pty-handles': Record<string, never>;
   'select-conversation': {
     cwd: string;
     conversationKey: string;
     sessionId: string | null;
     clientRequestId?: string | null;
+  };
+  'cleanup-project': {
+    cwd: string;
+  };
+  'cleanup-conversation': {
+    cwd: string;
+    conversationKey: string;
+    sessionId: string | null;
   };
 }
 
@@ -86,6 +112,11 @@ export interface ListProjectSessionsResultPayload {
   sessions: ProjectSessionSummary[];
 }
 
+export interface ListManagedPtyHandlesResultPayload {
+  providerId: ProviderId;
+  handles: ManagedPtyHandleSummary[];
+}
+
 export interface SelectConversationResultPayload {
   providerId: ProviderId;
   cwd: string;
@@ -103,7 +134,10 @@ export interface CliCommandResultPayloadMap {
   'get-older-messages': GetOlderMessagesResultPayload;
   'pick-project-directory': PickProjectDirectoryResultPayload;
   'list-project-conversations': ListProjectSessionsResultPayload;
+  'list-managed-pty-handles': ListManagedPtyHandlesResultPayload;
   'select-conversation': SelectConversationResultPayload;
+  'cleanup-project': null;
+  'cleanup-conversation': null;
 }
 
 export interface CliCommandEnvelope<TName extends CliCommandName = CliCommandName> {

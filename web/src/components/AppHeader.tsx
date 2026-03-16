@@ -1,9 +1,11 @@
 import type { SetStateAction } from 'react';
+import { PROVIDER_LABELS, type ProviderId } from '@shared/runtime-types.ts';
 
 import { MobileFloatingControls } from '@/components/MobileFloatingControls.tsx';
 import type { WorkspacePane } from '@/features/workspace/types.ts';
 
 interface AppHeaderProps {
+  activeProviderId: ProviderId | null;
   mobileAgentLabel: string;
   mobilePane: WorkspacePane;
   mobileProjectTitle: string;
@@ -16,6 +18,12 @@ interface AppHeaderProps {
   sidebarCollapsed: boolean;
   sidebarToggleTop: number;
   summary: string[];
+}
+
+function providerBadgeClass(providerId: ProviderId): string {
+  return providerId === 'claude'
+    ? 'bg-orange-100 text-orange-700 border-orange-200'
+    : 'bg-emerald-100 text-emerald-700 border-emerald-200';
 }
 
 function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
@@ -32,6 +40,7 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
 }
 
 export function AppHeader({
+  activeProviderId,
   mobileAgentLabel,
   mobilePane,
   mobileProjectTitle,
@@ -75,6 +84,14 @@ export function AppHeader({
           <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm text-zinc-600 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
             <div className="flex items-center gap-3">
               <span className="text-base font-semibold text-zinc-900">pty-remote</span>
+              <span
+                className={[
+                  'inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium',
+                  activeProviderId ? providerBadgeClass(activeProviderId) : 'border-zinc-200 bg-zinc-100 text-zinc-600'
+                ].join(' ')}
+              >
+                {activeProviderId ? PROVIDER_LABELS[activeProviderId] : '未选择 Provider'}
+              </span>
               {summary.map((item) => (
                 <span key={item} className="flex items-center gap-3">
                   <span className="text-zinc-300">/</span>

@@ -1,6 +1,6 @@
 import type { ProjectSessionSummary } from '../../shared/protocol.ts';
 
-import { listProjectSessions } from '../project-history.ts';
+import { listClaudeRecentSessions } from './claude-history.ts';
 import { PtyManager, type PtyManagerOptions } from '../cli/pty-manager.ts';
 
 import type { ProviderRuntime, ProviderRuntimeCallbacks, ProviderRuntimeSelection } from './provider-runtime.ts';
@@ -16,6 +16,12 @@ export function createClaudeProviderRuntime(
     activateConversation(selection: ProviderRuntimeSelection) {
       return manager.activateConversation(selection);
     },
+    cleanupConversation(target) {
+      return manager.cleanupConversation(target);
+    },
+    cleanupProject(cwd: string) {
+      return manager.cleanupProject(cwd);
+    },
     dispatchMessage(content: string) {
       return manager.dispatchMessage(content);
     },
@@ -28,8 +34,11 @@ export function createClaudeProviderRuntime(
     getSnapshot() {
       return manager.getSnapshot();
     },
-    listProjectConversations(projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]> {
-      return listProjectSessions(projectRoot, maxSessions);
+    listProjectConversations(_projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]> {
+      return listClaudeRecentSessions(maxSessions);
+    },
+    listManagedPtyHandles() {
+      return Promise.resolve(manager.listManagedPtyHandles());
     },
     replayActiveState() {
       return manager.replayActiveState();

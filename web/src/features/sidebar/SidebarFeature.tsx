@@ -24,20 +24,24 @@ export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChang
       mobileOpen={mobileOpen}
       projectConversationsByKey={store.projectConversationsByKey}
       projects={store.workspaceState.projects}
-      projectsRefreshing={store.projectsRefreshing}
+      onAddProject={controller.addProject}
       onActivateConversation={(project, providerId, conversation) => {
         void controller.activateConversation(project, providerId, conversation);
       }}
-      onAddProject={controller.addProject}
+      onCreateConversation={controller.createConversation}
+      onDeleteConversation={(project, providerId, conversation) =>
+        controller.deleteConversation(project, providerId, conversation)
+      }
       onDeleteProject={controller.deleteProject}
-      onPickProjectDirectory={controller.pickProjectDirectory}
+      onImportConversationFromSession={controller.importConversationFromSession}
+      onListManagedPtyHandles={controller.listManagedPtyHandles}
+      onListRecentProjectSessions={(providerId, maxSessions) => controller.listRecentProjectSessions(providerId, maxSessions)}
       onMobileOpenChange={onMobileOpenChange}
-      onRefreshProjectConversations={(project, providerId) => controller.refreshProjectConversations(project, providerId)}
-      onRefreshAllProjects={() => {
-        void controller.refreshAllProjectConversations();
-      }}
       onSelectCli={controller.selectCli}
       onSelectProject={controller.selectProject}
+      onReorderConversation={(project, providerId, sourceConversationId, targetConversationId) =>
+        controller.reorderConversation(project, providerId, sourceConversationId, targetConversationId)
+      }
     />
   );
 }

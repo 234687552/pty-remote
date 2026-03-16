@@ -2,6 +2,7 @@ import type { ProjectSessionSummary } from '@shared/protocol.ts';
 import { PROVIDER_LABELS, type ChatMessage, type ProviderId, type RuntimeSnapshot } from '@shared/runtime-types.ts';
 
 export const PROJECTS_STORAGE_KEY = 'pty-remote.projects.v2';
+export const PROJECT_CONVERSATIONS_STORAGE_KEY = 'pty-remote.project-conversations.v1';
 const LEGACY_PROJECTS_STORAGE_KEY = 'pty-remote.projects.v1';
 export const SIDEBAR_TOGGLE_MARGIN = 16;
 export const SIDEBAR_TOGGLE_SIZE = 40;
@@ -9,6 +10,7 @@ export const SIDEBAR_TOGGLE_SIZE = 40;
 export interface ProjectConversationEntry {
   id: string;
   providerId: ProviderId;
+  ownerCliId: string | null;
   conversationKey: string;
   sessionId: string | null;
   title: string;
@@ -50,8 +52,34 @@ interface LegacyWorkspaceState {
   sidebarToggleTop: number;
 }
 
+interface PersistedProjectConversationsStateV2 {
+  version: 2;
+  byProjectKey: Record<string, ProjectConversationEntry[]>;
+  byDirectoryKey: Record<string, ProjectConversationEntry[]>;
+}
+
 export function getProjectProviderKey(projectId: string, providerId: ProviderId): string {
   return `${projectId}:${providerId}`;
+}
+
+function getDirectoryProviderKey(cwd: string, providerId: ProviderId): string {
+  return `${providerId}:${encodeURIComponent(cwd)}`;
+}
+
+function parseProjectProviderKey(key: string): { projectId: string; providerId: ProviderId } | null {
+  if (key.endsWith(':claude')) {
+    return {
+      projectId: key.slice(0, -':claude'.length),
+      providerId: 'claude'
+    };
+  }
+  if (key.endsWith(':codex')) {
+    return {
+      projectId: key.slice(0, -':codex'.length),
+      providerId: 'codex'
+    };
+  }
+  return null;
 }
 
 export function getThreadLabel(cwd: string): string {
@@ -143,6 +171,138 @@ export function saveWorkspaceState(state: PersistedWorkspaceState): void {
   window.localStorage.setItem(PROJECTS_STORAGE_KEY, JSON.stringify(state));
 }
 
+function normalizeProviderId(value: unknown): ProviderId | null {
+  return value === 'claude' || value === 'codex' ? value : null;
+}
+
+function normalizeConversationEntry(value: unknown): ProjectConversationEntry | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const raw = value as Partial<ProjectConversationEntry>;
+  const providerId = normalizeProviderId(raw.providerId);
+  if (!providerId || typeof raw.id !== 'string') {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const sessionId = typeof raw.sessionId === 'string' && raw.sessionId.trim().length > 0 ? raw.sessionId.trim() : null;
+  const conversationKey =
+    typeof raw.conversationKey === 'string' && raw.conversationKey.trim().length > 0
+      ? raw.conversationKey.trim()
+      : sessionId ?? crypto.randomUUID();
+  const updatedAt =
+    typeof raw.updatedAt === 'string' && Number.isFinite(new Date(raw.updatedAt).getTime()) ? raw.updatedAt : now;
+  const messageCount = Number.isFinite(raw.messageCount) ? Math.max(0, Math.floor(raw.messageCount as number)) : 0;
+
+  return {
+    id: raw.id,
+    providerId,
+    ownerCliId: typeof raw.ownerCliId === 'string' && raw.ownerCliId.trim().length > 0 ? raw.ownerCliId.trim() : null,
+    conversationKey,
+    sessionId,
+    title: typeof raw.title === 'string' && raw.title.trim().length > 0 ? raw.title : 'New conversation',
+    preview: typeof raw.preview === 'string' && raw.preview.trim().length > 0 ? raw.preview : '',
+    updatedAt,
+    messageCount,
+    draft: typeof raw.draft === 'boolean' ? raw.draft : !sessionId
+  };
+}
+
+function normalizeConversationsRecord(value: unknown): Record<string, ProjectConversationEntry[]> {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+
+  const entries = value as Record<string, unknown>;
+  const normalized: Record<string, ProjectConversationEntry[]> = {};
+  for (const [key, rawConversations] of Object.entries(entries)) {
+    if (!Array.isArray(rawConversations)) {
+      continue;
+    }
+
+    const conversations = rawConversations.map(normalizeConversationEntry).filter(Boolean) as ProjectConversationEntry[];
+    if (conversations.length > 0) {
+      normalized[key] = sortConversations(conversations);
+    }
+  }
+  return normalized;
+}
+
+export function loadProjectConversationsState(projects: ProjectEntry[] = []): Record<string, ProjectConversationEntry[]> {
+  try {
+    const raw = window.localStorage.getItem(PROJECT_CONVERSATIONS_STORAGE_KEY);
+    if (!raw) {
+      return {};
+    }
+
+    const parsed = JSON.parse(raw) as unknown;
+    const normalizedProjects = normalizeProjects(projects);
+    const byProject = normalizeConversationsRecord(
+      (parsed as Partial<PersistedProjectConversationsStateV2> | null)?.byProjectKey ?? parsed
+    );
+    if ((parsed as Partial<PersistedProjectConversationsStateV2> | null)?.version !== 2) {
+      return byProject;
+    }
+
+    const byDirectory = normalizeConversationsRecord(
+      (parsed as Partial<PersistedProjectConversationsStateV2> | null)?.byDirectoryKey ?? {}
+    );
+    if (normalizedProjects.length === 0 || Object.keys(byDirectory).length === 0) {
+      return byProject;
+    }
+
+    const restored = { ...byProject };
+    for (const project of normalizedProjects) {
+      for (const providerId of ['claude', 'codex'] as const) {
+        const projectKey = getProjectProviderKey(project.id, providerId);
+        if ((restored[projectKey] ?? []).length > 0) {
+          continue;
+        }
+        const directoryKey = getDirectoryProviderKey(project.cwd, providerId);
+        const directoryConversations = byDirectory[directoryKey];
+        if (directoryConversations && directoryConversations.length > 0) {
+          restored[projectKey] = directoryConversations;
+        }
+      }
+    }
+
+    return restored;
+  } catch {
+    return {};
+  }
+}
+
+export function saveProjectConversationsState(
+  state: Record<string, ProjectConversationEntry[]>,
+  projects: ProjectEntry[] = []
+): void {
+  const normalizedByProject = normalizeConversationsRecord(state);
+  const normalizedProjects = normalizeProjects(projects);
+  const projectsById = new Map(normalizedProjects.map((project) => [project.id, project]));
+  const byDirectoryKey: Record<string, ProjectConversationEntry[]> = {};
+
+  for (const [projectKey, conversations] of Object.entries(normalizedByProject)) {
+    const parsed = parseProjectProviderKey(projectKey);
+    if (!parsed) {
+      continue;
+    }
+    const project = projectsById.get(parsed.projectId);
+    if (!project) {
+      continue;
+    }
+    byDirectoryKey[getDirectoryProviderKey(project.cwd, parsed.providerId)] = conversations;
+  }
+
+  const payload: PersistedProjectConversationsStateV2 = {
+    version: 2,
+    byProjectKey: normalizedByProject,
+    byDirectoryKey
+  };
+  window.localStorage.setItem(PROJECT_CONVERSATIONS_STORAGE_KEY, JSON.stringify(payload));
+}
+
 export function compactPreview(text: string, maxChars = 56): string {
   const normalized = text.replace(/\s+/g, ' ').trim();
   if (!normalized) {
@@ -170,11 +330,16 @@ function getLatestUserTextMessage(messages: ChatMessage[]): ChatMessage | undefi
   return [...messages].reverse().find((message) => message.role === 'user' && Boolean(getMessagePlainText(message)));
 }
 
-export function createDraftConversation(providerId: ProviderId, label = 'New conversation'): ProjectConversationEntry {
+export function createDraftConversation(
+  providerId: ProviderId,
+  ownerCliId: string | null = null,
+  label = 'New conversation'
+): ProjectConversationEntry {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
     providerId,
+    ownerCliId,
     conversationKey: crypto.randomUUID(),
     sessionId: null,
     title: label,
@@ -185,10 +350,14 @@ export function createDraftConversation(providerId: ProviderId, label = 'New con
   };
 }
 
-export function createConversationFromSession(session: ProjectSessionSummary): ProjectConversationEntry {
+export function createConversationFromSession(
+  session: ProjectSessionSummary,
+  ownerCliId: string | null = null
+): ProjectConversationEntry {
   return {
     id: `${session.providerId}:${session.sessionId}`,
     providerId: session.providerId,
+    ownerCliId,
     conversationKey: session.sessionId,
     sessionId: session.sessionId,
     title: session.title,
@@ -200,12 +369,7 @@ export function createConversationFromSession(session: ProjectSessionSummary): P
 }
 
 export function sortConversations(conversations: ProjectConversationEntry[]): ProjectConversationEntry[] {
-  return [...conversations].sort((left, right) => {
-    if (left.draft !== right.draft) {
-      return left.draft ? -1 : 1;
-    }
-    return new Date(right.updatedAt).getTime() - new Date(left.updatedAt).getTime();
-  });
+  return [...conversations];
 }
 
 export function mergeProjectConversations(

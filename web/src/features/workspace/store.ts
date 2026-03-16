@@ -7,7 +7,9 @@ import type { ChatMessage, RuntimeSnapshot } from '@shared/runtime-types.ts';
 import { createEmptySnapshot, mergeChronologicalMessages } from '@/lib/runtime.ts';
 import {
   getProjectProviderKey,
+  loadProjectConversationsState,
   loadWorkspaceState,
+  saveProjectConversationsState,
   saveWorkspaceState,
   type PersistedWorkspaceState,
   type ProjectConversationEntry
@@ -177,6 +179,7 @@ function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPa
 
 function createInitialWorkspaceState(): WorkspaceState {
   const workspaceState = loadWorkspaceState();
+  const projectConversationsByKey = loadProjectConversationsState(workspaceState.projects);
   return {
     error: '',
     hasOlderMessages: false,
@@ -184,7 +187,7 @@ function createInitialWorkspaceState(): WorkspaceState {
     olderMessages: [],
     olderMessagesLoading: false,
     projectLoadingId: null,
-    projectConversationsByKey: {},
+    projectConversationsByKey,
     projectsRefreshing: false,
     prompt: '',
     sidebarToggleTop: workspaceState.sidebarToggleTop,
@@ -314,6 +317,10 @@ export function useWorkspaceStore(): WorkspaceStore {
   useEffect(() => {
     saveWorkspaceState(state.workspaceState);
   }, [state.workspaceState]);
+
+  useEffect(() => {
+    saveProjectConversationsState(state.projectConversationsByKey, state.workspaceState.projects);
+  }, [state.projectConversationsByKey, state.workspaceState.projects]);
 
   function patchWorkspace(updater: (current: PersistedWorkspaceState) => PersistedWorkspaceState): void {
     dispatch({ type: 'workspace/patched', updater });

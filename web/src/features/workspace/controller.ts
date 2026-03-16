@@ -4,8 +4,11 @@ import type React from 'react';
 import type {
   GetOlderMessagesResultPayload,
   GetRuntimeSnapshotResultPayload,
+  ListManagedPtyHandlesResultPayload,
   ListProjectSessionsResultPayload,
+  ManagedPtyHandleSummary,
   PickProjectDirectoryResultPayload,
+  ProjectSessionSummary,
   SelectConversationResultPayload
 } from '@shared/protocol.ts';
 import { PROVIDER_LABELS, type CliDescriptor, type ProviderId, type RuntimeSnapshot } from '@shared/runtime-types.ts';
@@ -16,11 +19,11 @@ import { createEmptySnapshot } from '@/lib/runtime.ts';
 import { readConversationCache } from '@/lib/messages-cache.ts';
 import {
   clampSidebarToggleTop,
+  createConversationFromSession,
   createDraftConversation,
   getProjectProviderKey,
   getThreadLabel,
   hydrateConversationFromSnapshot,
-  mergeProjectConversations,
   sortConversations,
   sortProjects,
   type ProjectConversationEntry,
@@ -30,16 +33,33 @@ import {
 import { selectWorkspaceDerivedState } from './selectors.ts';
 import type { WorkspaceStore } from './store.ts';
 
+export interface ManagedPtyHandleView extends ManagedPtyHandleSummary {
+  providerId: ProviderId;
+  cliId: string;
+  cliLabel: string;
+  runtimeBackend: string;
+  connected: boolean;
+}
+
 export interface WorkspaceController {
   activateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
   addProject: (input: { cwd: string; providerId: ProviderId }) => Promise<void>;
+  createConversation: (project: ProjectEntry, providerId: ProviderId) => Promise<void>;
+  deleteConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
   deleteProject: (project: ProjectEntry) => Promise<void>;
+  importConversationFromSession: (providerId: ProviderId, session: ProjectSessionSummary) => Promise<void>;
+  listRecentProjectSessions: (providerId: ProviderId, maxSessions?: number) => Promise<ProjectSessionSummary[]>;
+  listManagedPtyHandles: () => Promise<ManagedPtyHandleView[]>;
   loadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
   pickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
-  refreshProjectConversations: (project: ProjectEntry, providerId: ProviderId) => Promise<void>;
-  refreshAllProjectConversations: () => Promise<void>;
   selectCli: (cliId: string | null) => void;
   selectProject: (project: ProjectEntry) => void;
+  reorderConversation: (
+    project: ProjectEntry,
+    providerId: ProviderId,
+    sourceConversationId: string,
+    targetConversationId: string
+  ) => Promise<void>;
   selectProvider: (project: ProjectEntry, providerId: ProviderId) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   stopMessage: () => Promise<void>;
@@ -79,10 +99,6 @@ function getConnectedCliForProvider(
   return candidates.find((cli) => cli.cliId === preferredCliId) ?? candidates[0] ?? null;
 }
 
-function getProviderIds(clis: CliDescriptor[]): ProviderId[] {
-  return [...new Set(clis.filter((cli) => cli.connected).flatMap((cli) => cli.supportedProviders))];
-}
-
 export function useWorkspaceController({
   clis,
   sendCommand,
@@ -90,7 +106,6 @@ export function useWorkspaceController({
   store,
   terminal
 }: UseWorkspaceControllerParams): WorkspaceController {
-  const projectRefreshInFlightRef = useRef(new Map<string, Promise<ListProjectSessionsResultPayload>>());
   const conversationActivationRef = useRef<
     { status: 'idle' } | { requestId: number; requestKey: string; requestToken: string; status: 'selecting' }
   >({ status: 'idle' });
@@ -117,7 +132,6 @@ export function useWorkspaceController({
     ]
   );
   const activeCliConnected = Boolean(activeCli?.connected);
-  const connectedProviderIds = useMemo(() => getProviderIds(clis), [clis]);
 
   sidebarToggleTopRef.current = store.sidebarToggleTop;
 
@@ -126,8 +140,8 @@ export function useWorkspaceController({
       return;
     }
 
-    void terminal.resumeSession(activeConversation?.sessionId ?? null);
-  }, [activeConversation?.sessionId, socketConnected, terminal]);
+    void terminal.resumeSession(activeConversation?.sessionId ?? null, { force: true });
+  }, [activeCliId, activeConversation?.conversationKey, activeConversation?.sessionId, activeProviderId, socketConnected, terminal]);
 
   useEffect(() => {
     if (!activeConversation || !activeProviderId) {
@@ -265,8 +279,12 @@ export function useWorkspaceController({
           return conversation;
         }
 
-        const nextConversation = hydrateConversationFromSnapshot(conversation, store.snapshot, visibleMessages);
+        const nextConversation = {
+          ...hydrateConversationFromSnapshot(conversation, store.snapshot, visibleMessages),
+          ownerCliId: activeCli.cliId
+        };
         const shouldUpdate =
+          conversation.ownerCliId !== nextConversation.ownerCliId ||
           conversation.sessionId !== nextConversation.sessionId ||
           conversation.title !== nextConversation.title ||
           conversation.preview !== nextConversation.preview ||
@@ -346,136 +364,113 @@ export function useWorkspaceController({
     void activateConversation(activeProject, activeProviderId, activeConversation, { requestKey });
   }, [activeCli, activeConversation, activeProject, activeProviderId, socketConnected, store.snapshot.conversationKey, store.snapshot.providerId]);
 
-  async function refreshProjectConversations(
-    project: ProjectEntry,
+  async function fetchProjectSessions(
     providerId: ProviderId,
+    maxSessions: number,
     cliId = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId)?.cliId ?? null
   ): Promise<ListProjectSessionsResultPayload> {
-    const storageKey = getProjectProviderKey(project.id, providerId);
-    const existingRequest = projectRefreshInFlightRef.current.get(storageKey);
-    if (existingRequest) {
-      return existingRequest;
-    }
     if (!cliId) {
       throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
     }
 
-    store.setProjectLoadingId(storageKey);
+    const targetCli = clis.find((cli) => cli.cliId === cliId && cli.connected && supportsProvider(cli, providerId)) ?? null;
+    if (!targetCli) {
+      throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
+    }
 
-    const request = (async () => {
-      try {
-        const result = await sendCommand('list-project-conversations', { cwd: project.cwd, maxSessions: 5 }, cliId, providerId);
-        const payload = result.payload as ListProjectSessionsResultPayload | undefined;
-        const normalizedPayload = payload ?? {
-          providerId,
-          cwd: project.cwd,
-          label: project.label,
-          sessions: []
+    const runtimeCwd = targetCli.runtimes[providerId]?.cwd?.trim();
+    const fallbackCwd = runtimeCwd || activeProject?.cwd || targetCli.cwd;
+    if (!fallbackCwd) {
+      throw new Error('无法确定历史会话目录');
+    }
+
+    const result = await sendCommand(
+      'list-project-conversations',
+      { cwd: fallbackCwd, maxSessions },
+      cliId,
+      providerId
+    );
+    return (result.payload as ListProjectSessionsResultPayload | undefined) ?? {
+      providerId,
+      cwd: fallbackCwd,
+      label: getThreadLabel(fallbackCwd),
+      sessions: []
+    };
+  }
+
+  async function listRecentProjectSessions(
+    providerId: ProviderId,
+    maxSessions = 10
+  ): Promise<ProjectSessionSummary[]> {
+    store.setError('');
+    const result = await fetchProjectSessions(providerId, maxSessions);
+    return result.sessions;
+  }
+
+  async function listManagedPtyHandles(): Promise<ManagedPtyHandleView[]> {
+    store.setError('');
+    const targets = clis.flatMap((cli) =>
+      (cli.connected ? cli.supportedProviders : []).map((providerId) => ({
+        cliId: cli.cliId,
+        cliLabel: cli.label,
+        runtimeBackend: cli.runtimeBackend,
+        connected: cli.connected,
+        providerId
+      }))
+    );
+
+    if (targets.length === 0) {
+      return [];
+    }
+
+    const results = await Promise.allSettled(
+      targets.map(async (target) => {
+        const result = await sendCommand('list-managed-pty-handles', {}, target.cliId, target.providerId);
+        const payload = (result.payload as ListManagedPtyHandlesResultPayload | undefined) ?? {
+          providerId: target.providerId,
+          handles: []
         };
+        return payload.handles.map((handle) => ({
+          ...handle,
+          providerId: payload.providerId ?? target.providerId,
+          cliId: target.cliId,
+          cliLabel: target.cliLabel,
+          runtimeBackend: target.runtimeBackend,
+          connected: target.connected
+        }));
+      })
+    );
 
-        store.patchWorkspace((current) => {
-          let changed = false;
-          const nextProjects = current.projects.map((entry) => {
-            if (entry.id !== project.id) {
-              return entry;
-            }
-            if (entry.cwd === normalizedPayload.cwd && entry.label === normalizedPayload.label) {
-              return entry;
-            }
-            changed = true;
-            return {
-              ...entry,
-              cwd: normalizedPayload.cwd,
-              label: normalizedPayload.label
-            };
-          });
-
-          return changed
-            ? {
-                ...current,
-                projects: nextProjects
-              }
-            : current;
-        });
-
-        store.setProjectConversations(project.id, normalizedPayload.providerId, (conversations) =>
-          mergeProjectConversations(conversations, normalizedPayload.sessions, normalizedPayload.providerId)
-        );
-        return normalizedPayload;
-      } finally {
-        projectRefreshInFlightRef.current.delete(storageKey);
-        store.setProjectLoadingId((current) => (current === storageKey ? null : current));
+    const merged: ManagedPtyHandleView[] = [];
+    let firstError = '';
+    for (const result of results) {
+      if (result.status === 'fulfilled') {
+        merged.push(...result.value);
+        continue;
       }
-    })();
-
-    projectRefreshInFlightRef.current.set(storageKey, request);
-    return request;
-  }
-
-  async function refreshProjectConversationList(project: ProjectEntry, providerId: ProviderId): Promise<void> {
-    try {
-      store.setError('');
-      await refreshProjectConversations(project, providerId);
-    } catch (refreshError) {
-      store.setError(refreshError instanceof Error ? refreshError.message : `刷新项目 ${project.label} 失败`);
-    }
-  }
-
-  async function refreshAllProjectConversations(): Promise<void> {
-    if (store.projectsRefreshing || store.workspaceState.projects.length === 0) {
-      return;
+      if (!firstError) {
+        firstError = result.reason instanceof Error ? result.reason.message : '加载 PTY 列表失败';
+      }
     }
 
-    store.setProjectsRefreshing(true);
-
-    try {
-      store.setError('');
-      const latestConversationsByKey = new Map<string, ProjectConversationEntry[]>(
-        Object.entries(store.projectConversationsByKey)
-      );
-      let nextActiveConversationId: string | null | undefined;
-      let refreshErrorMessage = '';
-
-      for (const project of store.workspaceState.projects) {
-        for (const providerId of connectedProviderIds) {
-          try {
-            const history = await refreshProjectConversations(project, providerId);
-            const storageKey = getProjectProviderKey(project.id, providerId);
-            const mergedConversations = mergeProjectConversations(
-              latestConversationsByKey.get(storageKey) ?? [],
-              history.sessions,
-              providerId
-            );
-            latestConversationsByKey.set(storageKey, mergedConversations);
-
-            if (project.id === store.workspaceState.activeProjectId && providerId === store.workspaceState.activeProviderId) {
-              const activeCandidate =
-                mergedConversations.find((conversation) => conversation.id === store.workspaceState.activeConversationId) ??
-                mergedConversations.find((conversation) => conversation.sessionId === history.sessions[0]?.sessionId) ??
-                mergedConversations[0] ??
-                null;
-              nextActiveConversationId = activeCandidate?.id ?? null;
-            }
-          } catch (refreshError) {
-            refreshErrorMessage ||= refreshError instanceof Error ? refreshError.message : `刷新项目 ${project.label} 失败`;
-          }
-        }
-      }
-
-      if (nextActiveConversationId !== undefined) {
-        store.patchWorkspace((current) =>
-          current.activeConversationId === nextActiveConversationId
-            ? current
-            : { ...current, activeConversationId: nextActiveConversationId }
-        );
-      }
-
-      if (refreshErrorMessage) {
-        store.setError(refreshErrorMessage);
-      }
-    } finally {
-      store.setProjectsRefreshing(false);
+    if (merged.length === 0 && firstError) {
+      throw new Error(firstError);
     }
+
+    return merged.sort((left, right) => {
+      if (left.hasPty !== right.hasPty) {
+        return left.hasPty ? -1 : 1;
+      }
+      const leftLastActivityAt = left.lastActivityAt ?? 0;
+      const rightLastActivityAt = right.lastActivityAt ?? 0;
+      if (leftLastActivityAt !== rightLastActivityAt) {
+        return rightLastActivityAt - leftLastActivityAt;
+      }
+      if (left.providerId !== right.providerId) {
+        return left.providerId.localeCompare(right.providerId);
+      }
+      return left.cliLabel.localeCompare(right.cliLabel) || left.conversationKey.localeCompare(right.conversationKey);
+    });
   }
 
   async function activateConversation(
@@ -488,9 +483,14 @@ export function useWorkspaceController({
     let requestToken: string | null = null;
     try {
       store.setError('');
-      const targetCli = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId);
+      const ownerCliId = conversation.ownerCliId?.trim() ?? '';
+      if (!ownerCliId) {
+        throw new Error('会话缺少 ownerCliId，无法定位所属 CLI');
+      }
+      const targetCli =
+        clis.find((cli) => cli.cliId === ownerCliId && cli.connected && supportsProvider(cli, providerId)) ?? null;
       if (!targetCli) {
-        throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
+        throw new Error(`会话所属 CLI 已离线或不支持 ${PROVIDER_LABELS[providerId]}（${ownerCliId}）`);
       }
 
       const requestKey =
@@ -516,6 +516,13 @@ export function useWorkspaceController({
         activeProviderId: providerId,
         activeConversationId: conversation.id
       }));
+      store.setProjectConversations(project.id, providerId, (conversations) =>
+        conversations.map((entry) =>
+          entry.id === conversation.id && entry.ownerCliId !== targetCli.cliId
+            ? { ...entry, ownerCliId: targetCli.cliId }
+            : entry
+        )
+      );
 
       const cached = readConversationCache(providerId, conversation.conversationKey, conversation.sessionId);
       if (cached && cached.messages.length > 0) {
@@ -549,6 +556,7 @@ export function useWorkspaceController({
             entry.id === conversation.id
               ? {
                   ...entry,
+                  ownerCliId: targetCli.cliId,
                   sessionId: selectPayload.sessionId,
                   draft: false
                 }
@@ -607,11 +615,14 @@ export function useWorkspaceController({
         const existingProject = current.projects.find((project) => project.cwd === normalizedCwd);
         if (existingProject) {
           selectedProject = existingProject;
+          const existingConversations =
+            store.projectConversationsByKey[getProjectProviderKey(existingProject.id, selectedProviderId)] ?? [];
           return {
             ...current,
             activeCliId: targetCli.cliId,
             activeProjectId: existingProject.id,
-            activeProviderId: selectedProviderId
+            activeProviderId: selectedProviderId,
+            activeConversationId: existingConversations[0]?.id ?? null
           };
         }
 
@@ -624,25 +635,6 @@ export function useWorkspaceController({
           projects: sortProjects([...current.projects, selectedProject])
         };
       });
-
-      const history = await refreshProjectConversations(selectedProject, selectedProviderId, targetCli.cliId);
-      const storageKey = getProjectProviderKey(selectedProject.id, selectedProviderId);
-      const existingConversations = store.projectConversationsByKey[storageKey] ?? [];
-      const mergedConversations = mergeProjectConversations(
-        existingConversations,
-        history.sessions,
-        selectedProviderId
-      );
-      const nextConversation = createDraftConversation(selectedProviderId);
-      const resolvedConversations = sortConversations([
-        ...mergedConversations.filter((conversation) => !(conversation.draft && !conversation.sessionId)),
-        nextConversation
-      ]);
-
-      store.setProjectConversations(selectedProject.id, selectedProviderId, () => resolvedConversations);
-
-      await activateConversation(selectedProject, selectedProviderId, nextConversation);
-      await refreshProjectConversations(selectedProject, selectedProviderId, targetCli.cliId);
     } catch (addProjectError) {
       const message = addProjectError instanceof Error ? addProjectError.message : '添加项目失败';
       store.setError(message);
@@ -650,49 +642,213 @@ export function useWorkspaceController({
     }
   }
 
+  async function createConversation(project: ProjectEntry, providerId: ProviderId): Promise<void> {
+    try {
+      store.setError('');
+      const targetCli = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId);
+      if (!targetCli) {
+        throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
+      }
+
+      const nextConversation = createDraftConversation(providerId, targetCli.cliId);
+      store.setProjectConversations(project.id, providerId, (conversations) =>
+        sortConversations([nextConversation, ...conversations])
+      );
+      await activateConversation(project, providerId, nextConversation);
+    } catch (createError) {
+      const message = createError instanceof Error ? createError.message : '创建会话失败';
+      store.setError(message);
+      throw createError instanceof Error ? createError : new Error(message);
+    }
+  }
+
+  async function deleteConversation(
+    project: ProjectEntry,
+    providerId: ProviderId,
+    conversation: ProjectConversationEntry
+  ): Promise<void> {
+    try {
+      store.setError('');
+      const ownerCliId = conversation.ownerCliId?.trim() ?? '';
+      const targetCli =
+        ownerCliId.length > 0
+          ? clis.find((cli) => cli.cliId === ownerCliId && cli.connected && supportsProvider(cli, providerId)) ?? null
+          : null;
+      if (targetCli) {
+        await sendCommand(
+          'cleanup-conversation',
+          {
+            cwd: project.cwd,
+            conversationKey: conversation.conversationKey,
+            sessionId: conversation.sessionId
+          },
+          targetCli.cliId,
+          providerId
+        );
+      } else if (ownerCliId.length > 0) {
+        throw new Error(`会话所属 CLI 已离线或不支持 ${PROVIDER_LABELS[providerId]}（${ownerCliId}）`);
+      }
+
+      const storageKey = getProjectProviderKey(project.id, providerId);
+      const existingConversations = store.projectConversationsByKey[storageKey] ?? [];
+      const nextConversations = existingConversations.filter((entry) => entry.id !== conversation.id);
+      store.setProjectConversations(project.id, providerId, () => nextConversations);
+
+      const deletingActiveConversation =
+        store.workspaceState.activeProjectId === project.id &&
+        store.workspaceState.activeProviderId === providerId &&
+        store.workspaceState.activeConversationId === conversation.id;
+      if (!deletingActiveConversation) {
+        return;
+      }
+
+      const fallbackConversation = nextConversations[0] ?? null;
+      if (!fallbackConversation) {
+        store.patchWorkspace((current) =>
+          current.activeProjectId === project.id &&
+          current.activeProviderId === providerId &&
+          current.activeConversationId === conversation.id
+            ? {
+                ...current,
+                activeConversationId: null
+              }
+            : current
+        );
+        store.resetRuntimeForCliChange();
+        terminal.clearTerminal();
+        return;
+      }
+
+      await activateConversation(project, providerId, fallbackConversation);
+    } catch (deleteError) {
+      const message = deleteError instanceof Error ? deleteError.message : '删除会话失败';
+      store.setError(message);
+      throw deleteError instanceof Error ? deleteError : new Error(message);
+    }
+  }
+
+  async function importConversationFromSession(providerId: ProviderId, session: ProjectSessionSummary): Promise<void> {
+    try {
+      store.setError('');
+      const normalizedCwd = session.cwd?.trim();
+      if (!normalizedCwd) {
+        throw new Error('历史会话缺少目录信息');
+      }
+
+      const targetCli = getConnectedCliForProvider(clis, providerId, activeCliId);
+      if (!targetCli) {
+        throw new Error(`No connected CLI available for ${PROVIDER_LABELS[providerId]}`);
+      }
+
+      let project = store.workspaceState.projects.find((entry) => entry.cwd === normalizedCwd) ?? null;
+      if (!project) {
+        project = {
+          id: crypto.randomUUID(),
+          cwd: normalizedCwd,
+          label: getThreadLabel(normalizedCwd)
+        };
+        const nextProject = project;
+        store.patchWorkspace((current) => ({
+          ...current,
+          activeCliId: targetCli.cliId,
+          activeProjectId: nextProject.id,
+          activeProviderId: providerId,
+          activeConversationId: null,
+          projects: sortProjects([...current.projects, nextProject])
+        }));
+      } else {
+        const nextProject = project;
+        store.patchWorkspace((current) => ({
+          ...current,
+          activeCliId: targetCli.cliId,
+          activeProjectId: nextProject.id,
+          activeProviderId: providerId
+        }));
+      }
+
+      const normalizedSession: ProjectSessionSummary = {
+        ...session,
+        providerId,
+        cwd: normalizedCwd
+      };
+      const storageKey = getProjectProviderKey(project.id, providerId);
+      const existingConversations = store.projectConversationsByKey[storageKey] ?? [];
+      const targetConversation =
+        existingConversations.find((entry) => entry.sessionId === normalizedSession.sessionId) ??
+        createConversationFromSession(normalizedSession, targetCli.cliId);
+
+      store.setProjectConversations(project.id, providerId, (conversations) => {
+        const deduped = conversations.filter((entry) => entry.sessionId !== normalizedSession.sessionId);
+        return sortConversations([{ ...targetConversation, ownerCliId: targetCli.cliId }, ...deduped]);
+      });
+
+      await activateConversation(project, providerId, targetConversation);
+    } catch (importError) {
+      const message = importError instanceof Error ? importError.message : '导入会话失败';
+      store.setError(message);
+      throw importError instanceof Error ? importError : new Error(message);
+    }
+  }
+
   async function deleteProject(project: ProjectEntry): Promise<void> {
-    const deletingActiveProject = store.workspaceState.activeProjectId === project.id;
-    const providerIds = new Set<ProviderId>(connectedProviderIds);
+    try {
+      store.setError('');
+      const deletingActiveProject = store.workspaceState.activeProjectId === project.id;
+      const providerIds = new Set<ProviderId>(['claude', 'codex']);
 
-    for (const storageKey of Object.keys(store.projectConversationsByKey)) {
-      if (!storageKey.startsWith(`${project.id}:`)) {
-        continue;
+      for (const storageKey of Object.keys(store.projectConversationsByKey)) {
+        if (!storageKey.startsWith(`${project.id}:`)) {
+          continue;
+        }
+        providerIds.add(storageKey.split(':')[1] as ProviderId);
       }
-      providerIds.add(storageKey.split(':')[1] as ProviderId);
-    }
 
-    for (const storageKey of [...projectRefreshInFlightRef.current.keys()]) {
-      if (storageKey.startsWith(`${project.id}:`)) {
-        projectRefreshInFlightRef.current.delete(storageKey);
+      for (const providerId of providerIds) {
+        const targetCli = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId);
+        if (!targetCli) {
+          continue;
+        }
+        await sendCommand(
+          'cleanup-project',
+          {
+            cwd: project.cwd
+          },
+          targetCli.cliId,
+          providerId
+        );
       }
-    }
 
-    for (const providerId of providerIds) {
-      store.setProjectConversations(project.id, providerId, () => []);
-    }
+      for (const providerId of providerIds) {
+        store.setProjectConversations(project.id, providerId, () => []);
+      }
 
-    store.patchWorkspace((current) => {
-      const nextProjects = sortProjects(current.projects.filter((entry) => entry.id !== project.id));
-      if (current.activeProjectId !== project.id) {
+      store.patchWorkspace((current) => {
+        const nextProjects = sortProjects(current.projects.filter((entry) => entry.id !== project.id));
+        if (current.activeProjectId !== project.id) {
+          return {
+            ...current,
+            projects: nextProjects
+          };
+        }
+
+        const fallbackProject = nextProjects[0] ?? null;
         return {
           ...current,
-          projects: nextProjects
+          projects: nextProjects,
+          activeProjectId: fallbackProject?.id ?? null,
+          activeProviderId: fallbackProject ? current.activeProviderId : null,
+          activeConversationId: null
         };
+      });
+
+      if (deletingActiveProject) {
+        store.resetRuntimeForCliChange();
+        terminal.clearTerminal();
       }
-
-      const fallbackProject = nextProjects[0] ?? null;
-      return {
-        ...current,
-        projects: nextProjects,
-        activeProjectId: fallbackProject?.id ?? null,
-        activeProviderId: fallbackProject ? current.activeProviderId : null,
-        activeConversationId: null
-      };
-    });
-
-    if (deletingActiveProject) {
-      store.resetRuntimeForCliChange();
-      terminal.clearTerminal();
+    } catch (deleteError) {
+      const message = deleteError instanceof Error ? deleteError.message : '删除目录失败';
+      store.setError(message);
+      throw deleteError instanceof Error ? deleteError : new Error(message);
     }
   }
 
@@ -730,6 +886,33 @@ export function useWorkspaceController({
     }));
   }
 
+  async function reorderConversation(
+    project: ProjectEntry,
+    providerId: ProviderId,
+    sourceConversationId: string,
+    targetConversationId: string
+  ): Promise<void> {
+    if (!sourceConversationId || !targetConversationId || sourceConversationId === targetConversationId) {
+      return;
+    }
+
+    store.setProjectConversations(project.id, providerId, (conversations) => {
+      const sourceIndex = conversations.findIndex((entry) => entry.id === sourceConversationId);
+      const targetIndex = conversations.findIndex((entry) => entry.id === targetConversationId);
+      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
+        return conversations;
+      }
+
+      const next = [...conversations];
+      const [moved] = next.splice(sourceIndex, 1);
+      if (!moved) {
+        return conversations;
+      }
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+  }
+
   function selectProvider(project: ProjectEntry, providerId: ProviderId): void {
     const targetCli = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId);
     const conversations = store.projectConversationsByKey[getProjectProviderKey(project.id, providerId)] ?? [];
@@ -757,14 +940,14 @@ export function useWorkspaceController({
       store.setError('请输入消息');
       return;
     }
-    if (!activeProject || !activeConversation || !activeProviderId) {
+    if (!activeCliId || !activeProject || !activeConversation || !activeProviderId) {
       store.setError('请先在侧边栏选择一个 project / provider / conversation');
       return;
     }
 
     try {
       store.setError('');
-      await sendCommand('send-message', { content }, undefined, activeProviderId);
+      await sendCommand('send-message', { content }, activeCliId, activeProviderId);
       store.setPrompt('');
       store.setMobilePane('chat');
     } catch (submitError) {
@@ -773,9 +956,12 @@ export function useWorkspaceController({
   }
 
   async function stopMessage(): Promise<void> {
+    if (!activeCliId) {
+      return;
+    }
     try {
       store.setError('');
-      await sendCommand('stop-message', {}, undefined, activeProviderId);
+      await sendCommand('stop-message', {}, activeCliId, activeProviderId);
     } catch (stopError) {
       store.setError(stopError instanceof Error ? stopError.message : '结束失败');
     }
@@ -812,11 +998,15 @@ export function useWorkspaceController({
   return {
     activateConversation,
     addProject,
+    createConversation,
+    deleteConversation,
     deleteProject,
+    importConversationFromSession,
+    listManagedPtyHandles,
+    listRecentProjectSessions,
     loadOlderMessages,
     pickProjectDirectory,
-    refreshProjectConversations: refreshProjectConversationList,
-    refreshAllProjectConversations,
+    reorderConversation,
     selectCli,
     selectProject,
     selectProvider,

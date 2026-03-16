@@ -1,6 +1,6 @@
 import type { ProjectSessionSummary } from '../../shared/protocol.ts';
 
-import { listCodexProjectSessions } from './codex-history.ts';
+import { listCodexRecentSessions } from './codex-history.ts';
 import { CodexManager, type CodexManagerOptions } from './codex-manager.ts';
 import type { ProviderRuntime, ProviderRuntimeCallbacks, ProviderRuntimeSelection } from './provider-runtime.ts';
 
@@ -17,6 +17,12 @@ export function createCodexProviderRuntime(
     activateConversation(selection: ProviderRuntimeSelection) {
       return manager.activateConversation(selection);
     },
+    cleanupConversation(target) {
+      return manager.cleanupConversation(target);
+    },
+    cleanupProject(cwd: string) {
+      return manager.cleanupProject(cwd);
+    },
     dispatchMessage(content: string) {
       return manager.dispatchMessage(content);
     },
@@ -29,8 +35,11 @@ export function createCodexProviderRuntime(
     getSnapshot() {
       return manager.getSnapshot();
     },
-    listProjectConversations(projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]> {
-      return listCodexProjectSessions(projectRoot, maxSessions, options);
+    listProjectConversations(_projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]> {
+      return listCodexRecentSessions(maxSessions, options);
+    },
+    listManagedPtyHandles() {
+      return Promise.resolve(manager.listManagedPtyHandles());
     },
     replayActiveState() {
       return manager.replayActiveState();

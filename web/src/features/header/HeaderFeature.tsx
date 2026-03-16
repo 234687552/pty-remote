@@ -32,6 +32,7 @@ export function HeaderFeature({
 
   return (
     <AppHeader
+      activeProviderId={store.workspaceState.activeProviderId}
       mobileAgentLabel={activeProviderLabel}
       mobilePane={mobilePane}
       mobileProjectTitle={selectMobileProjectTitle(store, clis)}

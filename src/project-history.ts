@@ -69,7 +69,7 @@ function compactTitle(text: string): string {
   return `${text.slice(0, 41)}...`;
 }
 
-async function summarizeSessionFile(filePath: string): Promise<ProjectSessionSummary | null> {
+async function summarizeSessionFile(filePath: string, cwd: string): Promise<ProjectSessionSummary | null> {
   const rawJsonl = await fs.readFile(filePath, 'utf8');
   const messages = parseClaudeJsonlMessages(rawJsonl);
   if (messages.length === 0) {
@@ -83,6 +83,7 @@ async function summarizeSessionFile(filePath: string): Promise<ProjectSessionSum
   return {
     providerId: 'claude',
     sessionId: path.basename(filePath, '.jsonl'),
+    cwd,
     title: compactTitle(preview),
     preview,
     updatedAt,
@@ -149,7 +150,7 @@ export async function listProjectSessions(projectRoot: string, maxSessions = DEF
   for (const entry of sessionFiles) {
     let summary: ProjectSessionSummary | null;
     try {
-      summary = await summarizeSessionFile(entry.filePath);
+      summary = await summarizeSessionFile(entry.filePath, canonicalProjectRoot);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') {

@@ -419,7 +419,8 @@ function applyResponseItem(
   }
 
   if (payloadType === 'message') {
-    if (payload?.role !== 'assistant') {
+    const role = payload?.role;
+    if (role !== 'assistant' && role !== 'user') {
       return;
     }
 
@@ -434,11 +435,16 @@ function applyResponseItem(
       .map((block) => block.text)
       .join('\n')
       .trim();
-    if (!rememberAssistantText(state, timestamp, messageText)) {
+    if (role === 'assistant' && !rememberAssistantText(state, timestamp, messageText)) {
       return;
     }
 
-    const stableMessageId = createStableTextMessageId('codex:assistant_text', timestamp, messageText, sequence);
+    const stableMessageId = createStableTextMessageId(
+      role === 'assistant' ? 'codex:assistant_text' : 'codex:user',
+      timestamp,
+      messageText,
+      sequence
+    );
     const stableBlocks = extractTextBlocks(payload.content, stableMessageId);
     if (stableBlocks.length === 0) {
       return;
@@ -446,7 +452,7 @@ function applyResponseItem(
 
     upsertMessage(state, {
       id: stableMessageId,
-      role: 'assistant',
+      role,
       blocks: stableBlocks,
       status: 'complete',
       createdAt: normalizeCreatedAt(timestamp, sequence)

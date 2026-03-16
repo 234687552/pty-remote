@@ -13,6 +13,7 @@ import type {
   CliRegisterPayload,
   CliRegisterResult,
   GetRuntimeSnapshotResultPayload,
+  ListManagedPtyHandlesResultPayload,
   ListProjectSessionsResultPayload,
   PickProjectDirectoryResultPayload,
   RuntimeSnapshotPayload
@@ -65,9 +66,7 @@ if (configCodexHome && !process.env.CODEX_HOME) {
 const SOCKET_URL =
   getConfigValue('SOCKET_URL') ?? `http://${getConfigValue('HOST') ?? '127.0.0.1'}:${getConfigValue('PORT') ?? '3001'}`;
 const execFileAsync = promisify(execFile);
-const SUPPORTED_PROVIDERS = resolveSupportedProviders(
-  getConfigValue('PTY_REMOTE_PROVIDERS') ?? getConfigValue('PTY_REMOTE_PROVIDER')
-);
+const SUPPORTED_PROVIDERS = resolveSupportedProviders(resolveProvidersConfigValue());
 const CLI_ID = resolveCliId();
 const CLI_LABEL = resolveCliLabel();
 const PTY_BACKEND_NAME = 'node-pty';
@@ -249,6 +248,30 @@ function sanitizePermissionMode(value: string | undefined): string {
   return 'bypassPermissions';
 }
 
+function resolveProvidersConfigValue(): string | undefined {
+  const envProviders = process.env.PTY_REMOTE_PROVIDERS?.trim();
+  if (envProviders) {
+    return envProviders;
+  }
+
+  const envProvider = process.env.PTY_REMOTE_PROVIDER?.trim();
+  if (envProvider) {
+    return envProvider;
+  }
+
+  const configProviders = cliConfig.PTY_REMOTE_PROVIDERS?.trim();
+  if (configProviders) {
+    return configProviders;
+  }
+
+  const configProvider = cliConfig.PTY_REMOTE_PROVIDER?.trim();
+  if (configProvider) {
+    return configProvider;
+  }
+
+  return undefined;
+}
+
 function resolveSupportedProviders(value: string | undefined): ProviderId[] {
   const normalizedProviders = (value ?? '')
     .split(',')
@@ -334,6 +357,28 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
       };
     }
 
+    if (envelope.name === 'cleanup-project') {
+      const payload = envelope.payload as { cwd: string };
+      const runtime = getRuntime(requireTargetProviderId(envelope));
+      await runtime.cleanupProject(payload.cwd);
+      return { ok: true, payload: null };
+    }
+
+    if (envelope.name === 'cleanup-conversation') {
+      const payload = envelope.payload as {
+        cwd: string;
+        conversationKey: string;
+        sessionId: string | null;
+      };
+      const runtime = getRuntime(requireTargetProviderId(envelope));
+      await runtime.cleanupConversation({
+        cwd: payload.cwd,
+        conversationKey: payload.conversationKey,
+        sessionId: payload.sessionId ?? null
+      });
+      return { ok: true, payload: null };
+    }
+
     if (envelope.name === 'list-project-conversations') {
       const payload = envelope.payload as { cwd: string; maxSessions?: number };
       const runtime = getRuntime(requireTargetProviderId(envelope));
@@ -346,6 +391,17 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
           label: path.basename(cwd) || cwd,
           sessions: await runtime.listProjectConversations(cwd, payload.maxSessions)
         } satisfies ListProjectSessionsResultPayload
+      };
+    }
+
+    if (envelope.name === 'list-managed-pty-handles') {
+      const runtime = getRuntime(requireTargetProviderId(envelope));
+      return {
+        ok: true,
+        payload: {
+          providerId: runtime.providerId,
+          handles: await runtime.listManagedPtyHandles()
+        } satisfies ListManagedPtyHandlesResultPayload
       };
     }
 
@@ -420,6 +476,9 @@ function connectSocketClient(): void {
       } satisfies CliRegisterPayload,
       (result: CliRegisterResult) => {
         if (!result.ok) {
+          if (result.errorCode === 'conflict') {
+            socket.io.opts.reconnection = false;
+          }
           const message = result.error || `CLI ${CLI_ID} registration was rejected`;
           console.error(message);
           void shutdownCliClient(message, 1);
