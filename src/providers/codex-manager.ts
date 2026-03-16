@@ -145,6 +145,10 @@ export class CodexManager {
 
   private jsonlRefreshTimer: NodeJS.Timeout | null = null;
 
+  private jsonlRefreshDueAt: number | null = null;
+
+  private jsonlRefreshReason: string | null = null;
+
   private snapshotEmitTimer: NodeJS.Timeout | null = null;
 
   private readonly gcTimer: NodeJS.Timeout;
@@ -269,7 +273,7 @@ export class CodexManager {
       handle.lastUserInputAt = Date.now();
       this.setStatus(handle, 'running', true);
       await this.sendPromptToHandle(handle, trimmedContent);
-      this.scheduleJsonlRefresh(0);
+      this.scheduleJsonlRefresh(0, 'send-message');
     } catch (error) {
       this.setStatus(handle, 'idle', true);
       this.setLastError(handle, error instanceof Error ? error.message : 'Codex request failed');
@@ -327,7 +331,7 @@ export class CodexManager {
       }
     }
 
-    this.scheduleJsonlRefresh(0);
+    this.scheduleJsonlRefresh(0, 'stop-active-run');
   }
 
   async resetActiveThread(): Promise<void> {
@@ -582,7 +586,7 @@ export class CodexManager {
         if (typeof changedFileName === 'string' && changedFileName.length > 0 && changedFileName !== fileName) {
           return;
         }
-        this.scheduleJsonlRefresh(0);
+        this.scheduleJsonlRefresh(0, 'jsonl-watcher');
       });
       handle.watchedJsonlFilePath = filePath;
       handle.jsonlWatcher.on('error', (error) => {
@@ -834,7 +838,7 @@ export class CodexManager {
       }
 
       if (this.shouldContinueJsonlRefresh(handle)) {
-        this.scheduleJsonlRefresh(Math.max(this.options.jsonlRefreshDebounceMs, 250));
+        this.scheduleJsonlRefresh(Math.max(this.options.jsonlRefreshDebounceMs, 250), 'refresh-loop');
       }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
@@ -843,7 +847,7 @@ export class CodexManager {
         handle.sessionFilePath = null;
         this.ensureJsonlWatcher(handle, null);
         if (this.shouldContinueJsonlRefresh(handle)) {
-          this.scheduleJsonlRefresh(Math.max(this.options.jsonlRefreshDebounceMs, 250));
+          this.scheduleJsonlRefresh(Math.max(this.options.jsonlRefreshDebounceMs, 250), 'refresh-loop-missing-file');
         }
         return;
       }
@@ -851,19 +855,36 @@ export class CodexManager {
     }
   }
 
-  private scheduleJsonlRefresh(delayMs = this.options.jsonlRefreshDebounceMs): void {
+  private scheduleJsonlRefresh(
+    delayMs = this.options.jsonlRefreshDebounceMs,
+    reason = 'unspecified'
+  ): void {
+    const now = Date.now();
+    const normalizedDelayMs = Math.max(0, delayMs);
+    const nextDueAt = now + normalizedDelayMs;
+    const existingDueAt = this.jsonlRefreshDueAt;
+
+    if (this.jsonlRefreshTimer && existingDueAt !== null && nextDueAt >= existingDueAt) {
+      return;
+    }
+
     if (this.jsonlRefreshTimer) {
       clearTimeout(this.jsonlRefreshTimer);
     }
 
+    this.jsonlRefreshDueAt = nextDueAt;
+    this.jsonlRefreshReason = reason;
     this.jsonlRefreshTimer = setTimeout(() => {
       this.jsonlRefreshTimer = null;
+      this.jsonlRefreshDueAt = null;
+      this.jsonlRefreshReason = null;
       const handle = this.getActiveHandle();
       if (!handle) {
         return;
       }
       void this.refreshMessagesFromJsonl(handle);
-    }, delayMs);
+    }, normalizedDelayMs);
+    this.jsonlRefreshTimer.unref();
   }
 
   private scheduleSnapshotEmit(delayMs = this.options.snapshotEmitDebounceMs): void {
@@ -1018,7 +1039,7 @@ export class CodexManager {
     if (this.isActiveHandle(handle)) {
       this.ensureJsonlWatcher(handle, handle.sessionFilePath);
       this.emitSnapshotNow();
-      this.scheduleJsonlRefresh(0);
+      this.scheduleJsonlRefresh(0, 'start-handle-session');
     }
   }
 
@@ -1063,7 +1084,7 @@ export class CodexManager {
       offset: chunkOffset,
       sessionId: handle.sessionId
     });
-    this.scheduleJsonlRefresh();
+    this.scheduleJsonlRefresh(this.options.jsonlRefreshDebounceMs, 'pty-data');
   }
 
   private async handlePtyExit(handle: CodexHandle): Promise<void> {
@@ -1082,7 +1103,7 @@ export class CodexManager {
       return;
     }
 
-    this.scheduleJsonlRefresh(0);
+    this.scheduleJsonlRefresh(0, 'pty-exit');
     if (expectedExit) {
       this.setStatus(handle, 'idle', true);
       return;

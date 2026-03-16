@@ -577,7 +577,10 @@ function emitRuntimeSnapshotToSubscribers(io: SocketIOServer, payload: RuntimeSn
 function emitMessagesUpsertToSubscribers(io: SocketIOServer, payload: MessagesUpsertPayload): void {
   for (const socket of io.of('/web').sockets.values()) {
     const subscription = webRuntimeSubscriptions.get(socket.id);
-    if (!subscription || !matchesMessagesUpsertSubscription(subscription, payload)) {
+    if (!subscription) {
+      continue;
+    }
+    if (!matchesMessagesUpsertSubscription(subscription, payload)) {
       continue;
     }
     socket.emit('runtime:messages-upsert', payload);
