@@ -10,7 +10,7 @@ import type {
   MessagesUpsertPayload,
   RuntimeSubscriptionPayload,
   RuntimeSnapshotPayload,
-  TerminalChunkPayload,
+  TerminalFramePatchPayload,
   WebCommandEnvelope,
   WebInitPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
@@ -24,12 +24,13 @@ interface UseCliSocketOptions {
   activeProviderId: ProviderId | null;
   activeConversationKey: string | null;
   activeSessionId: string | null;
+  terminalEnabled?: boolean;
   socketRef?: MutableRefObject<Socket | null>;
   onConnect?: () => void;
   onDisconnect?: () => void;
   onSnapshot?: (snapshot: RuntimeSnapshot) => void;
   onMessagesUpsert?: (payload: MessagesUpsertPayload) => void;
-  onTerminalChunk?: (payload: TerminalChunkPayload) => void;
+  onTerminalFramePatch?: (payload: TerminalFramePatchPayload) => void;
 }
 
 export interface CliSocketController {
@@ -49,12 +50,13 @@ export function useCliSocket({
   activeProviderId,
   activeConversationKey,
   activeSessionId,
+  terminalEnabled = false,
   socketRef: externalSocketRef,
   onConnect,
   onDisconnect,
   onSnapshot,
   onMessagesUpsert,
-  onTerminalChunk
+  onTerminalFramePatch
 }: UseCliSocketOptions): CliSocketController {
   const [socketConnected, setSocketConnected] = useState(false);
   const [clis, setClis] = useState<CliDescriptor[]>([]);
@@ -64,11 +66,12 @@ export function useCliSocket({
   const activeProviderIdRef = useRef<ProviderId | null>(activeProviderId);
   const activeConversationKeyRef = useRef<string | null>(activeConversationKey);
   const activeSessionIdRef = useRef<string | null>(activeSessionId);
+  const terminalEnabledRef = useRef(Boolean(terminalEnabled));
   const onConnectRef = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
   const onSnapshotRef = useRef(onSnapshot);
   const onMessagesUpsertRef = useRef(onMessagesUpsert);
-  const onTerminalChunkRef = useRef(onTerminalChunk);
+  const onTerminalFramePatchRef = useRef(onTerminalFramePatch);
   const sendCommandRef = useRef<CliSocketController['sendCommand'] | null>(null);
 
   useEffect(() => {
@@ -88,12 +91,16 @@ export function useCliSocket({
   }, [activeSessionId]);
 
   useEffect(() => {
+    terminalEnabledRef.current = Boolean(terminalEnabled);
+  }, [terminalEnabled]);
+
+  useEffect(() => {
     onConnectRef.current = onConnect;
     onDisconnectRef.current = onDisconnect;
     onSnapshotRef.current = onSnapshot;
     onMessagesUpsertRef.current = onMessagesUpsert;
-    onTerminalChunkRef.current = onTerminalChunk;
-  }, [onConnect, onDisconnect, onMessagesUpsert, onSnapshot, onTerminalChunk]);
+    onTerminalFramePatchRef.current = onTerminalFramePatch;
+  }, [onConnect, onDisconnect, onMessagesUpsert, onSnapshot, onTerminalFramePatch]);
 
   useEffect(() => {
     function emitRuntimeSubscription(socket: Socket | null): void {
@@ -110,7 +117,8 @@ export function useCliSocket({
         targetProviderId: activeProviderIdRef.current,
         conversationKey: activeConversationKeyRef.current,
         sessionId: activeSessionIdRef.current,
-        lastSeq
+        lastSeq,
+        terminalEnabled: terminalEnabledRef.current
       } satisfies RuntimeSubscriptionPayload);
     }
 
@@ -156,11 +164,11 @@ export function useCliSocket({
       onMessagesUpsertRef.current?.(payload);
     });
 
-    socket.on('terminal:chunk', (payload: TerminalChunkPayload) => {
+    socket.on('terminal:frame-patch', (payload: TerminalFramePatchPayload) => {
       if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
         return;
       }
-      onTerminalChunkRef.current?.(payload);
+      onTerminalFramePatchRef.current?.(payload);
     });
 
     return () => {
@@ -180,9 +188,10 @@ export function useCliSocket({
       targetProviderId: activeProviderId,
       conversationKey: activeConversationKey,
       sessionId: activeSessionId,
-      lastSeq: readCachedLastSeq(activeProviderId, activeConversationKey, activeSessionId)
+      lastSeq: readCachedLastSeq(activeProviderId, activeConversationKey, activeSessionId),
+      terminalEnabled
     } satisfies RuntimeSubscriptionPayload);
-  }, [activeCliId, activeProviderId, activeConversationKey, activeSessionId, socketRef]);
+  }, [activeCliId, activeProviderId, activeConversationKey, activeSessionId, socketRef, terminalEnabled]);
 
   if (!sendCommandRef.current) {
     sendCommandRef.current = async function sendCommand<TName extends CliCommandName>(

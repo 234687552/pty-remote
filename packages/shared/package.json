@@ -13,6 +13,8 @@
   "exports": {
     "./protocol": "./src/protocol.ts",
     "./protocol.ts": "./src/protocol.ts",
+    "./terminal-frame": "./src/terminal-frame.ts",
+    "./terminal-frame.ts": "./src/terminal-frame.ts",
     "./runtime-types": "./src/runtime-types.ts",
     "./runtime-types.ts": "./src/runtime-types.ts"
   },

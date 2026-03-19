@@ -136,14 +136,6 @@ export function useWorkspaceController({
   sidebarToggleTopRef.current = store.sidebarToggleTop;
 
   useEffect(() => {
-    if (!socketConnected) {
-      return;
-    }
-
-    void terminal.resumeSession(activeConversation?.sessionId ?? null, { force: true });
-  }, [activeCliId, activeConversation?.conversationKey, activeConversation?.sessionId, activeProviderId, socketConnected, terminal]);
-
-  useEffect(() => {
     if (!activeConversation || !activeProviderId) {
       return;
     }
@@ -328,13 +320,12 @@ export function useWorkspaceController({
       .then(async (result) => {
         const nextSnapshot = (result.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
         store.setSnapshot(nextSnapshot);
-        await terminal.resumeSession(activeConversation?.sessionId ?? null, { force: true });
       })
       .catch((runtimeError) => {
         terminal.clearTerminal();
         store.setError(runtimeError instanceof Error ? runtimeError.message : '加载 CLI 运行态失败');
       });
-  }, [activeCliConnected, activeCliId, activeConversation?.sessionId, activeProviderId, sendCommand, socketConnected, terminal]);
+  }, [activeCliConnected, activeCliId, activeProviderId, sendCommand, socketConnected, terminal]);
 
   useEffect(() => {
     if (!socketConnected || !activeCli?.connected || !activeProject || !activeConversation || !activeProviderId) {
@@ -564,6 +555,12 @@ export function useWorkspaceController({
           )
         );
       }
+
+      const runtimeSnapshotResult = await sendCommand('get-runtime-snapshot', {}, targetCli.cliId, providerId);
+      const nextSnapshot =
+        (runtimeSnapshotResult.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
+      store.setSnapshot(nextSnapshot);
+
       const acknowledgedRequestToken = selectPayload?.clientRequestId ?? null;
       const activationState = conversationActivationRef.current;
       if (

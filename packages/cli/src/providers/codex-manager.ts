@@ -6,7 +6,7 @@ import type {
   ManagedPtyHandleSummary,
   MessagesUpsertPayload,
   SelectConversationResultPayload,
-  TerminalChunkPayload
+  TerminalFramePatchPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ChatMessage, ProviderId, RuntimeSnapshot, RuntimeStatus } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import {
@@ -19,7 +19,6 @@ import {
 } from './codex-jsonl.ts';
 import {
   appendRecentOutput,
-  appendReplayChunk,
   getCodexPtyLifecycle,
   looksLikeDirectoryTrustPrompt,
   looksReadyForInput,
@@ -31,13 +30,14 @@ import {
 } from './codex-pty.ts';
 import { prepareCodexResumeSession } from './codex-resume-session.ts';
 import { findCodexSessionFile, findLatestCodexSessionForCwdSince, type CodexHistoryOptions } from './codex-history.ts';
+import { HeadlessTerminalFrameState } from '../terminal/frame-state.ts';
 
 export interface CodexManagerOptions extends CodexHistoryOptions {
   codexBin: string;
   defaultCwd: string;
   terminalCols: number;
   terminalRows: number;
-  terminalReplayMaxBytes: number;
+  terminalFrameScrollback: number;
   recentOutputMaxChars: number;
   codexReadyTimeoutMs: number;
   promptSubmitDelayMs: number;
@@ -55,7 +55,12 @@ export interface CodexManagerOptions extends CodexHistoryOptions {
 interface CodexManagerCallbacks {
   emitMessagesUpsert(payload: Omit<MessagesUpsertPayload, 'cliId'>): void;
   emitSnapshot(snapshot: RuntimeSnapshot): void;
-  emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId' | 'providerId'>): void;
+  emitTerminalFramePatch(payload: Omit<TerminalFramePatchPayload, 'cliId' | 'providerId'>): void;
+  emitTerminalSessionEvicted(payload: {
+    conversationKey: string | null;
+    reason: string;
+    sessionId: string;
+  }): void;
 }
 
 export interface CodexManagerSelection {
@@ -73,8 +78,7 @@ interface RuntimeCleanupTarget {
 
 interface AgentRuntimeState extends RuntimeSnapshot {
   allMessages: ChatMessage[];
-  terminalOffset: number;
-  terminalReplay: string;
+  recentTerminalOutput: string;
 }
 
 type HandleLifecycle = 'attached' | 'detached' | 'exited' | 'error';
@@ -98,6 +102,7 @@ interface CodexHandle {
   suppressNextPtyExitError: boolean;
   expectedPtyExitReason: string | null;
   runtime: AgentRuntimeState;
+  terminalFrame: HeadlessTerminalFrameState;
   detachedAt: number | null;
   discoveryStartedAt: number | null;
   jsonlMissingSince: number | null;
@@ -225,9 +230,16 @@ export class CodexManager {
     return this.createRuntimeSnapshot(this.getActiveHandle());
   }
 
-  async replayActiveState(): Promise<void> {
+  async primeActiveTerminalFrame(): Promise<void> {
+    const handle = this.getActiveHandle();
+    if (!handle) {
+      throw new Error('No active terminal is selected');
+    }
+    this.emitActiveTerminalFrame(handle);
+  }
+
+  async refreshActiveState(): Promise<void> {
     await this.refreshActiveMessages();
-    this.emitActiveTerminalReplay(this.getActiveHandle());
     this.emitSnapshotNow();
   }
 
@@ -241,6 +253,14 @@ export class CodexManager {
 
     const handle = this.getActiveHandle();
     resizeCodexPtySession(handle?.pty ?? null, nextCols, nextRows);
+    if (!handle) {
+      return;
+    }
+
+    const patch = handle.terminalFrame.resize(nextCols, nextRows);
+    if (patch && this.isActiveHandle(handle)) {
+      this.emitTerminalFramePatch(handle, patch);
+    }
   }
 
   listManagedPtyHandles(): ManagedPtyHandleSummary[] {
@@ -303,7 +323,6 @@ export class CodexManager {
     }
 
     await this.refreshMessagesFromJsonl(handle);
-    this.emitActiveTerminalReplay(handle);
     this.emitSnapshotNow();
 
     return {
@@ -513,6 +532,12 @@ export class CodexManager {
       suppressNextPtyExitError: false,
       expectedPtyExitReason: null,
       runtime: this.createFreshState(selection.conversationKey, selection.sessionId),
+      terminalFrame: new HeadlessTerminalFrameState({
+        cols: this.terminalSize.cols,
+        maxLines: this.options.terminalFrameScrollback,
+        rows: this.terminalSize.rows,
+        scrollback: this.options.terminalFrameScrollback
+      }),
       detachedAt: null,
       discoveryStartedAt: null,
       jsonlMissingSince: null,
@@ -529,25 +554,19 @@ export class CodexManager {
       status: 'idle',
       sessionId,
       allMessages: [],
-      terminalReplay: '',
-      terminalOffset: 0,
+      recentTerminalOutput: '',
       messages: [],
       hasOlderMessages: false,
       lastError: null
     };
   }
 
-  private emitActiveTerminalReplay(handle: CodexHandle | null): void {
+  private emitActiveTerminalFrame(handle: CodexHandle | null): void {
     if (!handle) {
       return;
     }
 
-    this.callbacks.emitTerminalChunk({
-      conversationKey: handle.threadKey,
-      data: handle.runtime.terminalReplay,
-      offset: 0,
-      sessionId: handle.sessionId
-    });
+    this.emitTerminalFramePatch(handle, handle.terminalFrame.createResetPatch());
   }
 
   private createRuntimeSnapshot(handle: CodexHandle | null): RuntimeSnapshot {
@@ -1107,10 +1126,11 @@ export class CodexManager {
 
   private destroyHandle(handle: CodexHandle, reason: string): void {
     const wasActive = this.isActiveHandle(handle);
+    const hadPty = handle.pty !== null;
     this.log('info', 'destroying codex handle', {
       ...this.handleContext(handle),
       destroyReason: reason,
-      hadPty: handle.pty !== null,
+      hadPty,
       wasActive,
       lifecycle: handle.lifecycle,
       runtimeStatus: handle.runtime.status
@@ -1122,6 +1142,10 @@ export class CodexManager {
 
     this.closeJsonlWatcher(handle);
     this.stopHandlePty(handle, reason);
+    if (!hadPty) {
+      this.emitTerminalSessionEvicted(handle, reason);
+    }
+    handle.terminalFrame.dispose();
     this.handles.delete(handle.threadKey);
 
     if (wasActive) {
@@ -1136,12 +1160,13 @@ export class CodexManager {
   }
 
   private resetTerminalReplay(handle: CodexHandle): void {
-    handle.runtime.terminalReplay = '';
-    handle.runtime.terminalOffset = 0;
+    handle.runtime.recentTerminalOutput = '';
+    const patch = handle.terminalFrame.reset(handle.sessionId);
     if (handle.pty) {
       handle.pty.recentOutput = '';
-      handle.pty.replayBytes = 0;
-      handle.pty.replayChunks = [];
+    }
+    if (this.isActiveHandle(handle)) {
+      this.emitTerminalFramePatch(handle, patch);
     }
   }
 
@@ -1162,9 +1187,10 @@ export class CodexManager {
     handle.expectedPtyExitReason = reason;
     handle.pty = null;
     handle.awaitingJsonlTurn = false;
+    this.emitTerminalSessionEvicted(handle, reason);
     this.resetTerminalReplay(handle);
     stopCodexPtySession(currentPty);
-    this.discardInactiveHandle(handle);
+    this.discardInactiveHandle(handle, { emitTerminalSessionEvicted: false });
   }
 
   private stopHandlePtyPreservingReplay(handle: CodexHandle, reason: string, details?: Record<string, unknown>): void {
@@ -1228,9 +1254,11 @@ export class CodexManager {
 
     handle.pty = started;
     handle.runtime.sessionId = handle.sessionId;
+    const framePatch = handle.terminalFrame.reset(handle.sessionId);
     handle.runtime.status = 'starting';
     handle.lifecycle = this.isActiveHandle(handle) ? 'attached' : 'detached';
     if (this.isActiveHandle(handle)) {
+      this.emitTerminalFramePatch(handle, framePatch);
       this.ensureJsonlWatcher(handle, handle.sessionFilePath);
       this.emitSnapshotNow();
       this.scheduleJsonlRefresh(0, 'start-handle-session');
@@ -1262,23 +1290,31 @@ export class CodexManager {
       return;
     }
 
-    const chunkOffset = handle.runtime.terminalOffset;
-    handle.runtime.terminalReplay = appendReplayChunk(session, chunk, this.options.terminalReplayMaxBytes);
-    handle.runtime.terminalOffset += Buffer.byteLength(chunk, 'utf8');
-    appendRecentOutput(session, chunk, this.options.recentOutputMaxChars);
+    handle.runtime.recentTerminalOutput = appendRecentOutput(session, chunk, this.options.recentOutputMaxChars);
     handle.lastTerminalActivityAt = Date.now();
 
     if (!this.isActiveHandle(handle)) {
       return;
     }
 
-    this.callbacks.emitTerminalChunk({
-      conversationKey: handle.threadKey,
-      data: chunk,
-      offset: chunkOffset,
-      sessionId: handle.sessionId
-    });
+    void handle.terminalFrame
+      .enqueueOutput(chunk)
+      .then((patch) => {
+        if (patch && this.isActiveHandle(handle)) {
+          this.emitTerminalFramePatch(handle, patch);
+        }
+      })
+      .catch((error) => {
+        this.setLastError(handle, errorMessage(error, 'Failed to materialize terminal frame'));
+      });
     this.scheduleJsonlRefresh(this.options.jsonlRefreshDebounceMs, 'pty-data');
+  }
+
+  private emitTerminalFramePatch(handle: CodexHandle, patch: TerminalFramePatchPayload['patch']): void {
+    this.callbacks.emitTerminalFramePatch({
+      conversationKey: handle.threadKey,
+      patch
+    });
   }
 
   private async handlePtyExit(handle: CodexHandle): Promise<void> {
@@ -1302,7 +1338,7 @@ export class CodexManager {
       if (!expectedExit) {
         this.log('error', 'inactive codex pty exited unexpectedly', {
           ...this.handleContext(handle),
-          recentOutputTail: tailForLog(handle.runtime.terminalReplay),
+          recentOutputTail: tailForLog(handle.runtime.recentTerminalOutput),
           runtimeStatus: handle.runtime.status
         });
         handle.runtime.lastError = 'Codex CLI exited unexpectedly';
@@ -1323,7 +1359,7 @@ export class CodexManager {
     }
     this.log('error', 'active codex pty exited unexpectedly', {
       ...this.handleContext(handle),
-      recentOutputTail: tailForLog(handle.runtime.terminalReplay),
+      recentOutputTail: tailForLog(handle.runtime.recentTerminalOutput),
       runtimeStatus: handle.runtime.status
     });
     this.setLastError(handle, 'Codex CLI exited unexpectedly');
@@ -1402,13 +1438,29 @@ export class CodexManager {
     this.resetJsonlParsingState(handle, handle.sessionId);
   }
 
-  private discardInactiveHandle(handle: CodexHandle): void {
+  private emitTerminalSessionEvicted(handle: CodexHandle, reason: string): void {
+    const sessionId = handle.sessionId?.trim();
+    if (!sessionId) {
+      return;
+    }
+    this.callbacks.emitTerminalSessionEvicted({
+      conversationKey: handle.threadKey,
+      reason,
+      sessionId
+    });
+  }
+
+  private discardInactiveHandle(handle: CodexHandle, options: { emitTerminalSessionEvicted?: boolean } = {}): void {
     if (this.isActiveHandle(handle) || handle.pty) {
       return;
     }
 
     this.closeJsonlWatcher(handle);
     handle.lifecycle = 'exited';
+    if (options.emitTerminalSessionEvicted !== false) {
+      this.emitTerminalSessionEvicted(handle, 'discard-inactive-handle');
+    }
+    handle.terminalFrame.dispose();
     this.handles.delete(handle.threadKey);
   }
 

@@ -23,7 +23,6 @@ interface SidebarProps {
   onActivateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => void;
   onCreateConversation: (project: ProjectEntry, providerId: ProviderId) => Promise<void>;
   onDeleteConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
-  onDeleteProject: (project: ProjectEntry) => Promise<void>;
   onImportConversationFromSession: (
     providerId: ProviderId,
     session: ProjectSessionSummary
@@ -45,20 +44,12 @@ interface SidebarProps {
   onPickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
   onListRecentProjectSessions: (providerId: ProviderId, maxSessions?: number) => Promise<ProjectSessionSummary[]>;
   onMobileOpenChange: (open: boolean) => void;
-  onReorderConversation: (
-    project: ProjectEntry,
-    providerId: ProviderId,
-    sourceConversationId: string,
-    targetConversationId: string
-  ) => Promise<void>;
   onSelectCli: (cliId: string | null) => void;
-  onSelectProject: (project: ProjectEntry) => void;
 }
 
 const SWIPE_DELETE_ACTION_WIDTH = 82;
 const DELETE_LONG_PRESS_DELAY_MS = 420;
 const LONG_PRESS_MOVE_THRESHOLD = 10;
-const REORDER_DRAG_ACTIVATION_DISTANCE = 8;
 const RECENT_HISTORY_TOP_K = 12;
 const ALL_PROVIDERS: ProviderId[] = ['claude', 'codex'];
 
@@ -148,17 +139,18 @@ export function Sidebar({
   onActivateConversation,
   onCreateConversation,
   onDeleteConversation,
-  onDeleteProject,
   onImportConversationFromSession,
   onListManagedPtyHandles,
   onPickProjectDirectory,
   onListRecentProjectSessions,
   onMobileOpenChange,
-  onReorderConversation,
-  onSelectCli,
-  onSelectProject
+  onSelectCli
 }: SidebarProps) {
   const [createConversationPending, setCreateConversationPending] = useState(false);
+  const [createConversationDialogProject, setCreateConversationDialogProject] = useState<ProjectEntry | null>(null);
+  const [createConversationDialogProviderId, setCreateConversationDialogProviderId] = useState<ProviderId>('claude');
+  const [createConversationDialogSubmitting, setCreateConversationDialogSubmitting] = useState(false);
+  const [createConversationDialogError, setCreateConversationDialogError] = useState('');
   const [createProjectDialogOpen, setCreateProjectDialogOpen] = useState(false);
   const [createProjectCwd, setCreateProjectCwd] = useState('');
   const [createProjectProviderId, setCreateProjectProviderId] = useState<ProviderId>('claude');
@@ -189,12 +181,9 @@ export function Sidebar({
       lastActivityAt: number | null;
     }[]
   >([]);
-  const [deleteProjectPendingId, setDeleteProjectPendingId] = useState<string | null>(null);
   const [deleteConversationPendingId, setDeleteConversationPendingId] = useState<string | null>(null);
   const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
   const [openSwipeRowKey, setOpenSwipeRowKey] = useState<string | null>(null);
-  const [draggingConversationId, setDraggingConversationId] = useState<string | null>(null);
-  const [pressingReorderConversationId, setPressingReorderConversationId] = useState<string | null>(null);
   const longPressRef = useRef<{
     rowKey: string;
     pointerId: number;
@@ -203,17 +192,6 @@ export function Sidebar({
     timerId: number | null;
     triggered: boolean;
   } | null>(null);
-  const reorderPressRef = useRef<{
-    projectId: string;
-    providerId: ProviderId;
-    conversationId: string;
-    pointerId: number;
-    startX: number;
-    startY: number;
-    triggered: boolean;
-    lastTargetConversationId: string | null;
-  } | null>(null);
-  const conversationRowRef = useRef<Record<string, HTMLDivElement | null>>({});
   const suppressClickRowKeyRef = useRef<string | null>(null);
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
 
@@ -280,6 +258,23 @@ export function Sidebar({
   }, [historyDialogOpen, historyImportingSessionKey, historyLoading]);
 
   useEffect(() => {
+    if (!createConversationDialogProject) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !createConversationDialogSubmitting) {
+        closeCreateConversationDialog();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [createConversationDialogProject, createConversationDialogSubmitting]);
+
+  useEffect(() => {
     if (!createProjectDialogOpen) {
       return;
     }
@@ -303,9 +298,6 @@ export function Sidebar({
         window.clearTimeout(current.timerId);
       }
       longPressRef.current = null;
-
-      const reorder = reorderPressRef.current;
-      reorderPressRef.current = null;
     },
     []
   );
@@ -526,140 +518,6 @@ export function Sidebar({
     clearLongPress(rowKey, -1);
   }
 
-  function setConversationRowElement(conversationId: string, element: HTMLDivElement | null): void {
-    if (element) {
-      conversationRowRef.current[conversationId] = element;
-      return;
-    }
-    delete conversationRowRef.current[conversationId];
-  }
-
-  function clearReorderPress(conversationId?: string, pointerId?: number): { triggered: boolean } {
-    const current = reorderPressRef.current;
-    if (!current) {
-      return { triggered: false };
-    }
-
-    if (
-      (conversationId !== undefined && current.conversationId !== conversationId) ||
-      (pointerId !== undefined && current.pointerId !== pointerId)
-    ) {
-      return { triggered: false };
-    }
-
-    const triggered = current.triggered;
-    reorderPressRef.current = null;
-    setPressingReorderConversationId((value) => (value === current.conversationId ? null : value));
-    if (triggered) {
-      setDraggingConversationId((value) => (value === current.conversationId ? null : value));
-    }
-    return { triggered };
-  }
-
-  function resolveClosestConversationId(conversationIds: string[], clientY: number): string | null {
-    let closestId: string | null = null;
-    let closestDistance = Number.POSITIVE_INFINITY;
-
-    for (const conversationId of conversationIds) {
-      const element = conversationRowRef.current[conversationId];
-      if (!element) {
-        continue;
-      }
-      const rect = element.getBoundingClientRect();
-      const centerY = rect.top + rect.height / 2;
-      const distance = Math.abs(clientY - centerY);
-      if (distance < closestDistance) {
-        closestDistance = distance;
-        closestId = conversationId;
-      }
-    }
-
-    return closestId;
-  }
-
-  function handleReorderHandlePointerDown(
-    project: ProjectEntry,
-    providerId: ProviderId,
-    conversationId: string,
-    event: React.PointerEvent<HTMLButtonElement>
-  ): void {
-    if (event.button !== 0 || deleteConversationPendingId !== null || deleteProjectPendingId !== null) {
-      return;
-    }
-
-    event.stopPropagation();
-    event.preventDefault();
-    clearLongPress();
-    clearReorderPress();
-    closeAllSwipeRows();
-
-    const pointerId = event.pointerId;
-    reorderPressRef.current = {
-      projectId: project.id,
-      providerId,
-      conversationId,
-      pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      triggered: false,
-      lastTargetConversationId: null
-    };
-    setPressingReorderConversationId(conversationId);
-    event.currentTarget.setPointerCapture?.(pointerId);
-  }
-
-  function handleReorderHandlePointerMove(
-    project: ProjectEntry,
-    providerId: ProviderId,
-    providerConversationIds: string[],
-    conversationId: string,
-    event: React.PointerEvent<HTMLButtonElement>
-  ): void {
-    const current = reorderPressRef.current;
-    if (!current || current.conversationId !== conversationId || current.pointerId !== event.pointerId) {
-      return;
-    }
-
-    event.stopPropagation();
-
-    if (!current.triggered) {
-      const movedX = Math.abs(event.clientX - current.startX);
-      const movedY = Math.abs(event.clientY - current.startY);
-      if (movedX < REORDER_DRAG_ACTIVATION_DISTANCE && movedY < REORDER_DRAG_ACTIVATION_DISTANCE) {
-        return;
-      }
-      current.triggered = true;
-      setDraggingConversationId(conversationId);
-    }
-
-    const targetConversationId = resolveClosestConversationId(providerConversationIds, event.clientY);
-    if (!targetConversationId || targetConversationId === conversationId || targetConversationId === current.lastTargetConversationId) {
-      return;
-    }
-
-    current.lastTargetConversationId = targetConversationId;
-    void onReorderConversation(project, providerId, conversationId, targetConversationId);
-  }
-
-  function handleReorderHandlePointerUp(conversationId: string, event: React.PointerEvent<HTMLButtonElement>): void {
-    const { triggered } = clearReorderPress(conversationId, event.pointerId);
-    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    event.stopPropagation();
-    if (triggered) {
-      event.preventDefault();
-    }
-  }
-
-  function handleReorderHandlePointerCancel(conversationId: string, event: React.PointerEvent<HTMLButtonElement>): void {
-    clearReorderPress(conversationId, event.pointerId);
-    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    event.stopPropagation();
-  }
-
   function shouldBlockRowAction(rowKey: string): boolean {
     if (suppressClickRowKeyRef.current === rowKey) {
       suppressClickRowKeyRef.current = null;
@@ -692,6 +550,48 @@ export function Sidebar({
       }
     } finally {
       setCreateConversationPending(false);
+    }
+  }
+
+  function openCreateConversationDialog(project: ProjectEntry): void {
+    if (connectedProviderIds.length === 0 || createConversationDialogSubmitting) {
+      return;
+    }
+
+    closeAllSwipeRows();
+    setCreateConversationDialogError('');
+    setCreateConversationDialogProviderId(
+      createProviderId && connectedProviderIds.includes(createProviderId) ? createProviderId : connectedProviderIds[0] ?? 'claude'
+    );
+    setCreateConversationDialogProject(project);
+  }
+
+  function closeCreateConversationDialog(): void {
+    if (createConversationDialogSubmitting) {
+      return;
+    }
+
+    setCreateConversationDialogProject(null);
+    setCreateConversationDialogError('');
+  }
+
+  async function handleCreateConversationDialogSubmit(): Promise<void> {
+    if (!createConversationDialogProject || createConversationDialogSubmitting) {
+      return;
+    }
+
+    setCreateConversationDialogSubmitting(true);
+    setCreateConversationDialogError('');
+    try {
+      await onCreateConversation(createConversationDialogProject, createConversationDialogProviderId);
+      setCreateConversationDialogProject(null);
+      if (mobileOpen) {
+        onMobileOpenChange(false);
+      }
+    } catch (error) {
+      setCreateConversationDialogError(error instanceof Error ? error.message : '创建会话失败');
+    } finally {
+      setCreateConversationDialogSubmitting(false);
     }
   }
 
@@ -894,9 +794,6 @@ export function Sidebar({
         ) : (
           projects.map((project) => {
             const isActiveProject = project.id === activeProjectId;
-            const projectSwipeRowKey = `project:${project.id}`;
-            const projectSwipeOffset = swipeOffsets[projectSwipeRowKey] ?? 0;
-            const projectDeleteVisible = projectSwipeOffset > 0 || deleteProjectPendingId === project.id;
             const conversations = sortConversationEntries(
               ALL_PROVIDERS.flatMap(
                 (providerId) => projectConversationsByKey[getProjectProviderKey(project.id, providerId)] ?? []
@@ -913,47 +810,9 @@ export function Sidebar({
                     : 'border-zinc-200 bg-transparent'
                 ].join(' ')}
               >
-                <div className="relative overflow-hidden rounded-xl">
-                  <div
-                    className={[
-                      'absolute inset-y-0 right-0 flex items-center pr-1.5 transition-opacity',
-                      projectDeleteVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
-                    ].join(' ')}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        closeAllSwipeRows();
-                        setDeleteProjectPendingId(project.id);
-                        void onDeleteProject(project).finally(() => {
-                          setDeleteProjectPendingId((current) => (current === project.id ? null : current));
-                        });
-                      }}
-                      disabled={deleteProjectPendingId === project.id || deleteConversationPendingId !== null}
-                      className="inline-flex h-8 items-center rounded-lg bg-red-500 px-3 text-[11px] font-medium text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {deleteProjectPendingId === project.id ? '删除中' : '删除'}
-                    </button>
-                  </div>
-                  <div
-                    className="relative transition-transform duration-150"
-                    style={{
-                      transform: `translateX(-${projectSwipeOffset}px)`,
-                      touchAction: 'pan-y'
-                    }}
-                  >
-                    <div
-                      onPointerDown={(event) => handleLongPressPointerDown(projectSwipeRowKey, event)}
-                      onPointerMove={(event) => handleLongPressPointerMove(projectSwipeRowKey, event)}
-                      onPointerUp={(event) => handleLongPressPointerUp(projectSwipeRowKey, event)}
-                      onPointerCancel={(event) => handleLongPressPointerCancel(projectSwipeRowKey, event)}
-                      onPointerLeave={(event) => handleLongPressPointerCancel(projectSwipeRowKey, event)}
-                      onMouseDown={(event) => handleLongPressMouseDown(projectSwipeRowKey, event)}
-                      onMouseMove={(event) => handleLongPressMouseMove(projectSwipeRowKey, event)}
-                      onMouseUp={(event) => handleLongPressMouseUp(projectSwipeRowKey, event)}
-                      onMouseLeave={() => handleLongPressMouseLeave(projectSwipeRowKey)}
-                      className="w-full min-w-0 rounded-xl text-left"
-                    >
+                <div className="rounded-xl">
+                  <div className="flex items-start gap-2">
+                    <div className="min-w-0 flex-1 text-left">
                       <div className="truncate text-[13px] font-semibold">{project.label}</div>
                       <div
                         className={[
@@ -964,6 +823,28 @@ export function Sidebar({
                         {project.cwd}
                       </div>
                     </div>
+                    <button
+                      type="button"
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                      }}
+                      onMouseDown={(event) => {
+                        event.stopPropagation();
+                      }}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        openCreateConversationDialog(project);
+                      }}
+                      disabled={connectedProviderIds.length === 0 || createConversationDialogSubmitting}
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-300 bg-white/80 text-zinc-700 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-label={`在 ${project.label} 新建会话`}
+                      title={`在 ${project.label} 新建会话`}
+                    >
+                      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                        <path d="M10 4.5v11M4.5 10h11" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                      </svg>
+                    </button>
                   </div>
                 </div>
 
@@ -981,28 +862,16 @@ export function Sidebar({
                     conversations.map((conversation) => {
                       const conversationSwipeRowKey = `conversation:${conversation.id}`;
                       const conversationSwipeOffset = swipeOffsets[conversationSwipeRowKey] ?? 0;
-                      const providerConversationIds = conversations
-                        .filter((entry) => entry.providerId === conversation.providerId)
-                        .map((entry) => entry.id);
                       const conversationDeleteVisible =
                         conversationSwipeOffset > 0 || deleteConversationPendingId === conversation.id;
-                      const isDraggingConversation = draggingConversationId === conversation.id;
-                      const isReorderHandlePressed = pressingReorderConversationId === conversation.id;
-                      const isReorderHandleActive = isDraggingConversation || isReorderHandlePressed;
                       const isActiveConversation =
                         isActiveProject &&
                         conversation.providerId === activeProviderId &&
                         conversation.id === activeConversationId;
-                      const conversationToneClass = isActiveConversation
-                        ? 'text-zinc-700'
-                        : isActiveProject
-                          ? 'text-zinc-600'
-                          : 'text-zinc-500';
                       return (
                         <div
                           key={conversation.id}
                           className="relative overflow-hidden rounded-xl"
-                          ref={(element) => setConversationRowElement(conversation.id, element)}
                         >
                           <div
                             className={[
@@ -1020,8 +889,7 @@ export function Sidebar({
                                 });
                               }}
                               disabled={
-                                deleteConversationPendingId !== null ||
-                                deleteProjectPendingId !== null
+                                deleteConversationPendingId !== null
                               }
                               className="inline-flex h-8 items-center rounded-lg bg-red-500 px-3 text-[11px] font-medium text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-50"
                             >
@@ -1035,101 +903,57 @@ export function Sidebar({
                               touchAction: 'pan-y'
                             }}
                           >
-                            <div
+                            <button
+                              type="button"
+                              onPointerDown={(event) => handleLongPressPointerDown(conversationSwipeRowKey, event)}
+                              onPointerMove={(event) => handleLongPressPointerMove(conversationSwipeRowKey, event)}
+                              onPointerUp={(event) => handleLongPressPointerUp(conversationSwipeRowKey, event)}
+                              onPointerCancel={(event) => handleLongPressPointerCancel(conversationSwipeRowKey, event)}
+                              onPointerLeave={(event) => handleLongPressPointerCancel(conversationSwipeRowKey, event)}
+                              onMouseDown={(event) => handleLongPressMouseDown(conversationSwipeRowKey, event)}
+                              onMouseMove={(event) => handleLongPressMouseMove(conversationSwipeRowKey, event)}
+                              onMouseUp={(event) => handleLongPressMouseUp(conversationSwipeRowKey, event)}
+                              onMouseLeave={() => handleLongPressMouseLeave(conversationSwipeRowKey)}
+                              onClick={() => {
+                                if (shouldBlockRowAction(conversationSwipeRowKey)) {
+                                  return;
+                                }
+                                onActivateConversation(project, conversation.providerId, conversation);
+                              }}
                               className={[
-                                'flex items-stretch gap-1.5 transition-transform duration-150',
-                                isReorderHandleActive ? 'z-10 scale-[1.01]' : ''
+                                'block min-w-0 w-full rounded-xl border px-2.5 py-2 text-left transition',
+                                isActiveConversation
+                                  ? isActiveProject
+                                    ? 'border-zinc-300 bg-white text-zinc-950 shadow-sm'
+                                    : 'border-sky-200 bg-sky-100 text-zinc-950'
+                                  : isActiveProject
+                                    ? 'border-transparent bg-transparent text-zinc-800 hover:bg-white/70'
+                                    : 'border-transparent bg-transparent text-zinc-800 hover:bg-zinc-100'
                               ].join(' ')}
                             >
-                              <button
-                                type="button"
-                                aria-label="拖动会话排序"
-                                title="拖动会话排序"
-                                onPointerDown={(event) =>
-                                  handleReorderHandlePointerDown(project, conversation.providerId, conversation.id, event)
-                                }
-                                onPointerMove={(event) =>
-                                  handleReorderHandlePointerMove(
-                                    project,
-                                    conversation.providerId,
-                                    providerConversationIds,
-                                    conversation.id,
-                                    event
-                                  )
-                                }
-                                onPointerUp={(event) => handleReorderHandlePointerUp(conversation.id, event)}
-                                onPointerCancel={(event) => handleReorderHandlePointerCancel(conversation.id, event)}
-                                className={[
-                                  '-ml-1 inline-flex w-5 shrink-0 items-center justify-center bg-transparent p-1 transition-all duration-150',
-                                  conversationToneClass,
-                                  isDraggingConversation
-                                    ? 'cursor-grabbing opacity-100'
-                                    : isReorderHandlePressed
-                                      ? 'cursor-grabbing scale-110 opacity-100'
-                                    : 'cursor-grab opacity-70 hover:opacity-100 active:cursor-grabbing'
-                                ].join(' ')}
-                                disabled={deleteConversationPendingId !== null || deleteProjectPendingId !== null}
-                              >
-                                <span className="grid grid-cols-2 gap-[2px]">
-                                  {Array.from({ length: 6 }).map((_, dotIndex) => (
-                                    <span key={dotIndex} className="h-[3px] w-[3px] rounded-full bg-current" />
-                                  ))}
+                              <div className="flex items-center justify-between gap-3">
+                                <span className="min-w-0 truncate text-[13px] font-medium" title={conversation.title}>
+                                  {conversation.title}
                                 </span>
-                              </button>
-
-                              <button
-                                type="button"
-                                onPointerDown={(event) => handleLongPressPointerDown(conversationSwipeRowKey, event)}
-                                onPointerMove={(event) => handleLongPressPointerMove(conversationSwipeRowKey, event)}
-                                onPointerUp={(event) => handleLongPressPointerUp(conversationSwipeRowKey, event)}
-                                onPointerCancel={(event) => handleLongPressPointerCancel(conversationSwipeRowKey, event)}
-                                onPointerLeave={(event) => handleLongPressPointerCancel(conversationSwipeRowKey, event)}
-                                onMouseDown={(event) => handleLongPressMouseDown(conversationSwipeRowKey, event)}
-                                onMouseMove={(event) => handleLongPressMouseMove(conversationSwipeRowKey, event)}
-                                onMouseUp={(event) => handleLongPressMouseUp(conversationSwipeRowKey, event)}
-                                onMouseLeave={() => handleLongPressMouseLeave(conversationSwipeRowKey)}
-                                onClick={() => {
-                                  if (shouldBlockRowAction(conversationSwipeRowKey)) {
-                                    return;
-                                  }
-                                  onActivateConversation(project, conversation.providerId, conversation);
-                                }}
-                                className={[
-                                  'block min-w-0 flex-1 rounded-xl border px-2.5 py-2 text-left transition',
-                                  isActiveConversation
-                                    ? isActiveProject
-                                      ? 'border-zinc-300 bg-white text-zinc-950 shadow-sm'
-                                      : 'border-sky-200 bg-sky-100 text-zinc-950'
-                                    : isActiveProject
-                                      ? 'border-transparent bg-transparent text-zinc-800 hover:bg-white/70'
-                                      : 'border-transparent bg-transparent text-zinc-800 hover:bg-zinc-100',
-                                  isReorderHandleActive ? 'border-zinc-300/80 shadow-md' : ''
-                                ].join(' ')}
-                              >
-                                <div className="flex items-center justify-between gap-3">
-                                  <span className="min-w-0 truncate text-[13px] font-medium" title={conversation.title}>
-                                    {conversation.title}
-                                  </span>
-                                  <span
-                                    className="shrink-0 text-[10px] text-zinc-500"
-                                    title={new Date(conversation.updatedAt).toLocaleString()}
-                                  >
-                                    {formatRelativeTime(conversation.updatedAt)}
-                                  </span>
-                                </div>
-                                <div className="mt-1 flex items-center justify-between gap-2">
-                                  <span
-                                    className={[
-                                      'inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium',
-                                      providerBadgeClass(conversation.providerId)
-                                    ].join(' ')}
-                                  >
-                                    {PROVIDER_LABELS[conversation.providerId]}
-                                  </span>
-                                  {conversation.draft ? <span className="text-[10px] text-zinc-400">草稿</span> : null}
-                                </div>
-                              </button>
-                            </div>
+                                <span
+                                  className="shrink-0 text-[10px] text-zinc-500"
+                                  title={new Date(conversation.updatedAt).toLocaleString()}
+                                >
+                                  {formatRelativeTime(conversation.updatedAt)}
+                                </span>
+                              </div>
+                              <div className="mt-1 flex items-center justify-between gap-2">
+                                <span
+                                  className={[
+                                    'inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium',
+                                    providerBadgeClass(conversation.providerId)
+                                  ].join(' ')}
+                                >
+                                  {PROVIDER_LABELS[conversation.providerId]}
+                                </span>
+                                {conversation.draft ? <span className="text-[10px] text-zinc-400">草稿</span> : null}
+                              </div>
+                            </button>
                           </div>
                         </div>
                       );
@@ -1495,7 +1319,7 @@ export function Sidebar({
                   type="button"
                   onClick={() => void handlePickProjectDirectory()}
                   disabled={createProjectSubmitting || createProjectPickingDirectory}
-                  className="shrink-0 rounded-xl border border-zinc-300 px-3 py-2.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="hidden shrink-0 rounded-xl border border-zinc-300 px-3 py-2.5 text-xs font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 sm:inline-flex"
                 >
                   {createProjectPickingDirectory ? '选择中...' : '选择目录'}
                 </button>
@@ -1551,6 +1375,82 @@ export function Sidebar({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      ) : null}
+
+      {createConversationDialogProject ? (
+        <div className="fixed inset-0 z-50 bg-zinc-950/40 backdrop-blur-sm" onClick={closeCreateConversationDialog}>
+          <div
+            className="flex h-full w-full items-end justify-center px-3 pb-3 sm:items-center sm:px-6 sm:pb-6"
+            style={{
+              paddingTop: 'max(0.75rem, env(safe-area-inset-top))',
+              paddingRight: 'max(0.75rem, env(safe-area-inset-right))',
+              paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
+              paddingLeft: 'max(0.75rem, env(safe-area-inset-left))'
+            }}
+          >
+            <div
+              className="flex w-full max-w-lg flex-col rounded-3xl border border-zinc-200 bg-white p-5 shadow-[0_24px_90px_rgba(15,23,42,0.22)]"
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+            >
+              <div className="mb-1 text-base font-semibold text-zinc-900">新建会话</div>
+              <div className="mb-1 truncate text-sm font-medium text-zinc-700">{createConversationDialogProject.label}</div>
+              <div className="mb-4 line-clamp-2 text-sm text-zinc-500">{createConversationDialogProject.cwd}</div>
+
+              <label className="mb-2 block text-xs font-medium tracking-wide text-zinc-500">Provider</label>
+              <div className="mb-4 grid grid-cols-2 gap-2">
+                {ALL_PROVIDERS.map((providerId) => {
+                  const available = connectedProviderIds.includes(providerId);
+                  const selected = createConversationDialogProviderId === providerId;
+                  return (
+                    <button
+                      key={providerId}
+                      type="button"
+                      onClick={() => setCreateConversationDialogProviderId(providerId)}
+                      disabled={!available || createConversationDialogSubmitting}
+                      className={[
+                        'rounded-2xl border px-3 py-3 text-left transition disabled:cursor-not-allowed disabled:opacity-45',
+                        selected ? 'border-zinc-900 bg-zinc-900 text-white' : 'border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-white',
+                        available ? '' : 'border-dashed'
+                      ].join(' ')}
+                    >
+                      <div className="text-sm font-semibold">{PROVIDER_LABELS[providerId]}</div>
+                      <div className={['mt-1 text-xs', selected ? 'text-zinc-300' : 'text-zinc-500'].join(' ')}>
+                        {available ? '直接在当前项目下创建' : '当前无在线 CLI'}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {createConversationDialogError ? (
+                <div className="mb-4 rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {createConversationDialogError}
+                </div>
+              ) : null}
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeCreateConversationDialog}
+                  disabled={createConversationDialogSubmitting}
+                  className="rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCreateConversationDialogSubmit()}
+                  disabled={createConversationDialogSubmitting || connectedProviderIds.length === 0}
+                  className="rounded-xl bg-zinc-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {createConversationDialogSubmitting ? '创建中...' : '创建'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       ) : null}

@@ -1064,7 +1064,10 @@ export function ChatPane({ activeProviderId, connected, hasOlderMessages, messag
   const showOlderMessagesButton = hasOlderMessages && (activeProviderId !== 'codex' || isNearTop);
 
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
-  const toolCallIndex = useMemo(() => createToolCallIndex(renderableMessages), [renderableMessages]);
+  // Tool results can arrive as standalone user messages in Claude transcripts.
+  // Keep them out of the main message list, but still index them so tool cards
+  // reflect the actual completion/error state.
+  const toolCallIndex = useMemo(() => createToolCallIndex(messages), [messages]);
   const questionMessageIds = useMemo(
     () => renderableMessages.filter((message) => message.role === 'user').map((message) => message.id),
     [renderableMessages]

@@ -53,6 +53,7 @@ export interface CodexJsonlMessagesState {
   activityRevision: number;
   messageSequence: number;
   seenAssistantTextKeys: Set<string>;
+  seenUserTextKeys: Set<string>;
 }
 
 export function createCodexJsonlMessagesState(): CodexJsonlMessagesState {
@@ -62,12 +63,18 @@ export function createCodexJsonlMessagesState(): CodexJsonlMessagesState {
     runtimePhase: 'idle',
     activityRevision: 0,
     messageSequence: 0,
-    seenAssistantTextKeys: new Set<string>()
+    seenAssistantTextKeys: new Set<string>(),
+    seenUserTextKeys: new Set<string>()
   };
 }
 
 function normalizeAssistantText(text: string): string {
   return text.trim();
+}
+
+function isSyntheticEnvironmentContext(text: string): boolean {
+  const normalized = text.trim();
+  return /^<environment_context>\s*[\s\S]*<\/environment_context>$/.test(normalized);
 }
 
 function hashText(input: string): string {
@@ -109,6 +116,29 @@ function rememberAssistantText(
   }
 
   state.seenAssistantTextKeys.add(dedupeKey);
+  return true;
+}
+
+function rememberUserText(
+  state: CodexJsonlMessagesState,
+  timestamp: string | undefined,
+  text: string
+): boolean {
+  const normalizedText = text.trim();
+  if (!normalizedText) {
+    return false;
+  }
+
+  const parsedTimestampMs = new Date(timestamp ?? '').getTime();
+  const timestampBucket = Number.isFinite(parsedTimestampMs)
+    ? String(Math.floor(parsedTimestampMs / 1_000))
+    : `seq:${Math.floor(state.messageSequence / 4)}`;
+  const dedupeKey = `${timestampBucket}\u0000${normalizedText}`;
+  if (state.seenUserTextKeys.has(dedupeKey)) {
+    return false;
+  }
+
+  state.seenUserTextKeys.add(dedupeKey);
   return true;
 }
 
@@ -323,6 +353,12 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
   if (payloadType === 'user_message') {
     const sequence = state.messageSequence++;
     const messageText = payload?.message ?? '';
+    if (isSyntheticEnvironmentContext(messageText)) {
+      return;
+    }
+    if (!rememberUserText(state, timestamp, messageText)) {
+      return;
+    }
     const messageId = createStableTextMessageId('codex:user', timestamp, messageText, sequence);
     const textBlock = createTextBlock(messageId, messageText);
     if (!textBlock) {
@@ -435,6 +471,12 @@ function applyResponseItem(
       .map((block) => block.text)
       .join('\n')
       .trim();
+    if (role === 'user' && isSyntheticEnvironmentContext(messageText)) {
+      return;
+    }
+    if (role === 'user' && !rememberUserText(state, timestamp, messageText)) {
+      return;
+    }
     if (role === 'assistant' && !rememberAssistantText(state, timestamp, messageText)) {
       return;
     }

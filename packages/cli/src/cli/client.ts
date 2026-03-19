@@ -16,7 +16,9 @@ import type {
   ListManagedPtyHandlesResultPayload,
   ListProjectSessionsResultPayload,
   PickProjectDirectoryResultPayload,
-  RuntimeSnapshotPayload
+  RuntimeSnapshotPayload,
+  TerminalFramePatchPayload,
+  TerminalSessionEvictedPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import { createClaudeProviderRuntime } from '../providers/claude.ts';
@@ -70,7 +72,7 @@ const SUPPORTED_PROVIDERS = resolveSupportedProviders(resolveProvidersConfigValu
 const CLI_ID = resolveCliId();
 const CLI_LABEL = resolveCliLabel();
 const PTY_BACKEND_NAME = 'node-pty';
-const TERMINAL_REPLAY_MAX_BYTES = getConfigInt('TERMINAL_REPLAY_MAX_BYTES', 1024 * 1024, 1);
+const TERMINAL_FRAME_SCROLLBACK = getConfigInt('TERMINAL_FRAME_SCROLLBACK', 500, 50);
 const RECENT_OUTPUT_MAX_CHARS = getConfigInt('RECENT_OUTPUT_MAX_CHARS', 12_000, 1);
 const CLAUDE_READY_TIMEOUT_MS = getConfigInt('CLAUDE_READY_TIMEOUT_MS', 20_000, 0);
 const CODEX_READY_TIMEOUT_MS = getConfigInt('CODEX_READY_TIMEOUT_MS', 20_000, 0);
@@ -98,7 +100,7 @@ const runtimeOptions: PtyManagerOptions = {
   defaultCwd: DEFAULT_ROOT_DIR,
   terminalCols: TERMINAL_COLS,
   terminalRows: TERMINAL_ROWS,
-  terminalReplayMaxBytes: TERMINAL_REPLAY_MAX_BYTES,
+  terminalFrameScrollback: TERMINAL_FRAME_SCROLLBACK,
   recentOutputMaxChars: RECENT_OUTPUT_MAX_CHARS,
   claudeReadyTimeoutMs: CLAUDE_READY_TIMEOUT_MS,
   promptSubmitDelayMs: PROMPT_SUBMIT_DELAY_MS,
@@ -118,7 +120,7 @@ const codexRuntimeOptions: CodexProviderRuntimeOptions = {
   defaultCwd: DEFAULT_ROOT_DIR,
   terminalCols: TERMINAL_COLS,
   terminalRows: TERMINAL_ROWS,
-  terminalReplayMaxBytes: TERMINAL_REPLAY_MAX_BYTES,
+  terminalFrameScrollback: TERMINAL_FRAME_SCROLLBACK,
   recentOutputMaxChars: RECENT_OUTPUT_MAX_CHARS,
   codexReadyTimeoutMs: CODEX_READY_TIMEOUT_MS,
   promptSubmitDelayMs: PROMPT_SUBMIT_DELAY_MS,
@@ -176,15 +178,25 @@ function createRuntime(providerId: ProviderId): ProviderRuntime {
         snapshot
       } satisfies RuntimeSnapshotPayload);
     },
-    emitTerminalChunk(payload: { conversationKey: string | null; data: string; offset: number; sessionId: string | null }) {
+    emitTerminalFramePatch(payload: { conversationKey: string | null; patch: TerminalFramePatchPayload['patch'] }) {
       if (!socketClient?.connected) {
         return;
       }
-      socketClient.emit('cli:terminal-chunk', {
+      socketClient.emit('cli:terminal-frame-patch', {
         ...payload,
         cliId: CLI_ID,
         providerId
-      });
+      } satisfies TerminalFramePatchPayload);
+    },
+    emitTerminalSessionEvicted(payload: { conversationKey: string | null; reason: string; sessionId: string }) {
+      if (!socketClient?.connected) {
+        return;
+      }
+      socketClient.emit('cli:terminal-session-evicted', {
+        ...payload,
+        cliId: CLI_ID,
+        providerId
+      } satisfies TerminalSessionEvictedPayload);
     }
   };
 
@@ -329,7 +341,7 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
 
     if (envelope.name === 'get-runtime-snapshot') {
       const runtime = getRuntime(requireTargetProviderId(envelope));
-      await runtime.replayActiveState();
+      await runtime.refreshActiveState();
       return {
         ok: true,
         payload: {
@@ -505,7 +517,6 @@ function connectSocketClient(): void {
         }
 
         console.log(`cli registered as ${result.cliId}`);
-        void Promise.all(SUPPORTED_PROVIDERS.map((providerId) => getRuntime(providerId).replayActiveState()));
       }
     );
   });
@@ -521,6 +532,25 @@ function connectSocketClient(): void {
     }
     getRuntime(providerId).updateTerminalSize(payload.cols, payload.rows);
   });
+
+  socket.on(
+    'cli:terminal-frame-prime',
+    async (payload: { targetProviderId?: ProviderId | null }, callback?: (result: { ok: boolean; error?: string }) => void) => {
+      try {
+        const providerId = payload.targetProviderId ?? null;
+        if (!providerId) {
+          throw new Error('Provider is not selected');
+        }
+        await getRuntime(providerId).primeActiveTerminalFrame();
+        callback?.({ ok: true });
+      } catch (error) {
+        callback?.({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Failed to prime terminal frame'
+        });
+      }
+    }
+  );
 
   socket.on('disconnect', (reason) => {
     console.log(`socket disconnected: ${reason}`);

@@ -1,8 +1,20 @@
 .DS_Store
-node_modules/
-dist/
-public/build/
+
+# Local assistant/runtime state
 .claude/
 .serena/
 .runtime/
 .playwright-mcp/
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build outputs
+dist/
+**/dist/
+public/build/
+packages/relay/public/build/
+
+# Tool caches
+**/.vite-temp/

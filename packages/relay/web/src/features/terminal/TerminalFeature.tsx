@@ -11,6 +11,7 @@ interface TerminalFeatureProps {
 export function TerminalFeature({ store, terminal }: TerminalFeatureProps) {
   return (
     <TerminalPane
+      frameSnapshot={terminal.frameSnapshot}
       hostRef={terminal.terminalHostRef}
       viewportRef={terminal.terminalViewportRef}
       visible={store.mobilePane === 'terminal'}

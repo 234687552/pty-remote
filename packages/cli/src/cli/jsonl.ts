@@ -36,6 +36,13 @@ interface ClaudeJsonlRecord {
   uuid?: string;
   timestamp?: string;
   sessionId?: string;
+  isApiErrorMessage?: boolean;
+  retryInMs?: number;
+  retryAttempt?: number;
+  maxRetries?: number;
+  error?: {
+    status?: number;
+  };
   message?: {
     id?: string;
     role?: string;
@@ -51,6 +58,8 @@ export interface ClaudeJsonlMessagesState {
   messagesById: Map<string, ChatMessage>;
   runtimePhase: ClaudeJsonlRuntimePhase;
   activityRevision: number;
+  activeApiErrorMessageId: string | null;
+  nextSyntheticMessageSequence: number;
 }
 
 export function resolveClaudeProjectFilesPath(projectRoot: string, homeDir: string): string {
@@ -67,7 +76,9 @@ export function createClaudeJsonlMessagesState(): ClaudeJsonlMessagesState {
     orderedIds: [],
     messagesById: new Map<string, ChatMessage>(),
     runtimePhase: 'idle',
-    activityRevision: 0
+    activityRevision: 0,
+    activeApiErrorMessageId: null,
+    nextSyntheticMessageSequence: 1
   };
 }
 
@@ -297,7 +308,7 @@ function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessa
     id: nextMessage.id,
     role: nextMessage.role,
     blocks,
-    status: deriveMessageStatus(blocks),
+    status: nextMessage.status === 'error' ? 'error' : deriveMessageStatus(blocks),
     createdAt: existing?.createdAt || nextMessage.createdAt
   };
 
@@ -306,6 +317,43 @@ function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessa
   }
 
   messagesById.set(nextMessage.id, mergedMessage);
+}
+
+function removeMessage(orderedIds: string[], messagesById: Map<string, ChatMessage>, messageId: string): void {
+  if (!messagesById.has(messageId)) {
+    return;
+  }
+
+  messagesById.delete(messageId);
+  const index = orderedIds.indexOf(messageId);
+  if (index >= 0) {
+    orderedIds.splice(index, 1);
+  }
+}
+
+function clearActiveApiErrorMessage(state: ClaudeJsonlMessagesState): void {
+  if (!state.activeApiErrorMessageId) {
+    return;
+  }
+
+  removeMessage(state.orderedIds, state.messagesById, state.activeApiErrorMessageId);
+  state.activeApiErrorMessageId = null;
+}
+
+function isApiErrorRecord(record: ClaudeJsonlRecord): boolean {
+  return record.type === 'system' && record.subtype === 'api_error';
+}
+
+function formatApiErrorText(record: ClaudeJsonlRecord): string {
+  const status = typeof record.error?.status === 'number' ? String(record.error.status) : 'unknown';
+  const lines = [`API Error: ${status} 请求错误(状态码: ${status})`];
+
+  if (typeof record.retryAttempt === 'number' && typeof record.maxRetries === 'number') {
+    const retryInSeconds = Math.max(0, Math.round((record.retryInMs ?? 0) / 1000));
+    lines.push(`Retrying in ${retryInSeconds} seconds... (attempt ${record.retryAttempt}/${record.maxRetries})`);
+  }
+
+  return lines.join('\n');
 }
 
 function updateRuntimePhase(
@@ -327,16 +375,13 @@ function updateRuntimePhase(
       markActivity('running');
       return;
     case 'system':
-      if (record.subtype === 'stop_hook_summary' || record.subtype === 'turn_duration') {
+      if (record.subtype === 'stop_hook_summary') {
         markActivity('idle');
         return;
       }
       if (record.subtype === 'api_error' || record.subtype === 'local_command') {
         markActivity('running');
       }
-      return;
-    case 'last-prompt':
-      markActivity('idle');
       return;
     default:
       break;
@@ -351,7 +396,20 @@ function updateRuntimePhase(
     return;
   }
 
-  markActivity(blocks.some((block) => block.type === 'tool_use') ? 'running' : 'idle');
+  const stopReason = record.message?.stop_reason ?? null;
+  if (stopReason === 'end_turn') {
+    markActivity('idle');
+    return;
+  }
+
+  if (record.isApiErrorMessage && stopReason === 'stop_sequence') {
+    markActivity('idle');
+    return;
+  }
+
+  if (stopReason === 'tool_use' || blocks.some((block) => block.type === 'tool_use')) {
+    markActivity('running');
+  }
 }
 
 export function applyClaudeJsonlLine(state: ClaudeJsonlMessagesState, line: string): boolean {
@@ -367,8 +425,27 @@ export function applyClaudeJsonlLine(state: ClaudeJsonlMessagesState, line: stri
     return false;
   }
 
-  const role = record.message?.role === 'user' || record.message?.role === 'assistant' ? record.message.role : null;
   let blocks: ChatMessageBlock[] = [];
+
+  if (isApiErrorRecord(record)) {
+    const syntheticMessageId = state.activeApiErrorMessageId ?? `claude:api_error:${state.nextSyntheticMessageSequence++}`;
+    state.activeApiErrorMessageId = syntheticMessageId;
+    const block = createTextBlock(syntheticMessageId, formatApiErrorText(record));
+    if (block) {
+      upsertMessage(state.orderedIds, state.messagesById, {
+        id: syntheticMessageId,
+        role: 'assistant',
+        blocks: [block],
+        status: 'error',
+        createdAt: record.timestamp ?? new Date().toISOString()
+      });
+      blocks = [block];
+    }
+  } else if (record.type !== 'summary') {
+    clearActiveApiErrorMessage(state);
+  }
+
+  const role = record.message?.role === 'user' || record.message?.role === 'assistant' ? record.message.role : null;
 
   if (role) {
     const messageId = resolveRecordMessageId(record, role);
@@ -378,7 +455,7 @@ export function applyClaudeJsonlLine(state: ClaudeJsonlMessagesState, line: stri
         id: messageId,
         role,
         blocks,
-        status: deriveMessageStatus(blocks),
+        status: record.isApiErrorMessage ? 'error' : deriveMessageStatus(blocks),
         createdAt: record.timestamp ?? new Date().toISOString()
       });
     }

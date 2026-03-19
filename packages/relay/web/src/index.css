@@ -25,11 +25,17 @@ input {
   box-sizing: border-box;
 }
 
-.terminal-shell .xterm {
-  height: 100%;
-  padding: 0;
+.terminal-frame {
+  position: relative;
+  font-family: 'Berkeley Mono', 'SFMono-Regular', Consolas, monospace;
 }
 
-.terminal-shell .xterm-viewport {
-  overflow-y: auto !important;
+.terminal-frame-line {
+  min-height: 1.2em;
+  white-space: pre;
+}
+
+.terminal-frame-cursor {
+  display: inline-block;
+  min-width: 0.62ch;
 }

@@ -32,17 +32,12 @@ export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChang
       onDeleteConversation={(project, providerId, conversation) =>
         controller.deleteConversation(project, providerId, conversation)
       }
-      onDeleteProject={controller.deleteProject}
       onImportConversationFromSession={controller.importConversationFromSession}
       onListManagedPtyHandles={controller.listManagedPtyHandles}
       onPickProjectDirectory={controller.pickProjectDirectory}
       onListRecentProjectSessions={(providerId, maxSessions) => controller.listRecentProjectSessions(providerId, maxSessions)}
       onMobileOpenChange={onMobileOpenChange}
       onSelectCli={controller.selectCli}
-      onSelectProject={controller.selectProject}
-      onReorderConversation={(project, providerId, sourceConversationId, targetConversationId) =>
-        controller.reorderConversation(project, providerId, sourceConversationId, targetConversationId)
-      }
     />
   );
 }

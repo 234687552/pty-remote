@@ -14,14 +14,16 @@ import type {
   MessagesUpsertPayload,
   RuntimeSubscriptionPayload,
   RuntimeSnapshotPayload,
-  TerminalChunkPayload,
+  TerminalFramePatchPayload,
+  TerminalFrameSyncRequestPayload,
+  TerminalFrameSyncResultPayload,
+  TerminalSessionEvictedPayload,
   TerminalResizePayload,
-  TerminalResumeRequestPayload,
-  TerminalResumeResultPayload,
   WebCommandEnvelope,
   WebInitPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { CliDescriptor, CliProviderRuntimeDescriptor, ProviderId, RuntimeSnapshot, RuntimeStatus } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import { applyTerminalFramePatch, cloneTerminalFrameSnapshot, type TerminalFramePatch, type TerminalFrameSnapshot } from '@lzdi/pty-remote-protocol/terminal-frame.ts';
 
 import { loadRelayConfig } from './relay-config.ts';
 
@@ -35,8 +37,10 @@ const WEB_BUILD_INDEX_FILE = path.join(WEB_BUILD_DIR, 'index.html');
 const relayConfig = loadRelayConfig(ROOT_DIR);
 const PORT = Number.parseInt(process.env.PORT ?? String(relayConfig.port), 10);
 const HOST = process.env.HOST ?? relayConfig.host;
-const TERMINAL_REPLAY_MAX_BYTES = relayConfig.terminalReplayMaxBytes;
+const SOCKET_MAX_HTTP_BUFFER_SIZE = relayConfig.socketMaxHttpBufferSize;
 const CLI_COMMAND_TIMEOUT_MS = relayConfig.cliCommandTimeoutMs;
+const TERMINAL_FRAME_PATCH_HISTORY_LIMIT = 256;
+const TERMINAL_SESSION_CACHE_MAX = 8;
 
 const MIME_TYPES: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -48,9 +52,14 @@ const MIME_TYPES: Record<string, string> = {
 
 interface CliProviderRuntimeRecord {
   snapshot: RuntimeSnapshot | null;
-  terminalReplay: Buffer;
-  terminalReplayOffset: number;
-  terminalReplaySessionId: string | null;
+  terminalSessions: Map<string, TerminalSessionCacheEntry>;
+}
+
+interface TerminalSessionCacheEntry {
+  conversationKey: string | null;
+  patches: TerminalFramePatch[];
+  snapshot: TerminalFrameSnapshot;
+  updatedAt: number;
 }
 
 interface CliRuntimeRecord {
@@ -310,10 +319,26 @@ function createProviderRuntimeRecord(
 ): CliProviderRuntimeRecord {
   return {
     snapshot: previous?.snapshot ?? null,
-    terminalReplay: previous?.terminalReplay ?? Buffer.alloc(0),
-    terminalReplayOffset: previous?.terminalReplayOffset ?? 0,
-    terminalReplaySessionId: previous?.terminalReplaySessionId ?? null
+    terminalSessions: cloneTerminalSessions(previous?.terminalSessions)
   };
+}
+
+function cloneTerminalSessions(
+  source: Map<string, TerminalSessionCacheEntry> | undefined
+): Map<string, TerminalSessionCacheEntry> {
+  const cloned = new Map<string, TerminalSessionCacheEntry>();
+  if (!source) {
+    return cloned;
+  }
+  for (const [sessionId, entry] of source.entries()) {
+    cloned.set(sessionId, {
+      conversationKey: entry.conversationKey,
+      patches: entry.patches.map((patch) => cloneValue(patch)),
+      snapshot: cloneTerminalFrameSnapshot(entry.snapshot),
+      updatedAt: entry.updatedAt
+    });
+  }
+  return cloned;
 }
 
 function createCliDescriptor(cliId: string, payload: CliRegisterPayload): CliDescriptor {
@@ -365,68 +390,113 @@ function updateDescriptorFromSnapshot(record: CliRuntimeRecord, providerId: Prov
   };
 }
 
-function clearTerminalReplay(record: CliProviderRuntimeRecord, sessionId: string | null): void {
-  record.terminalReplay = Buffer.alloc(0);
-  record.terminalReplayOffset = 0;
-  record.terminalReplaySessionId = sessionId;
+function pruneTerminalSessions(record: CliProviderRuntimeRecord): void {
+  if (record.terminalSessions.size <= TERMINAL_SESSION_CACHE_MAX) {
+    return;
+  }
+  const evictions = [...record.terminalSessions.entries()]
+    .sort((left, right) => left[1].updatedAt - right[1].updatedAt)
+    .slice(0, Math.max(0, record.terminalSessions.size - TERMINAL_SESSION_CACHE_MAX));
+  for (const [sessionId] of evictions) {
+    record.terminalSessions.delete(sessionId);
+  }
 }
 
-function setTerminalReplay(record: CliProviderRuntimeRecord, offset: number, data: Buffer): void {
-  if (data.length <= TERMINAL_REPLAY_MAX_BYTES) {
-    record.terminalReplay = data;
-    record.terminalReplayOffset = offset;
-    return;
+function getTerminalSessionCache(
+  record: CliProviderRuntimeRecord | null,
+  sessionId: string | null | undefined
+): TerminalSessionCacheEntry | null {
+  const normalizedSessionId = sessionId?.trim() || null;
+  if (!record || !normalizedSessionId) {
+    return null;
   }
-
-  const start = data.length - TERMINAL_REPLAY_MAX_BYTES;
-  record.terminalReplay = data.subarray(start);
-  record.terminalReplayOffset = offset + start;
+  return record.terminalSessions.get(normalizedSessionId) ?? null;
 }
 
-function syncTerminalReplaySession(record: CliProviderRuntimeRecord, sessionId: string | null): void {
-  if (record.terminalReplaySessionId === sessionId) {
+function deleteTerminalSessionCache(record: CliProviderRuntimeRecord, sessionId: string | null | undefined): void {
+  const normalizedSessionId = sessionId?.trim() || null;
+  if (!normalizedSessionId) {
     return;
   }
-  clearTerminalReplay(record, sessionId);
+  record.terminalSessions.delete(normalizedSessionId);
 }
 
-function appendTerminalReplay(record: CliProviderRuntimeRecord, chunkOffset: number, chunk: string): void {
-  const chunkBytes = Buffer.from(chunk, 'utf8');
-  const replayEndOffset = getTerminalReplayEndOffset(record);
-
-  // A PTY restart for the same session resets chunk offsets back to 0.
-  // If we keep appending against the previous replay window, terminal history
-  // gets duplicated in resume payloads.
-  if (chunkOffset === 0 && replayEndOffset > 0) {
-    setTerminalReplay(record, 0, chunkBytes);
-    return;
+function appendTerminalFramePatch(
+  record: CliProviderRuntimeRecord,
+  patch: TerminalFramePatch,
+  conversationKey: string | null
+): boolean {
+  const sessionId = patch.sessionId?.trim() || null;
+  if (!sessionId) {
+    return false;
+  }
+  const isResetPatch = patch.ops.some((op) => op.type === 'reset');
+  if (isResetPatch) {
+    record.terminalSessions.set(sessionId, {
+      conversationKey,
+      patches: [cloneValue(patch)],
+      snapshot: applyTerminalFramePatch(null, patch),
+      updatedAt: Date.now()
+    });
+    pruneTerminalSessions(record);
+    return true;
   }
 
-  if (chunkOffset > replayEndOffset) {
-    setTerminalReplay(record, chunkOffset, chunkBytes);
-    return;
+  const currentSession = getTerminalSessionCache(record, sessionId);
+  if (!currentSession || currentSession.snapshot.revision !== patch.baseRevision) {
+    deleteTerminalSessionCache(record, sessionId);
+    return false;
   }
 
-  if (chunkOffset < replayEndOffset) {
-    const overlapBytes = replayEndOffset - chunkOffset;
-    if (overlapBytes >= chunkBytes.length) {
-      return;
+  currentSession.snapshot = applyTerminalFramePatch(currentSession.snapshot, patch);
+  currentSession.conversationKey = conversationKey;
+  currentSession.patches.push(cloneValue(patch));
+  if (currentSession.patches.length > TERMINAL_FRAME_PATCH_HISTORY_LIMIT) {
+    currentSession.patches.splice(0, currentSession.patches.length - TERMINAL_FRAME_PATCH_HISTORY_LIMIT);
+  }
+  currentSession.updatedAt = Date.now();
+  return true;
+}
+
+function getTerminalFramePatchesSince(
+  record: CliProviderRuntimeRecord,
+  sessionId: string,
+  lastRevision: number
+): TerminalFramePatch[] | null {
+  const sessionCache = getTerminalSessionCache(record, sessionId);
+  if (!sessionCache) {
+    return null;
+  }
+  const currentSnapshot = sessionCache.snapshot;
+  if (lastRevision === currentSnapshot.revision) {
+    return [];
+  }
+  if (lastRevision > currentSnapshot.revision) {
+    return null;
+  }
+
+  const selected: TerminalFramePatch[] = [];
+  let expectedBaseRevision = lastRevision;
+
+  for (const patch of sessionCache.patches) {
+    if (patch.revision <= lastRevision) {
+      continue;
     }
-
-    const suffixBytes = chunkBytes.subarray(overlapBytes);
-    setTerminalReplay(record, record.terminalReplayOffset, Buffer.concat([record.terminalReplay, suffixBytes]));
-    return;
+    if (patch.baseRevision !== expectedBaseRevision) {
+      return null;
+    }
+    selected.push(cloneValue(patch));
+    expectedBaseRevision = patch.revision;
+    if (expectedBaseRevision === currentSnapshot.revision) {
+      return selected;
+    }
   }
 
-  setTerminalReplay(record, record.terminalReplayOffset, Buffer.concat([record.terminalReplay, chunkBytes]));
-}
-
-function getTerminalReplayEndOffset(record: CliProviderRuntimeRecord): number {
-  return record.terminalReplayOffset + record.terminalReplay.length;
+  return null;
 }
 
 function getTerminalSessionId(record: CliProviderRuntimeRecord | null): string | null {
-  return record?.terminalReplaySessionId ?? record?.snapshot?.sessionId ?? null;
+  return record?.snapshot?.sessionId ?? null;
 }
 
 function getSocketCliId(socket: Socket): string | null {
@@ -460,12 +530,14 @@ function normalizeRuntimeSubscription(payload?: Partial<RuntimeSubscriptionPaylo
   const sessionId =
     typeof payload?.sessionId === 'string' && payload.sessionId.trim().length > 0 ? payload.sessionId.trim() : null;
   const lastSeq = typeof payload?.lastSeq === 'number' && Number.isFinite(payload.lastSeq) ? payload.lastSeq : null;
+  const terminalEnabled = payload?.terminalEnabled === true;
   return {
     targetCliId,
     targetProviderId,
     conversationKey,
     sessionId,
-    lastSeq
+    lastSeq,
+    terminalEnabled
   };
 }
 
@@ -515,7 +587,10 @@ function matchesMessagesUpsertSubscription(subscription: RuntimeSubscriptionPayl
   return true;
 }
 
-function matchesTerminalChunkSubscription(subscription: RuntimeSubscriptionPayload, payload: TerminalChunkPayload): boolean {
+function matchesTerminalFramePatchSubscription(subscription: RuntimeSubscriptionPayload, payload: TerminalFramePatchPayload): boolean {
+  if (subscription.terminalEnabled !== true) {
+    return false;
+  }
   if (!hasRuntimeSubscriptionTarget(subscription)) {
     return false;
   }
@@ -528,7 +603,7 @@ function matchesTerminalChunkSubscription(subscription: RuntimeSubscriptionPaylo
   if (subscription.conversationKey !== null && payload.conversationKey !== subscription.conversationKey) {
     return false;
   }
-  if (subscription.sessionId !== null && payload.sessionId !== subscription.sessionId) {
+  if (subscription.sessionId !== null && payload.patch.sessionId !== subscription.sessionId) {
     return false;
   }
   return true;
@@ -550,13 +625,17 @@ function matchesProviderRuntimeSubscription(
     return false;
   }
 
-  const snapshotConversationKey = providerRecord.snapshot?.conversationKey ?? null;
-  const terminalSessionId = getTerminalSessionId(providerRecord);
+  const terminalSessionId = subscription.sessionId ?? getTerminalSessionId(providerRecord);
+  const terminalSessionCache = getTerminalSessionCache(providerRecord, terminalSessionId);
+  const conversationKeyForMatch =
+    subscription.sessionId !== null
+      ? terminalSessionCache?.conversationKey ?? null
+      : providerRecord.snapshot?.conversationKey ?? null;
 
-  if (subscription.conversationKey !== null && snapshotConversationKey !== subscription.conversationKey) {
+  if (subscription.conversationKey !== null && conversationKeyForMatch !== subscription.conversationKey) {
     return false;
   }
-  if (subscription.sessionId !== null && terminalSessionId !== subscription.sessionId) {
+  if (subscription.sessionId !== null && !terminalSessionCache) {
     return false;
   }
   return true;
@@ -608,68 +687,96 @@ function emitMessagesUpsertToSubscribers(io: SocketIOServer, payload: MessagesUp
   }
 }
 
-function emitTerminalChunkToSubscribers(io: SocketIOServer, payload: TerminalChunkPayload): void {
+function emitTerminalFramePatchToSubscribers(io: SocketIOServer, payload: TerminalFramePatchPayload): void {
   for (const socket of io.of('/web').sockets.values()) {
     const subscription = webRuntimeSubscriptions.get(socket.id);
-    if (!subscription || !matchesTerminalChunkSubscription(subscription, payload)) {
+    if (!subscription || !matchesTerminalFramePatchSubscription(subscription, payload)) {
       continue;
     }
-    socket.emit('terminal:chunk', payload);
+    socket.emit('terminal:frame-patch', payload);
   }
 }
 
-function createTerminalResumeResult(socket: Socket, payload: TerminalResumeRequestPayload): TerminalResumeResultPayload {
+async function createTerminalFrameSyncResult(socket: Socket, payload: TerminalFrameSyncRequestPayload): Promise<TerminalFrameSyncResultPayload> {
   const subscription = webRuntimeSubscriptions.get(socket.id);
   const record = getConnectedCliRecord(payload.targetCliId);
   const providerId = payload.targetProviderId ?? null;
   const providerRecord = record && providerId ? getProviderRecord(record, providerId) : null;
+  const requestedSessionId = payload.sessionId ?? providerRecord?.snapshot?.sessionId ?? null;
+  let terminalSessionCache = getTerminalSessionCache(providerRecord, requestedSessionId);
+  const isActiveSessionRequest = requestedSessionId !== null && requestedSessionId === providerRecord?.snapshot?.sessionId;
+  const terminalFrameSnapshot = terminalSessionCache?.snapshot ?? null;
+
   if (
     !record ||
     !providerId ||
     !providerRecord ||
     !subscription ||
-    !matchesProviderRuntimeSubscription(subscription, record.descriptor.cliId, providerId, providerRecord)
+    !matchesProviderRuntimeSubscription(subscription, record.descriptor.cliId, providerId, providerRecord) ||
+    !terminalSessionCache ||
+    !terminalFrameSnapshot
   ) {
+    if (record && providerId && providerRecord && subscription && isActiveSessionRequest) {
+      const result = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+        record.socket.emit('cli:terminal-frame-prime', { targetProviderId: providerId }, (ack?: { ok: boolean; error?: string }) => {
+          resolve(ack ?? { ok: false, error: 'No response from CLI terminal frame priming' });
+        });
+      });
+      if (!result.ok) {
+        return {
+          ok: false,
+          error: result.error || 'Failed to prepare terminal frame',
+          providerId,
+          sessionId: requestedSessionId
+        };
+      }
+
+      terminalSessionCache = getTerminalSessionCache(providerRecord, requestedSessionId);
+      if (terminalSessionCache?.snapshot) {
+        return {
+          ok: true,
+          providerId,
+          sessionId: terminalSessionCache.snapshot.sessionId,
+          mode: 'snapshot',
+          snapshot: cloneTerminalFrameSnapshot(terminalSessionCache.snapshot)
+        };
+      }
+    }
+
     return {
+      ok: false,
+      error: 'Terminal frame is unavailable for the requested runtime',
       providerId,
-      mode: 'reset',
-      sessionId: null,
-      offset: 0,
-      data: ''
+      sessionId: null
     };
   }
 
-  const sessionId = getTerminalSessionId(providerRecord);
-  if (!sessionId) {
-    return {
-      providerId,
-      mode: 'reset',
-      sessionId: null,
-      offset: 0,
-      data: ''
-    };
+  const resolvedTerminalSessionCache = terminalSessionCache;
+
+  if (
+    payload.sessionId === terminalFrameSnapshot.sessionId &&
+    payload.lastRevision != null
+  ) {
+    const patches = getTerminalFramePatchesSince(providerRecord, terminalFrameSnapshot.sessionId ?? '', payload.lastRevision);
+    if (patches) {
+      resolvedTerminalSessionCache.updatedAt = Date.now();
+      return {
+        ok: true,
+        providerId,
+        sessionId: terminalFrameSnapshot.sessionId,
+        mode: 'patches',
+        patches
+      };
+    }
   }
 
-  const replayStartOffset = providerRecord.terminalReplayOffset;
-  const replayEndOffset = getTerminalReplayEndOffset(providerRecord);
-
-  if (payload.sessionId === sessionId && payload.lastOffset >= replayStartOffset && payload.lastOffset <= replayEndOffset) {
-    const byteOffset = payload.lastOffset - replayStartOffset;
-    return {
-      providerId,
-      mode: 'delta',
-      sessionId,
-      offset: payload.lastOffset,
-      data: providerRecord.terminalReplay.subarray(byteOffset).toString('utf8')
-    };
-  }
-
+  resolvedTerminalSessionCache.updatedAt = Date.now();
   return {
+    ok: true,
     providerId,
-    mode: 'reset',
-    sessionId,
-    offset: replayStartOffset,
-    data: providerRecord.terminalReplay.toString('utf8')
+    sessionId: terminalFrameSnapshot.sessionId,
+    mode: 'snapshot',
+    snapshot: cloneTerminalFrameSnapshot(terminalFrameSnapshot)
   };
 }
 
@@ -820,6 +927,7 @@ export async function startSocketServer(): Promise<void> {
 
   const io = new SocketIOServer(httpServer, {
     path: '/socket.io/',
+    maxHttpBufferSize: SOCKET_MAX_HTTP_BUFFER_SIZE,
     cors: {
       origin: true,
       credentials: true
@@ -881,7 +989,6 @@ export async function startSocketServer(): Promise<void> {
       }
 
       record.descriptor.connected = true;
-      syncTerminalReplaySession(providerRecord, payload.snapshot.sessionId);
       providerRecord.snapshot = cloneValue(payload.snapshot);
       updateDescriptorFromSnapshot(record, payload.providerId);
       const snapshotPayload = {
@@ -920,7 +1027,7 @@ export async function startSocketServer(): Promise<void> {
       emitMessagesUpsertToSubscribers(io, messagesPayload);
     });
 
-    socket.on('cli:terminal-chunk', (payload: TerminalChunkPayload) => {
+    socket.on('cli:terminal-frame-patch', (payload: TerminalFramePatchPayload) => {
       const cliId = getSocketCliId(socket);
       if (!cliId) {
         return;
@@ -936,14 +1043,33 @@ export async function startSocketServer(): Promise<void> {
       }
 
       record.descriptor.connected = true;
-      syncTerminalReplaySession(providerRecord, payload.sessionId);
-      appendTerminalReplay(providerRecord, payload.offset, payload.data);
       record.descriptor.lastSeenAt = new Date().toISOString();
-      const terminalChunkPayload = {
+      if (!appendTerminalFramePatch(providerRecord, payload.patch, payload.conversationKey ?? null)) {
+        return;
+      }
+      emitTerminalFramePatchToSubscribers(io, {
         ...cloneValue(payload),
         cliId
-      } satisfies TerminalChunkPayload;
-      emitTerminalChunkToSubscribers(io, terminalChunkPayload);
+      } satisfies TerminalFramePatchPayload);
+    });
+
+    socket.on('cli:terminal-session-evicted', (payload: TerminalSessionEvictedPayload) => {
+      const cliId = getSocketCliId(socket);
+      if (!cliId) {
+        return;
+      }
+      const record = cliId ? cliRecords.get(cliId) : null;
+      if (!record || record.socket.id !== socket.id) {
+        return;
+      }
+
+      const providerRecord = getProviderRecord(record, payload.providerId);
+      if (!providerRecord) {
+        return;
+      }
+
+      deleteTerminalSessionCache(providerRecord, payload.sessionId);
+      record.descriptor.lastSeenAt = new Date().toISOString();
     });
 
     socket.on('disconnect', () => {
@@ -1010,9 +1136,12 @@ export async function startSocketServer(): Promise<void> {
       }
     });
 
-    socket.on('web:terminal-resume', (payload: TerminalResumeRequestPayload, callback?: (result: TerminalResumeResultPayload) => void) => {
-      callback?.(createTerminalResumeResult(socket, payload));
-    });
+    socket.on(
+      'web:terminal-frame-sync',
+      async (payload: TerminalFrameSyncRequestPayload, callback?: (result: TerminalFrameSyncResultPayload) => void) => {
+        callback?.(await createTerminalFrameSyncResult(socket, payload));
+      }
+    );
 
     socket.on('web:terminal-resize', (payload: TerminalResizePayload) => {
       const record = getConnectedCliRecord(payload.targetCliId);

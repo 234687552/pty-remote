@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 
 import { AppShell } from '@/app-shell/AppShell.tsx';
@@ -17,6 +17,9 @@ import { readCachedLastSeq, updateCachedLastSeq, writeConversationCache } from '
 export function App() {
   const store = useWorkspaceStore();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [desktopTerminalVisible, setDesktopTerminalVisible] = useState(() =>
+    typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
+  );
   const activeCliId = selectActiveCliId(store.workspaceState);
   const activeProviderId = selectActiveProviderId(store.workspaceState);
   const activeProjectId = store.workspaceState.activeProjectId;
@@ -31,13 +34,33 @@ export function App() {
       : null;
   const activeConversationKey = activeConversation?.conversationKey ?? null;
   const activeSessionId = activeConversation?.sessionId ?? null;
+  const terminalVisible = desktopTerminalVisible || store.mobilePane === 'terminal';
   const socketRef = useRef<Socket | null>(null);
+  const lastTerminalSyncKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia('(min-width: 1024px)');
+    const handleChange = (event: MediaQueryListEvent) => {
+      setDesktopTerminalVisible(event.matches);
+    };
+
+    setDesktopTerminalVisible(mediaQuery.matches);
+    mediaQuery.addEventListener('change', handleChange);
+    return () => {
+      mediaQuery.removeEventListener('change', handleChange);
+    };
+  }, []);
 
   const terminal = useTerminalBridge({
     activeCliId,
     activeProviderId,
     socketRef,
-    setError: store.setError
+    setError: store.setError,
+    terminalVisible
   });
 
   const { socketConnected, clis, sendCommand } = useCliSocket({
@@ -45,6 +68,7 @@ export function App() {
     activeProviderId,
     activeConversationKey,
     activeSessionId,
+    terminalEnabled: terminalVisible,
     socketRef,
     onConnect: () => {
       terminal.handleSocketConnected();
@@ -76,8 +100,8 @@ export function App() {
         });
       }
     },
-    onTerminalChunk: (payload) => {
-      terminal.handleTerminalChunk(payload);
+    onTerminalFramePatch: (payload) => {
+      terminal.handleTerminalFramePatch(payload);
     }
   });
 
@@ -88,6 +112,41 @@ export function App() {
     store,
     terminal
   });
+
+  useEffect(() => {
+    if (!terminalVisible || !socketConnected || !activeCliId || !activeProviderId || !activeConversation) {
+      lastTerminalSyncKeyRef.current = null;
+      return;
+    }
+    if (
+      store.snapshot.providerId !== activeProviderId ||
+      store.snapshot.conversationKey !== activeConversation.conversationKey
+    ) {
+      return;
+    }
+
+    const nextTerminalKey = `${activeCliId}:${activeProviderId}:${activeConversation.conversationKey}:${activeSessionId ?? ''}`;
+    if (lastTerminalSyncKeyRef.current === nextTerminalKey) {
+      return;
+    }
+    lastTerminalSyncKeyRef.current = nextTerminalKey;
+
+    void terminal.resumeSession(activeSessionId ?? null, { force: true }).catch((error) => {
+      lastTerminalSyncKeyRef.current = null;
+      store.setError(error instanceof Error ? error.message : '终端帧同步失败');
+    });
+  }, [
+    activeCliId,
+    activeConversation,
+    activeProviderId,
+    activeSessionId,
+    socketConnected,
+    store.snapshot.conversationKey,
+    store.snapshot.providerId,
+    store.setError,
+    terminal,
+    terminalVisible
+  ]);
 
   function handleMobileSidebarOpen(): void {
     setMobileSidebarOpen(true);

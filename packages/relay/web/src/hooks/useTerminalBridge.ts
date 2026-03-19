@@ -1,24 +1,31 @@
-import { useEffect, useRef } from 'react';
-import type { Dispatch, SetStateAction } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import type { Dispatch, RefObject, SetStateAction } from 'react';
 
-import { FitAddon } from '@xterm/addon-fit';
-import { Terminal } from 'xterm';
 import type { Socket } from 'socket.io-client';
 
-import type { TerminalChunkPayload, TerminalResizePayload, TerminalResumeRequestPayload, TerminalResumeResultPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
+import type {
+  TerminalFramePatchPayload,
+  TerminalFrameSyncRequestPayload,
+  TerminalFrameSyncResultPayload,
+  TerminalResizePayload
+} from '@lzdi/pty-remote-protocol/protocol.ts';
+import {
+  applyTerminalFramePatch,
+  cloneTerminalFrameSnapshot,
+  createEmptyTerminalFrameSnapshot,
+  type TerminalFramePatch,
+  type TerminalFrameSnapshot
+} from '@lzdi/pty-remote-protocol/terminal-frame.ts';
 import type { ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
-import {
-  MOBILE_TERMINAL_BREAKPOINT,
-  MOBILE_TERMINAL_MIN_COLS,
-  getUtf8ByteLength
-} from '@/lib/runtime.ts';
+import { MOBILE_TERMINAL_BREAKPOINT, MOBILE_TERMINAL_MIN_COLS } from '@/lib/runtime.ts';
 
 interface UseTerminalBridgeOptions {
   activeCliId: string | null;
   activeProviderId: ProviderId | null;
-  socketRef: React.RefObject<Socket | null>;
+  socketRef: RefObject<Socket | null>;
   setError: Dispatch<SetStateAction<string>>;
+  terminalVisible: boolean;
 }
 
 interface ResumeOptions {
@@ -26,36 +33,114 @@ interface ResumeOptions {
 }
 
 export interface TerminalBridge {
-  terminalViewportRef: React.RefObject<HTMLDivElement | null>;
-  terminalHostRef: React.RefObject<HTMLDivElement | null>;
+  frameSnapshot: TerminalFrameSnapshot | null;
+  terminalHostRef: RefObject<HTMLDivElement | null>;
+  terminalViewportRef: RefObject<HTMLDivElement | null>;
   clearTerminal: () => void;
   handleSocketConnected: () => void;
   handleSocketDisconnected: () => void;
-  handleTerminalChunk: (payload: TerminalChunkPayload) => void;
+  handleTerminalFramePatch: (payload: TerminalFramePatchPayload) => void;
   jumpToEdge: (direction: 'up' | 'down') => void;
   prepareForResume: () => void;
   resumeSession: (targetSessionId: string | null, options?: ResumeOptions) => Promise<void>;
   scheduleResize: () => void;
 }
 
-type TerminalBridgeMethods = Omit<TerminalBridge, 'terminalViewportRef' | 'terminalHostRef'>;
+type TerminalBridgeMethods = Omit<TerminalBridge, 'frameSnapshot' | 'terminalHostRef' | 'terminalViewportRef'>;
 
-export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, setError }: UseTerminalBridgeOptions): TerminalBridge {
+const TERMINAL_FONT_SIZE_PX = 12;
+const TERMINAL_LINE_HEIGHT = 1.2;
+const TERMINAL_MEASURE_TEXT = 'MMMMMMMMMM';
+
+interface TerminalMeasure {
+  cellHeight: number;
+  cellWidth: number;
+}
+
+function isResetPatch(patch: TerminalFramePatch): boolean {
+  return patch.ops.some((op) => op.type === 'reset');
+}
+
+function readTerminalMeasure(host: HTMLDivElement | null): TerminalMeasure {
+  const measureElement = host?.querySelector<HTMLElement>('[data-terminal-measure]');
+  if (!measureElement) {
+    return {
+      cellWidth: TERMINAL_FONT_SIZE_PX * 0.6,
+      cellHeight: TERMINAL_FONT_SIZE_PX * TERMINAL_LINE_HEIGHT
+    };
+  }
+
+  const measureRect = measureElement.getBoundingClientRect();
+  const computedStyle = window.getComputedStyle(measureElement);
+  const fontSize = Number.parseFloat(computedStyle.fontSize) || TERMINAL_FONT_SIZE_PX;
+  const fallbackHeight = fontSize * TERMINAL_LINE_HEIGHT;
+
+  return {
+    cellWidth: measureRect.width > 0 ? measureRect.width / TERMINAL_MEASURE_TEXT.length : fontSize * 0.6,
+    cellHeight: measureRect.height > 0 ? measureRect.height : fallbackHeight
+  };
+}
+
+function applySyncResult(currentSnapshot: TerminalFrameSnapshot | null, result: TerminalFrameSyncResultPayload): TerminalFrameSnapshot {
+  if (!result.ok) {
+    throw new Error(result.error || 'Terminal frame sync failed');
+  }
+
+  if (result.mode === 'snapshot') {
+    if (!result.snapshot) {
+      throw new Error('Terminal frame sync returned no snapshot');
+    }
+    return cloneTerminalFrameSnapshot(result.snapshot);
+  }
+
+  if (result.mode !== 'patches' || !result.patches) {
+    throw new Error('Terminal frame sync returned an invalid payload');
+  }
+
+  let nextSnapshot = currentSnapshot;
+  for (const patch of result.patches) {
+    nextSnapshot = applyTerminalFramePatch(nextSnapshot, patch);
+  }
+
+  if (!nextSnapshot) {
+    throw new Error('Terminal frame sync returned no applicable patches');
+  }
+
+  return nextSnapshot;
+}
+
+export function useTerminalBridge({
+  activeCliId,
+  activeProviderId,
+  socketRef,
+  setError,
+  terminalVisible
+}: UseTerminalBridgeOptions): TerminalBridge {
   const terminalViewportRef = useRef<HTMLDivElement | null>(null);
   const terminalHostRef = useRef<HTMLDivElement | null>(null);
-  const terminalInstanceRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeFrameRef = useRef<number | null>(null);
   const lastTerminalSizeRef = useRef<{ cols: number; rows: number } | null>(null);
-  const appliedTerminalOffsetRef = useRef(0);
   const appliedSessionIdRef = useRef<string | null>(null);
   const appliedCliIdRef = useRef<string | null>(null);
   const appliedProviderIdRef = useRef<ProviderId | null>(null);
   const terminalResumePendingRef = useRef(false);
   const terminalResyncRequestedRef = useRef(false);
-  const bufferedTerminalChunksRef = useRef<TerminalChunkPayload[]>([]);
+  const bufferedTerminalPatchesRef = useRef<TerminalFramePatchPayload[]>([]);
+  const frameSnapshotRef = useRef<TerminalFrameSnapshot | null>(null);
   const terminalMethodsRef = useRef<TerminalBridgeMethods | null>(null);
   const terminalBridgeRef = useRef<TerminalBridge | null>(null);
+  const [frameSnapshot, setFrameSnapshot] = useState<TerminalFrameSnapshot | null>(null);
+
+  function commitFrameSnapshot(nextSnapshot: TerminalFrameSnapshot | null, options: { preserveScroll?: boolean } = {}): void {
+    frameSnapshotRef.current = nextSnapshot;
+    setFrameSnapshot(nextSnapshot);
+    requestAnimationFrame(() => {
+      if (!options.preserveScroll) {
+        jumpToEdge('down');
+      }
+      scheduleResize();
+    });
+  }
 
   function scheduleResize(): void {
     if (resizeFrameRef.current) {
@@ -68,90 +153,36 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
     });
   }
 
-  function scheduleTerminalRedraw(): void {
-    requestAnimationFrame(() => {
-      scheduleResize();
-      requestAnimationFrame(() => {
-        const terminal = terminalInstanceRef.current;
-        if (!terminal || terminal.rows <= 0) {
-          return;
-        }
-        terminal.refresh(0, terminal.rows - 1);
-      });
-    });
-  }
-
-  function ensureTerminalBottom(): void {
-    requestAnimationFrame(() => {
-      const terminal = terminalInstanceRef.current;
-      if (!terminal) {
-        return;
-      }
-      terminal.scrollToBottom();
-    });
-  }
-
-  function applyTerminalReplay(sessionId: string | null, replay: string, replayOffset: number): void {
-    const terminal = terminalInstanceRef.current;
-    if (!terminal) {
-      return;
-    }
-
-    terminal.reset();
-
-    const finalizeReplay = () => {
-      appliedSessionIdRef.current = sessionId;
-      appliedTerminalOffsetRef.current = replayOffset + getUtf8ByteLength(replay);
-      terminal.scrollToBottom();
-      scheduleTerminalRedraw();
-    };
-
-    if (!replay) {
-      finalizeReplay();
-      return;
-    }
-
-    terminal.write(replay, finalizeReplay);
-  }
-
   function emitTerminalResize(): void {
     const socket = socketRef.current;
-    const terminal = terminalInstanceRef.current;
-    const fitAddon = fitAddonRef.current;
     const terminalHost = terminalHostRef.current;
     const terminalViewport = terminalViewportRef.current;
-    if (!socket?.connected || !terminal || !fitAddon || !terminalHost || !terminalViewport) {
+    if (!socket?.connected || !terminalHost || !terminalViewport) {
       return;
     }
 
-    terminalHost.style.width = '100%';
-    terminalHost.style.minWidth = '100%';
-    fitAddon.fit();
-    const proposedDimensions = fitAddon.proposeDimensions();
-    const cols = proposedDimensions?.cols ?? terminal.cols;
-    const rows = proposedDimensions?.rows ?? terminal.rows;
-    if (!Number.isFinite(cols) || !Number.isFinite(rows)) {
+    const { cellHeight, cellWidth } = readTerminalMeasure(terminalHost);
+    if (!Number.isFinite(cellHeight) || cellHeight <= 0 || !Number.isFinite(cellWidth) || cellWidth <= 0) {
       return;
     }
 
     const viewportWidth = terminalViewport.clientWidth;
+    const viewportHeight = terminalViewport.clientHeight;
+    const proposedCols = Math.max(1, Math.floor(viewportWidth / cellWidth));
+    const proposedRows = Math.max(1, Math.floor(viewportHeight / cellHeight));
     const shouldAllowHorizontalScroll = viewportWidth > 0 && viewportWidth < MOBILE_TERMINAL_BREAKPOINT;
     const nextSize = {
-      cols: Math.max(shouldAllowHorizontalScroll ? MOBILE_TERMINAL_MIN_COLS : 20, cols),
-      rows: Math.max(8, rows)
+      cols: Math.max(shouldAllowHorizontalScroll ? MOBILE_TERMINAL_MIN_COLS : 20, proposedCols),
+      rows: Math.max(8, proposedRows)
     };
 
-    if (shouldAllowHorizontalScroll && cols > 0) {
-      const targetWidth = Math.ceil((viewportWidth / cols) * nextSize.cols);
+    if (shouldAllowHorizontalScroll) {
+      const targetWidth = Math.ceil(cellWidth * nextSize.cols);
       terminalHost.style.width = `${targetWidth}px`;
       terminalHost.style.minWidth = `${targetWidth}px`;
     } else {
       terminalHost.style.width = '100%';
       terminalHost.style.minWidth = '100%';
-    }
-
-    if (terminal.cols !== nextSize.cols || terminal.rows !== nextSize.rows) {
-      terminal.resize(nextSize.cols, nextSize.rows);
     }
 
     if (lastTerminalSizeRef.current?.cols === nextSize.cols && lastTerminalSizeRef.current?.rows === nextSize.rows) {
@@ -166,76 +197,63 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
     } satisfies TerminalResizePayload);
   }
 
-  function flushBufferedTerminalChunks(): void {
-    const pendingChunks = bufferedTerminalChunksRef.current
-      .splice(0)
-      .sort((left, right) => left.offset - right.offset);
-
-    for (const chunk of pendingChunks) {
-      applyTerminalChunk(chunk);
+  function flushBufferedTerminalPatches(): void {
+    const pendingPatches = bufferedTerminalPatchesRef.current.splice(0);
+    for (const pendingPatch of pendingPatches) {
+      applyFramePatchPayload(pendingPatch);
     }
   }
 
-  async function requestTerminalResume(targetSessionId: string | null): Promise<void> {
+  async function requestTerminalFrameSync(targetSessionId: string | null): Promise<void> {
     const socket = socketRef.current;
     if (!socket?.connected) {
-      return;
+      throw new Error('Socket is not connected');
+    }
+    if (!terminalVisible) {
+      throw new Error('Terminal is not visible');
     }
 
+    const currentSnapshot = frameSnapshotRef.current;
     const sameTargetContext =
-      appliedSessionIdRef.current === targetSessionId &&
+      currentSnapshot &&
+      currentSnapshot.sessionId === targetSessionId &&
       appliedCliIdRef.current === activeCliId &&
       appliedProviderIdRef.current === activeProviderId;
 
-    const payload: TerminalResumeRequestPayload =
-      sameTargetContext
-        ? {
-            targetCliId: activeCliId,
-            targetProviderId: activeProviderId,
-            sessionId: appliedSessionIdRef.current,
-            lastOffset: appliedTerminalOffsetRef.current
-          }
-        : {
-            targetCliId: activeCliId,
-            targetProviderId: activeProviderId,
-            sessionId: null,
-            lastOffset: 0
-          };
+    const payload: TerminalFrameSyncRequestPayload = sameTargetContext
+      ? {
+          targetCliId: activeCliId,
+          targetProviderId: activeProviderId,
+          sessionId: currentSnapshot.sessionId,
+          lastRevision: currentSnapshot.revision
+        }
+      : {
+          targetCliId: activeCliId,
+          targetProviderId: activeProviderId,
+          sessionId: null,
+          lastRevision: null
+        };
 
-    const result = await new Promise<TerminalResumeResultPayload>((resolve) => {
-      socket.emit('web:terminal-resume', payload, (resumePayload?: TerminalResumeResultPayload) => {
+    const result = await new Promise<TerminalFrameSyncResultPayload>((resolve) => {
+      socket.emit('web:terminal-frame-sync', payload, (syncResult?: TerminalFrameSyncResultPayload) => {
         resolve(
-          resumePayload ?? {
-            mode: 'reset',
+          syncResult ?? {
+            ok: false,
+            error: 'No response from terminal frame sync',
             providerId: activeProviderId,
-            sessionId: targetSessionId,
-            offset: 0,
-            data: ''
+            sessionId: targetSessionId
           }
         );
       });
     });
 
-    if (result.mode === 'reset') {
-      applyTerminalReplay(result.sessionId, result.data, result.offset);
-    } else {
-      applyTerminalChunk({
-        cliId: activeCliId ?? '',
-        providerId: result.providerId ?? activeProviderId ?? 'claude',
-        conversationKey: null,
-        data: result.data,
-        offset: result.offset,
-        sessionId: result.sessionId
-      });
-    }
-
+    commitFrameSnapshot(applySyncResult(frameSnapshotRef.current, result));
+    appliedSessionIdRef.current = targetSessionId;
     appliedCliIdRef.current = activeCliId;
     appliedProviderIdRef.current = activeProviderId;
-
     terminalResumePendingRef.current = false;
-    setError((current) => (current === '终端流已失步，正在自动重连同步...' ? '' : current));
-    flushBufferedTerminalChunks();
-    ensureTerminalBottom();
+    setError((current) => (current === '终端帧已失步，正在自动重连同步...' ? '' : current));
+    flushBufferedTerminalPatches();
   }
 
   function scheduleTerminalResync(sessionId: string | null): void {
@@ -245,58 +263,58 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
 
     terminalResyncRequestedRef.current = true;
     terminalResumePendingRef.current = true;
-    bufferedTerminalChunksRef.current = [];
-    setError('终端流已失步，正在自动重连同步...');
-    void requestTerminalResume(sessionId).finally(() => {
-      terminalResyncRequestedRef.current = false;
-    });
+    bufferedTerminalPatchesRef.current = [];
+    setError('终端帧已失步，正在自动重连同步...');
+    void requestTerminalFrameSync(sessionId)
+      .catch((error) => {
+        terminalResumePendingRef.current = false;
+        setError(error instanceof Error ? error.message : '终端帧重同步失败');
+      })
+      .finally(() => {
+        terminalResyncRequestedRef.current = false;
+      });
   }
 
-  function applyTerminalChunk(payload: TerminalChunkPayload): boolean {
-    const terminal = terminalInstanceRef.current;
-    if (!terminal) {
-      return true;
-    }
-    if (!payload.sessionId) {
-      return true;
-    }
-    if (payload.sessionId !== appliedSessionIdRef.current) {
-      scheduleTerminalResync(payload.sessionId);
+  function applyFramePatchPayload(payload: TerminalFramePatchPayload): boolean {
+    const patch = payload.patch;
+    const currentSnapshot = frameSnapshotRef.current;
+    if (!currentSnapshot && !isResetPatch(patch)) {
+      scheduleTerminalResync(patch.sessionId);
       return false;
     }
 
-    const chunkEndOffset = payload.offset + getUtf8ByteLength(payload.data);
-    if (chunkEndOffset <= appliedTerminalOffsetRef.current) {
-      return true;
-    }
-    if (payload.offset !== appliedTerminalOffsetRef.current) {
-      scheduleTerminalResync(payload.sessionId);
+    if (
+      currentSnapshot &&
+      !isResetPatch(patch) &&
+      (patch.sessionId !== currentSnapshot.sessionId || patch.baseRevision !== currentSnapshot.revision)
+    ) {
+      scheduleTerminalResync(patch.sessionId);
       return false;
     }
 
-    terminal.write(payload.data);
-    appliedTerminalOffsetRef.current = chunkEndOffset;
+    commitFrameSnapshot(applyTerminalFramePatch(currentSnapshot, patch), { preserveScroll: true });
     return true;
   }
 
   function prepareForResume(): void {
     terminalResumePendingRef.current = true;
-    bufferedTerminalChunksRef.current = [];
+    bufferedTerminalPatchesRef.current = [];
   }
 
   function clearTerminal(): void {
-    bufferedTerminalChunksRef.current = [];
+    bufferedTerminalPatchesRef.current = [];
     terminalResumePendingRef.current = false;
     terminalResyncRequestedRef.current = false;
+    appliedSessionIdRef.current = null;
     appliedCliIdRef.current = null;
     appliedProviderIdRef.current = null;
-    applyTerminalReplay(null, '', 0);
+    commitFrameSnapshot(createEmptyTerminalFrameSnapshot());
   }
 
   function handleSocketConnected(): void {
     terminalResumePendingRef.current = true;
     terminalResyncRequestedRef.current = false;
-    bufferedTerminalChunksRef.current = [];
+    bufferedTerminalPatchesRef.current = [];
     setError('');
     scheduleResize();
   }
@@ -305,24 +323,33 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
     terminalResyncRequestedRef.current = false;
   }
 
-  function handleTerminalChunk(payload: TerminalChunkPayload): void {
-    if (terminalResumePendingRef.current) {
-      bufferedTerminalChunksRef.current.push(payload);
+  function handleTerminalFramePatch(payload: TerminalFramePatchPayload): void {
+    if (!terminalVisible) {
       return;
     }
-    applyTerminalChunk(payload);
+    if (terminalResumePendingRef.current) {
+      bufferedTerminalPatchesRef.current.push(payload);
+      return;
+    }
+    applyFramePatchPayload(payload);
   }
 
   async function resumeSession(targetSessionId: string | null, options: ResumeOptions = {}): Promise<void> {
+    if (!terminalVisible) {
+      return;
+    }
     if (!socketRef.current?.connected) {
       return;
     }
+
     if (!options.force) {
       if (terminalResumePendingRef.current) {
         return;
       }
+      const currentSnapshot = frameSnapshotRef.current;
       if (
-        appliedSessionIdRef.current === targetSessionId &&
+        currentSnapshot &&
+        currentSnapshot.sessionId === targetSessionId &&
         appliedCliIdRef.current === activeCliId &&
         appliedProviderIdRef.current === activeProviderId
       ) {
@@ -331,55 +358,27 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
     }
 
     prepareForResume();
-    await requestTerminalResume(targetSessionId);
+    await requestTerminalFrameSync(targetSessionId);
   }
 
   function jumpToEdge(direction: 'up' | 'down'): void {
-    const terminal = terminalInstanceRef.current;
-    if (!terminal) {
+    const viewport = terminalViewportRef.current;
+    if (!viewport) {
       return;
     }
 
     if (direction === 'up') {
-      terminal.scrollToTop();
+      viewport.scrollTop = 0;
       return;
     }
 
-    terminal.scrollToBottom();
+    viewport.scrollTop = viewport.scrollHeight;
   }
 
   useEffect(() => {
-    if (!terminalHostRef.current || !terminalViewportRef.current || terminalInstanceRef.current) {
+    if (!terminalHostRef.current || !terminalViewportRef.current) {
       return;
     }
-
-    const terminal = new Terminal({
-      allowTransparency: true,
-      cols: 120,
-      rows: 32,
-      convertEol: false,
-      cursorBlink: false,
-      cursorStyle: 'bar',
-      disableStdin: true,
-      fontFamily: 'Berkeley Mono, SFMono-Regular, Consolas, monospace',
-      fontSize: 12,
-      lineHeight: 1.2,
-      scrollback: 5000,
-      theme: {
-        background: '#ffffff',
-        foreground: '#111827',
-        cursor: '#111827',
-        cursorAccent: '#ffffff',
-        selectionBackground: 'rgba(15, 23, 42, 0.12)'
-      }
-    });
-    const fitAddon = new FitAddon();
-
-    terminal.loadAddon(fitAddon);
-    terminal.open(terminalHostRef.current);
-    fitAddon.fit();
-    terminalInstanceRef.current = terminal;
-    fitAddonRef.current = fitAddon;
 
     const observer = new ResizeObserver(() => {
       scheduleResize();
@@ -400,9 +399,6 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
       }
       observer.disconnect();
       window.removeEventListener('resize', handleWindowResize);
-      terminal.dispose();
-      terminalInstanceRef.current = null;
-      fitAddonRef.current = null;
     };
   }, []);
 
@@ -410,7 +406,7 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
     clearTerminal,
     handleSocketConnected,
     handleSocketDisconnected,
-    handleTerminalChunk,
+    handleTerminalFramePatch,
     jumpToEdge,
     prepareForResume,
     resumeSession,
@@ -419,6 +415,7 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
 
   if (!terminalBridgeRef.current) {
     terminalBridgeRef.current = {
+      frameSnapshot,
       terminalViewportRef,
       terminalHostRef,
       clearTerminal: () => {
@@ -430,8 +427,8 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
       handleSocketDisconnected: () => {
         terminalMethodsRef.current?.handleSocketDisconnected();
       },
-      handleTerminalChunk: (payload) => {
-        terminalMethodsRef.current?.handleTerminalChunk(payload);
+      handleTerminalFramePatch: (payload) => {
+        terminalMethodsRef.current?.handleTerminalFramePatch(payload);
       },
       jumpToEdge: (direction) => {
         terminalMethodsRef.current?.jumpToEdge(direction);
@@ -447,6 +444,8 @@ export function useTerminalBridge({ activeCliId, activeProviderId, socketRef, se
       }
     };
   }
+
+  terminalBridgeRef.current.frameSnapshot = frameSnapshot;
 
   return terminalBridgeRef.current;
 }

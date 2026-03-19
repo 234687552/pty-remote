@@ -3,8 +3,6 @@ import { spawn as spawnPty, type IPty } from 'node-pty';
 export interface CodexPtySession {
   pty: IPty;
   recentOutput: string;
-  replayChunks: string[];
-  replayBytes: number;
 }
 
 export type CodexPtyLifecycle = 'not_ready' | 'idle' | 'running';
@@ -51,9 +49,7 @@ export function startCodexPtySession(options: StartCodexPtySessionOptions): Code
 
   const session: CodexPtySession = {
     pty,
-    recentOutput: '',
-    replayChunks: [],
-    replayBytes: 0
+    recentOutput: ''
   };
 
   pty.onData((chunk) => {
@@ -89,20 +85,6 @@ export function resizeCodexPtySession(session: CodexPtySession | null, cols: num
   } catch {
     // ignore resize failures during session transitions
   }
-}
-
-export function appendReplayChunk(session: CodexPtySession, chunk: string, maxReplayBytes: number): string {
-  session.replayChunks.push(chunk);
-  session.replayBytes += Buffer.byteLength(chunk);
-
-  while (session.replayBytes > maxReplayBytes && session.replayChunks.length > 1) {
-    const removed = session.replayChunks.shift();
-    if (removed) {
-      session.replayBytes -= Buffer.byteLength(removed);
-    }
-  }
-
-  return session.replayChunks.join('');
 }
 
 export function appendRecentOutput(session: CodexPtySession, chunk: string, maxChars: number): string {

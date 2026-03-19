@@ -5,8 +5,6 @@ import { spawn as spawnPty, type IPty } from 'node-pty';
 export interface ClaudePtySession {
   pty: IPty;
   recentOutput: string;
-  replayChunks: string[];
-  replayBytes: number;
 }
 
 export type ClaudePtyLifecycle = 'not_ready' | 'idle' | 'running';
@@ -63,9 +61,7 @@ export function startClaudePtySession(options: StartClaudePtySessionOptions): {
 
   const session: ClaudePtySession = {
     pty,
-    recentOutput: '',
-    replayChunks: [],
-    replayBytes: 0
+    recentOutput: ''
   };
 
   pty.onData((chunk) => {
@@ -104,20 +100,6 @@ export function resizeClaudePtySession(session: ClaudePtySession | null, cols: n
   } catch {
     // ignore resize failures during session transitions
   }
-}
-
-export function appendReplayChunk(session: ClaudePtySession, chunk: string, maxReplayBytes: number): string {
-  session.replayChunks.push(chunk);
-  session.replayBytes += Buffer.byteLength(chunk);
-
-  while (session.replayBytes > maxReplayBytes && session.replayChunks.length > 1) {
-    const removed = session.replayChunks.shift();
-    if (removed) {
-      session.replayBytes -= Buffer.byteLength(removed);
-    }
-  }
-
-  return session.replayChunks.join('');
 }
 
 export function appendRecentOutput(session: ClaudePtySession, chunk: string, maxChars: number): string {

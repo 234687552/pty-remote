@@ -4,7 +4,7 @@ import type {
   ProviderRuntimeRegistration,
   ProjectSessionSummary,
   SelectConversationResultPayload,
-  TerminalChunkPayload
+  TerminalFramePatchPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ProviderId, RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
@@ -25,7 +25,12 @@ export interface ProviderRuntimeCallbacks {
     hasOlderMessages: boolean;
   }): void;
   emitSnapshot(snapshot: RuntimeSnapshot): void;
-  emitTerminalChunk(payload: Omit<TerminalChunkPayload, 'cliId' | 'providerId'>): void;
+  emitTerminalFramePatch(payload: Omit<TerminalFramePatchPayload, 'cliId' | 'providerId'>): void;
+  emitTerminalSessionEvicted(payload: {
+    conversationKey: string | null;
+    reason: string;
+    sessionId: string;
+  }): void;
 }
 
 export interface ProviderRuntime {
@@ -43,7 +48,8 @@ export interface ProviderRuntime {
   getSnapshot(): RuntimeSnapshot;
   listProjectConversations(projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]>;
   listManagedPtyHandles(): Promise<ManagedPtyHandleSummary[]>;
-  replayActiveState(): Promise<void>;
+  primeActiveTerminalFrame(): Promise<void>;
+  refreshActiveState(): Promise<void>;
   resetActiveConversation(): Promise<void>;
   shutdown(): Promise<void>;
   stopActiveRun(): Promise<void>;

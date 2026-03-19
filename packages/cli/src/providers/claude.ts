@@ -40,8 +40,11 @@ export function createClaudeProviderRuntime(
     listManagedPtyHandles() {
       return Promise.resolve(manager.listManagedPtyHandles());
     },
-    replayActiveState() {
-      return manager.replayActiveState();
+    primeActiveTerminalFrame() {
+      return manager.primeActiveTerminalFrame();
+    },
+    refreshActiveState() {
+      return manager.refreshActiveState();
     },
     resetActiveConversation() {
       return manager.resetActiveThread();

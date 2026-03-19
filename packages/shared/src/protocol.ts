@@ -1,4 +1,5 @@
 import type { ChatMessage, CliDescriptor, ProviderId, RuntimeSnapshot } from './runtime-types.ts';
+import type { TerminalFramePatch, TerminalFrameSnapshot } from './terminal-frame.ts';
 
 export interface CliRegisterPayload {
   cliId?: string;
@@ -153,13 +154,19 @@ export interface CliCommandResult<TName extends CliCommandName = CliCommandName>
   payload?: CliCommandResultPayloadMap[TName];
 }
 
-export interface TerminalChunkPayload {
+export interface TerminalFramePatchPayload {
   cliId: string;
   providerId: ProviderId;
   conversationKey: string | null;
-  data: string;
-  offset: number;
-  sessionId: string | null;
+  patch: TerminalFramePatch;
+}
+
+export interface TerminalSessionEvictedPayload {
+  cliId: string;
+  providerId: ProviderId;
+  conversationKey: string | null;
+  reason: string;
+  sessionId: string;
 }
 
 export interface RuntimeSubscriptionPayload {
@@ -168,12 +175,13 @@ export interface RuntimeSubscriptionPayload {
   conversationKey: string | null;
   sessionId: string | null;
   lastSeq?: number | null;
+  terminalEnabled?: boolean | null;
 }
 
-export interface TerminalResumeRequestPayload {
+export interface TerminalFrameSyncRequestPayload {
   targetCliId: string | null;
   targetProviderId: ProviderId | null;
-  lastOffset: number;
+  lastRevision: number | null;
   sessionId: string | null;
 }
 
@@ -184,12 +192,14 @@ export interface TerminalResizePayload {
   rows: number;
 }
 
-export interface TerminalResumeResultPayload {
+export interface TerminalFrameSyncResultPayload {
+  ok: boolean;
+  error?: string;
   providerId: ProviderId | null;
-  data: string;
-  mode: 'delta' | 'reset';
-  offset: number;
   sessionId: string | null;
+  mode?: 'patches' | 'snapshot';
+  snapshot?: TerminalFrameSnapshot;
+  patches?: TerminalFramePatch[];
 }
 
 export interface RuntimeSnapshotPayload {
