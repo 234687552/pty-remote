@@ -1,0 +1,22 @@
+{
+  "name": "@lzdi/pty-remote-protocol",
+  "version": "0.1.1",
+  "private": false,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/234687552/pty-remote"
+  },
+  "engines": {
+    "node": ">=23.0.0"
+  },
+  "exports": {
+    "./protocol": "./src/protocol.ts",
+    "./protocol.ts": "./src/protocol.ts",
+    "./runtime-types": "./src/runtime-types.ts",
+    "./runtime-types.ts": "./src/runtime-types.ts"
+  },
+  "files": [
+    "src"
+  ]
+}

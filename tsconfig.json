@@ -10,18 +10,19 @@
     "allowImportingTsExtensions": true,
     "skipLibCheck": true,
     "jsx": "react-jsx",
-    "types": ["vite/client"],
+    "types": ["node", "vite/client"],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["web/src/*"],
-      "@shared/*": ["shared/*"]
+      "@/*": ["packages/relay/web/src/*"],
+      "@lzdi/pty-remote-protocol/*": ["packages/shared/src/*"]
     }
   },
   "include": [
-    "shared/**/*.ts",
-    "src/**/*.ts",
-    "web/**/*.ts",
-    "web/**/*.tsx",
-    "vite.config.ts"
+    "packages/shared/src/**/*.ts",
+    "packages/relay/src/**/*.ts",
+    "packages/relay/web/**/*.ts",
+    "packages/relay/web/**/*.tsx",
+    "packages/cli/src/**/*.ts",
+    "packages/relay/vite.config.ts"
   ]
 }

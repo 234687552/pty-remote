@@ -1,0 +1,56 @@
+{
+  "name": "@lzdi/pty-remote-relay",
+  "version": "0.1.1",
+  "private": false,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/234687552/pty-remote"
+  },
+  "engines": {
+    "node": ">=23.0.0"
+  },
+  "scripts": {
+    "build": "npm run build:web",
+    "build:web": "vite build",
+    "dev": "concurrently -k \"npm:dev:web\" \"npm:dev:server\"",
+    "dev:web": "vite build --watch",
+    "dev:server": "tsx watch src/socket-main.ts",
+    "prepack": "npm run build:web",
+    "start": "node bin/pty-remote-relay.js"
+  },
+  "dependencies": {
+    "@lzdi/pty-remote-protocol": "0.1.1",
+    "socket.io": "^4.8.3",
+    "tsx": "^4.20.6"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.2.1",
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "@xterm/addon-fit": "^0.11.0",
+    "concurrently": "^9.2.1",
+    "mermaid": "^11.13.0",
+    "panzoom": "^9.4.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "socket.io-client": "^4.8.3",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "xterm": "^5.3.0"
+  },
+  "bin": {
+    "pty-remote-relay": "bin/pty-remote-relay.js"
+  },
+  "files": [
+    "bin",
+    "public/build",
+    "relay.conf",
+    "src"
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "name": "@lzdi/pty-remote-cli",
+  "version": "0.1.1",
+  "private": false,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/234687552/pty-remote"
+  },
+  "engines": {
+    "node": ">=23.0.0"
+  },
+  "scripts": {
+    "build": "node scripts/ensure-node-pty-helper.js",
+    "dev": "tsx watch src/cli-main.ts",
+    "dev:claude": "PTY_REMOTE_PROVIDER=claude tsx watch src/cli-main.ts",
+    "dev:codex": "PTY_REMOTE_PROVIDER=codex tsx watch src/cli-main.ts",
+    "postinstall": "node scripts/ensure-node-pty-helper.js",
+    "start": "node bin/pty-remote-cli.js",
+    "start:claude": "PTY_REMOTE_PROVIDER=claude node bin/pty-remote-cli.js",
+    "start:codex": "PTY_REMOTE_PROVIDER=codex node bin/pty-remote-cli.js",
+    "threads": "node bin/pty-remote-cli.js threads"
+  },
+  "dependencies": {
+    "@lzdi/pty-remote-protocol": "0.1.1",
+    "node-pty": "^1.1.0",
+    "socket.io-client": "^4.8.3",
+    "tsx": "^4.20.6"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.3"
+  },
+  "bin": {
+    "pty-remote-cli": "bin/pty-remote-cli.js"
+  },
+  "files": [
+    "bin",
+    "cli.conf",
+    "codex_template.jsonl",
+    "scripts",
+    "src"
+  ]
+}
