@@ -1292,10 +1292,7 @@ export class CodexManager {
 
     handle.runtime.recentTerminalOutput = appendRecentOutput(session, chunk, this.options.recentOutputMaxChars);
     handle.lastTerminalActivityAt = Date.now();
-
-    if (!this.isActiveHandle(handle)) {
-      return;
-    }
+    const isActiveHandle = this.isActiveHandle(handle);
 
     void handle.terminalFrame
       .enqueueOutput(chunk)
@@ -1305,9 +1302,19 @@ export class CodexManager {
         }
       })
       .catch((error) => {
-        this.setLastError(handle, errorMessage(error, 'Failed to materialize terminal frame'));
+        if (this.isActiveHandle(handle)) {
+          this.setLastError(handle, errorMessage(error, 'Failed to materialize terminal frame'));
+          return;
+        }
+
+        this.log('error', 'failed to materialize detached codex terminal frame', {
+          ...this.handleContext(handle),
+          error: errorMessage(error, 'Failed to materialize terminal frame')
+        });
       });
-    this.scheduleJsonlRefresh(this.options.jsonlRefreshDebounceMs, 'pty-data');
+    if (isActiveHandle) {
+      this.scheduleJsonlRefresh(this.options.jsonlRefreshDebounceMs, 'pty-data');
+    }
   }
 
   private emitTerminalFramePatch(handle: CodexHandle, patch: TerminalFramePatchPayload['patch']): void {
