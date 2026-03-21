@@ -3,6 +3,7 @@ import { spawn as spawnPty, type IPty } from 'node-pty';
 export interface CodexPtySession {
   pty: IPty;
   recentOutput: string;
+  startupUpdatePromptHandled: boolean;
 }
 
 export type CodexPtyLifecycle = 'not_ready' | 'idle' | 'running';
@@ -49,7 +50,8 @@ export function startCodexPtySession(options: StartCodexPtySessionOptions): Code
 
   const session: CodexPtySession = {
     pty,
-    recentOutput: ''
+    recentOutput: '',
+    startupUpdatePromptHandled: false
   };
 
   pty.onData((chunk) => {
@@ -105,7 +107,9 @@ function tailOutput(text: string, maxChars = 8_000): string {
 const RUNNING_LINE_PATTERN = /(^|\n)\s*[•◦]\s+[^\n]*esc to interrupt[^\n]*$/gimu;
 const PROMPT_LINE_PATTERN = /(^|\n)\s*[›>]\s*(?:Use \/skills[^\n]*)?$/gimu;
 const PROMPT_HINT_PATTERN = /Use \/skills to list available skills|\? for shortcuts|% left/gi;
-const DIRECTORY_TRUST_PROMPT_PATTERN = /Do you trust the contents of this directory\?|Press enter to continue/i;
+const DIRECTORY_TRUST_PROMPT_PATTERN = /Do you trust the contents of this directory\?/i;
+const UPDATE_AVAILABLE_PROMPT_PATTERN = /Update\s+available!?/i;
+const UPDATE_SKIP_OPTION_PATTERN = /(^|\n)\s*2\.\s*Skip(?:\s|$)/im;
 const STARTER_PROMPT_PATTERN =
   /Improve documentation in @filename|To get started, describe a task|Implement\s+\{feature\}|Implement\s+<feature>/i;
 
@@ -142,6 +146,11 @@ export function looksReadyForInput(output: string): boolean {
 
 export function looksLikeDirectoryTrustPrompt(output: string): boolean {
   return DIRECTORY_TRUST_PROMPT_PATTERN.test(tailOutput(output));
+}
+
+export function looksLikeUpdatePrompt(output: string): boolean {
+  const tail = tailOutput(output);
+  return UPDATE_AVAILABLE_PROMPT_PATTERN.test(tail) && UPDATE_SKIP_OPTION_PATTERN.test(tail);
 }
 
 export function showsStarterPrompt(output: string): boolean {

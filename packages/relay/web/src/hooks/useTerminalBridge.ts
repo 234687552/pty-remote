@@ -230,7 +230,7 @@ export function useTerminalBridge({
       : {
           targetCliId: activeCliId,
           targetProviderId: activeProviderId,
-          sessionId: null,
+          sessionId: targetSessionId,
           lastRevision: null
         };
 
@@ -292,7 +292,7 @@ export function useTerminalBridge({
       return false;
     }
 
-    commitFrameSnapshot(applyTerminalFramePatch(currentSnapshot, patch), { preserveScroll: true });
+    commitFrameSnapshot(applyTerminalFramePatch(currentSnapshot, patch));
     return true;
   }
 
@@ -357,7 +357,16 @@ export function useTerminalBridge({
       }
     }
 
+    const currentSnapshot = frameSnapshotRef.current;
+    const isTargetContextChanged =
+      currentSnapshot?.sessionId !== targetSessionId ||
+      appliedCliIdRef.current !== activeCliId ||
+      appliedProviderIdRef.current !== activeProviderId;
+
     prepareForResume();
+    if (isTargetContextChanged) {
+      commitFrameSnapshot(createEmptyTerminalFrameSnapshot(targetSessionId ?? null), { preserveScroll: false });
+    }
     await requestTerminalFrameSync(targetSessionId);
   }
 

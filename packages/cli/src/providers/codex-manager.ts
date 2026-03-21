@@ -19,8 +19,8 @@ import {
 } from './codex-jsonl.ts';
 import {
   appendRecentOutput,
-  getCodexPtyLifecycle,
   looksLikeDirectoryTrustPrompt,
+  looksLikeUpdatePrompt,
   looksReadyForInput,
   resizeCodexPtySession,
   showsStarterPrompt,
@@ -1365,6 +1365,24 @@ export class CodexManager {
     this.setLastError(handle, 'Codex CLI exited unexpectedly');
   }
 
+  private async autoSkipUpdatePrompt(handle: CodexHandle): Promise<boolean> {
+    if (!handle.pty || handle.pty.startupUpdatePromptHandled) {
+      return false;
+    }
+
+    if (!looksLikeUpdatePrompt(handle.pty.recentOutput)) {
+      return false;
+    }
+
+    handle.pty.startupUpdatePromptHandled = true;
+    this.log('info', 'auto-skipping codex update prompt', this.handleContext(handle));
+    handle.pty.pty.write('\x1b[B');
+    await sleep(120);
+    handle.pty.pty.write('\r');
+    await sleep(350);
+    return true;
+  }
+
   private async waitForHandleReady(handle: CodexHandle): Promise<void> {
     const deadline = Date.now() + this.options.codexReadyTimeoutMs;
 
@@ -1373,11 +1391,16 @@ export class CodexManager {
         throw new Error('Codex PTY session is not running');
       }
 
-      if (looksReadyForInput(handle.pty.recentOutput)) {
+      const currentOutput = handle.pty.recentOutput;
+      if (looksReadyForInput(currentOutput)) {
         return;
       }
 
-      if (looksLikeDirectoryTrustPrompt(handle.pty.recentOutput)) {
+      if (await this.autoSkipUpdatePrompt(handle)) {
+        continue;
+      }
+
+      if (looksLikeDirectoryTrustPrompt(currentOutput)) {
         handle.pty.pty.write('\r');
         await sleep(350);
         continue;
