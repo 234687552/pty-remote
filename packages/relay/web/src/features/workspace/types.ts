@@ -2,6 +2,17 @@ import type { ChatAttachment, ProviderId } from '@lzdi/pty-remote-protocol/runti
 
 export type WorkspacePane = 'chat' | 'terminal';
 
+export interface MobileJumpControls {
+  canJumpDown: boolean;
+  canJumpUp: boolean;
+  downLabel: string;
+  onJumpDown: () => void;
+  onJumpDownLongPress?: () => void;
+  onJumpUp: () => void;
+  onJumpUpLongPress?: () => void;
+  upLabel: string;
+}
+
 export interface StatusBadge {
   className: string;
   label: string;

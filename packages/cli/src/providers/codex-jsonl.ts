@@ -1,5 +1,6 @@
 import type {
   ChatMessage,
+  ChatMessageMeta,
   ChatMessageBlock,
   TextChatMessageBlock,
   ToolResultChatMessageBlock,
@@ -36,12 +37,17 @@ interface CodexEventMsgPayload {
   message?: string;
   text?: string;
   phase?: string;
+  turn_id?: string;
+}
+
+interface CodexTurnContextPayload {
+  turn_id?: string;
 }
 
 interface CodexJsonlRecord {
   timestamp?: string;
   type?: string;
-  payload?: CodexResponseItemPayload | CodexEventMsgPayload;
+  payload?: CodexResponseItemPayload | CodexEventMsgPayload | CodexTurnContextPayload;
 }
 
 export type CodexJsonlRuntimePhase = 'idle' | 'running';
@@ -50,6 +56,7 @@ export interface CodexJsonlMessagesState {
   orderedIds: string[];
   messagesById: Map<string, ChatMessage>;
   runtimePhase: CodexJsonlRuntimePhase;
+  activeTurnId: string | null;
   activityRevision: number;
   messageSequence: number;
   seenAssistantTextKeys: Set<string>;
@@ -61,6 +68,7 @@ export function createCodexJsonlMessagesState(): CodexJsonlMessagesState {
     orderedIds: [],
     messagesById: new Map<string, ChatMessage>(),
     runtimePhase: 'idle',
+    activeTurnId: null,
     activityRevision: 0,
     messageSequence: 0,
     seenAssistantTextKeys: new Set<string>(),
@@ -166,6 +174,25 @@ function normalizeCreatedAt(timestamp: string | undefined, sequence: number): st
   return new Date(sequence * 1_000).toISOString();
 }
 
+function normalizeTurnId(turnId: string | undefined): string | null {
+  const normalized = turnId?.trim();
+  return normalized ? normalized : null;
+}
+
+function createMessageMeta(state: CodexJsonlMessagesState, phase?: string | null): ChatMessageMeta | undefined {
+  const normalizedPhase = phase?.trim() || null;
+  const turnId = state.activeTurnId;
+
+  if (!normalizedPhase && !turnId) {
+    return undefined;
+  }
+
+  return {
+    phase: normalizedPhase,
+    turnId
+  };
+}
+
 function hasVisibleBlocks(blocks: ChatMessageBlock[]): boolean {
   return blocks.some((block) => {
     switch (block.type) {
@@ -214,27 +241,42 @@ function createToolResultBlock(callId: string, content: string, isError: boolean
   };
 }
 
-function getWebSearchQuery(action: CodexResponseItemPayload['action']): string {
+function getWebSearchPreview(action: CodexResponseItemPayload['action']): string {
   if (!action || typeof action !== 'object') {
     return '';
   }
 
   const normalizedAction = action as {
+    pattern?: string;
     type?: string;
     query?: string;
     queries?: string[];
+    url?: string;
   };
-  if (normalizedAction.type !== 'search') {
+  if (normalizedAction.type === 'search') {
+    if (typeof normalizedAction.query === 'string' && normalizedAction.query.trim()) {
+      return normalizedAction.query.trim();
+    }
+
+    if (Array.isArray(normalizedAction.queries)) {
+      const firstQuery = normalizedAction.queries.find((query) => typeof query === 'string' && query.trim());
+      return firstQuery?.trim() ?? '';
+    }
+
     return '';
   }
 
-  if (typeof normalizedAction.query === 'string' && normalizedAction.query.trim()) {
-    return normalizedAction.query.trim();
+  if (normalizedAction.type === 'open_page') {
+    return normalizedAction.url?.trim() ?? '';
   }
 
-  if (Array.isArray(normalizedAction.queries)) {
-    const firstQuery = normalizedAction.queries.find((query) => typeof query === 'string' && query.trim());
-    return firstQuery?.trim() ?? '';
+  if (normalizedAction.type === 'find_in_page') {
+    const pattern = normalizedAction.pattern?.trim() ?? '';
+    const url = normalizedAction.url?.trim() ?? '';
+    if (pattern && url) {
+      return `${pattern} @ ${url}`;
+    }
+    return pattern || url;
   }
 
   return '';
@@ -282,6 +324,20 @@ function deriveMessageStatus(
   return 'complete';
 }
 
+function mergeMessageMeta(existing: ChatMessageMeta | undefined, next: ChatMessageMeta | undefined): ChatMessageMeta | undefined {
+  const phase = next?.phase ?? existing?.phase ?? null;
+  const turnId = next?.turnId ?? existing?.turnId ?? null;
+
+  if (!phase && !turnId) {
+    return undefined;
+  }
+
+  return {
+    phase,
+    turnId
+  };
+}
+
 export function refreshCodexJsonlMessageStatuses(state: CodexJsonlMessagesState): void {
   for (const [messageId, message] of state.messagesById.entries()) {
     const nextStatus = deriveMessageStatus(message.blocks, state.runtimePhase);
@@ -309,6 +365,7 @@ function upsertMessage(state: CodexJsonlMessagesState, nextMessage: ChatMessage)
     id: nextMessage.id,
     role: nextMessage.role,
     blocks,
+    meta: mergeMessageMeta(existing?.meta, nextMessage.meta),
     status: deriveMessageStatus(blocks, state.runtimePhase),
     createdAt: existing?.createdAt ?? nextMessage.createdAt
   };
@@ -369,6 +426,7 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
       id: messageId,
       role: 'user',
       blocks: [textBlock],
+      meta: createMessageMeta(state),
       status: 'complete',
       createdAt: normalizeCreatedAt(timestamp, sequence)
     });
@@ -395,6 +453,7 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
       id: messageId,
       role: 'assistant',
       blocks: [textBlock],
+      meta: createMessageMeta(state),
       status: 'complete',
       createdAt: normalizeCreatedAt(timestamp, sequence)
     });
@@ -421,6 +480,7 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
       id: messageId,
       role: 'assistant',
       blocks: [textBlock],
+      meta: createMessageMeta(state, payload?.phase),
       status: 'complete',
       createdAt: normalizeCreatedAt(timestamp, sequence)
     });
@@ -428,11 +488,16 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
   }
 
   let nextPhase: CodexJsonlRuntimePhase | null = null;
+  const payloadTurnId = normalizeTurnId(payload?.turn_id);
 
   if (payloadType === 'task_started') {
     nextPhase = 'running';
+    state.activeTurnId = payloadTurnId ?? state.activeTurnId;
   } else if (payloadType === 'task_complete' || payloadType === 'turn_aborted') {
     nextPhase = 'idle';
+    if (!payloadTurnId || payloadTurnId === state.activeTurnId) {
+      state.activeTurnId = null;
+    }
   }
 
   if (!nextPhase || nextPhase === state.runtimePhase) {
@@ -496,6 +561,7 @@ function applyResponseItem(
       id: stableMessageId,
       role,
       blocks: stableBlocks,
+      meta: createMessageMeta(state, payload.phase),
       status: 'complete',
       createdAt: normalizeCreatedAt(timestamp, sequence)
     });
@@ -513,6 +579,7 @@ function applyResponseItem(
       id: `tool:${callId}`,
       role: 'assistant',
       blocks: [createToolUseBlock(callId, payload.name ?? 'unknown', stringifyUnknown(rawInput))],
+      meta: createMessageMeta(state),
       status: 'streaming',
       createdAt: normalizeCreatedAt(timestamp, state.messageSequence++)
     });
@@ -520,8 +587,8 @@ function applyResponseItem(
   }
 
   if (payloadType === 'web_search_call') {
-    const query = getWebSearchQuery(payload.action);
-    if (!query) {
+    const preview = getWebSearchPreview(payload.action);
+    if (!preview) {
       return;
     }
 
@@ -530,7 +597,8 @@ function applyResponseItem(
     upsertMessage(state, {
       id: `tool:${callId}`,
       role: 'assistant',
-      blocks: [createToolUseBlock(callId, 'web_search', query)],
+      blocks: [createToolUseBlock(callId, 'web_search', preview)],
+      meta: createMessageMeta(state),
       status: 'complete',
       createdAt: normalizeCreatedAt(timestamp, sequence)
     });
@@ -549,6 +617,7 @@ function applyResponseItem(
       id: `tool:${callId}`,
       role: 'assistant',
       blocks: [createToolResultBlock(callId, stringifyUnknown(payload.output), isError)],
+      meta: createMessageMeta(state),
       status: isError ? 'error' : 'complete',
       createdAt: normalizeCreatedAt(timestamp, state.messageSequence++)
     });
@@ -575,6 +644,11 @@ export function applyCodexJsonlLine(state: CodexJsonlMessagesState, line: string
 
   if (parsed.type === 'response_item') {
     applyResponseItem(state, parsed.payload as CodexResponseItemPayload | undefined, parsed.timestamp);
+    return true;
+  }
+
+  if (parsed.type === 'turn_context') {
+    state.activeTurnId = normalizeTurnId((parsed.payload as CodexTurnContextPayload | undefined)?.turn_id);
     return true;
   }
 

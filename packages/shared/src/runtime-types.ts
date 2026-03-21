@@ -48,11 +48,17 @@ export interface ChatAttachment {
   previewUrl?: string;
 }
 
+export interface ChatMessageMeta {
+  phase?: string | null;
+  turnId?: string | null;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
   blocks: ChatMessageBlock[];
   attachments?: ChatAttachment[];
+  meta?: ChatMessageMeta;
   status: MessageStatus;
   createdAt: string;
 }

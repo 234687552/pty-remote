@@ -2,10 +2,11 @@ import type { SetStateAction } from 'react';
 import { PROVIDER_LABELS, type ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import { MobileFloatingControls } from '@/components/MobileFloatingControls.tsx';
-import type { WorkspacePane } from '@/features/workspace/types.ts';
+import type { MobileJumpControls, WorkspacePane } from '@/features/workspace/types.ts';
 
 interface AppHeaderProps {
   activeProviderId: ProviderId | null;
+  jumpControls: MobileJumpControls | null;
   mobileAgentLabel: string;
   mobilePane: WorkspacePane;
   mobileProjectTitle: string;
@@ -41,6 +42,7 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
 
 export function AppHeader({
   activeProviderId,
+  jumpControls,
   mobileAgentLabel,
   mobilePane,
   mobileProjectTitle,
@@ -57,6 +59,7 @@ export function AppHeader({
   return (
     <header className="sticky top-0 z-20 -mb-3 h-0 pointer-events-none lg:static lg:mb-0 lg:h-auto lg:pointer-events-auto">
       <MobileFloatingControls
+        jumpControls={jumpControls}
         mobileAgentLabel={mobileAgentLabel}
         mobilePane={mobilePane}
         mobileProjectTitle={mobileProjectTitle}

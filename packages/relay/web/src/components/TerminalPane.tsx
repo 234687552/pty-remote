@@ -1,11 +1,14 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import type { CSSProperties, ReactNode, RefObject } from 'react';
 
 import { decodeTerminalFrameStyle, resolveTerminalFrameColor, type TerminalFrameLine, type TerminalFrameSnapshot } from '@lzdi/pty-remote-protocol/terminal-frame.ts';
+import type { MobileJumpControls } from '@/features/workspace/types.ts';
 
 interface TerminalPaneProps {
   frameSnapshot: TerminalFrameSnapshot | null;
   hostRef: RefObject<HTMLDivElement | null>;
+  onMobileJumpControlsChange?: (controls: MobileJumpControls | null) => void;
+  scrollToBottomRequestKey: number;
   viewportRef: RefObject<HTMLDivElement | null>;
   visible: boolean;
   onJumpToEdge: (direction: 'up' | 'down') => void;
@@ -86,7 +89,15 @@ function renderCursorLine(line: TerminalFrameLine | undefined, cursorColumn: num
   );
 }
 
-export function TerminalPane({ frameSnapshot, hostRef, viewportRef, visible, onJumpToEdge }: TerminalPaneProps) {
+export function TerminalPane({
+  frameSnapshot,
+  hostRef,
+  onMobileJumpControlsChange,
+  scrollToBottomRequestKey,
+  viewportRef,
+  visible,
+  onJumpToEdge
+}: TerminalPaneProps) {
   const cursorBufferLineIndex = useMemo(() => {
     if (!frameSnapshot) {
       return null;
@@ -96,6 +107,38 @@ export function TerminalPane({ frameSnapshot, hostRef, viewportRef, visible, onJ
       Math.min(frameSnapshot.lines.length - 1, frameSnapshot.baseY + frameSnapshot.cursorY - frameSnapshot.tailStart)
     );
   }, [frameSnapshot]);
+
+  useEffect(() => {
+    if (!visible || scrollToBottomRequestKey <= 0) {
+      return;
+    }
+
+    onJumpToEdge('down');
+  }, [onJumpToEdge, scrollToBottomRequestKey, visible]);
+
+  useEffect(() => {
+    if (!onMobileJumpControlsChange) {
+      return;
+    }
+
+    if (!visible) {
+      onMobileJumpControlsChange(null);
+      return;
+    }
+
+    onMobileJumpControlsChange({
+      canJumpUp: true,
+      canJumpDown: true,
+      upLabel: '终端直达顶部',
+      downLabel: '终端直达底部',
+      onJumpUp: () => onJumpToEdge('up'),
+      onJumpDown: () => onJumpToEdge('down')
+    });
+
+    return () => {
+      onMobileJumpControlsChange(null);
+    };
+  }, [onJumpToEdge, onMobileJumpControlsChange, visible]);
 
   return (
     <div
@@ -154,7 +197,7 @@ export function TerminalPane({ frameSnapshot, hostRef, viewportRef, visible, onJ
         </div>
       </div>
 
-      <div className="pointer-events-none absolute right-3 bottom-14 z-10 md:right-4 md:bottom-16">
+      <div className="pointer-events-none absolute right-3 bottom-14 z-10 hidden lg:block md:right-4 md:bottom-16">
         <div className="pointer-events-auto flex flex-col overflow-hidden rounded-xl border border-zinc-200/80 bg-white/65 shadow-[0_8px_20px_rgba(0,0,0,0.08)] backdrop-blur-sm">
           <button
             type="button"

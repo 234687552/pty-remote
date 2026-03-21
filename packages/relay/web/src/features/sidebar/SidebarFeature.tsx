@@ -38,6 +38,7 @@ export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChang
       onListRecentProjectSessions={(providerId, maxSessions) => controller.listRecentProjectSessions(providerId, maxSessions)}
       onMobileOpenChange={onMobileOpenChange}
       onSelectCli={controller.selectCli}
+      onSelectProject={controller.selectProject}
     />
   );
 }

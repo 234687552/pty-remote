@@ -4,10 +4,11 @@ import { PROVIDER_LABELS } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import { AppHeader } from '@/components/AppHeader.tsx';
 import { selectHeaderSummary, selectMobileProjectTitle } from '@/features/workspace/selectors.ts';
 import type { WorkspaceStore } from '@/features/workspace/store.ts';
-import type { WorkspacePane } from '@/features/workspace/types.ts';
+import type { MobileJumpControls, WorkspacePane } from '@/features/workspace/types.ts';
 
 interface HeaderFeatureProps {
   clis: CliDescriptor[];
+  jumpControls: MobileJumpControls | null;
   mobilePane: WorkspacePane;
   mobileSidebarOpen: boolean;
   onMobilePaneChange: (pane: WorkspacePane) => void;
@@ -19,6 +20,7 @@ interface HeaderFeatureProps {
 
 export function HeaderFeature({
   clis,
+  jumpControls,
   mobilePane,
   mobileSidebarOpen,
   onMobilePaneChange,
@@ -33,6 +35,7 @@ export function HeaderFeature({
   return (
     <AppHeader
       activeProviderId={store.workspaceState.activeProviderId}
+      jumpControls={jumpControls}
       mobileAgentLabel={activeProviderLabel}
       mobilePane={mobilePane}
       mobileProjectTitle={selectMobileProjectTitle(store, clis)}

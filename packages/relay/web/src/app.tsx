@@ -14,9 +14,15 @@ import { useCliSocket } from '@/hooks/useCliSocket.ts';
 import { useTerminalBridge } from '@/hooks/useTerminalBridge.ts';
 import { getProjectProviderKey } from '@/lib/workspace.ts';
 import { readCachedLastSeq, updateCachedLastSeq, writeConversationCache } from '@/lib/messages-cache.ts';
+import type { MobileJumpControls } from '@/features/workspace/types.ts';
 export function App() {
   const store = useWorkspaceStore();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [mobileJumpControls, setMobileJumpControls] = useState<MobileJumpControls | null>(null);
+  const [mobilePaneScrollRequests, setMobilePaneScrollRequests] = useState({
+    chat: 0,
+    terminal: 0
+  });
   const [desktopTerminalVisible, setDesktopTerminalVisible] = useState(() =>
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
   );
@@ -107,6 +113,16 @@ export function App() {
 
   const controller = useWorkspaceController({
     clis,
+    requestMobilePaneScrollToBottom: () => {
+      if (desktopTerminalVisible) {
+        return;
+      }
+
+      setMobilePaneScrollRequests((current) => ({
+        ...current,
+        [store.mobilePane]: current[store.mobilePane] + 1
+      }));
+    },
     sendCommand,
     socketConnected,
     store,
@@ -163,6 +179,7 @@ export function App() {
       renderHeader={() => (
         <HeaderFeature
           clis={clis}
+          jumpControls={mobileJumpControls}
           mobilePane={store.mobilePane}
           onMobilePaneChange={store.setMobilePane}
           onSidebarOpen={handleMobileSidebarOpen}
@@ -172,8 +189,25 @@ export function App() {
           store={store}
         />
       )}
-      chat={<ChatFeature clis={clis} controller={controller} socketConnected={socketConnected} store={store} />}
-      terminal={<TerminalFeature store={store} terminal={terminal} />}
+      chat={
+        <ChatFeature
+          clis={clis}
+          controller={controller}
+          onMobileJumpControlsChange={setMobileJumpControls}
+          paneVisible={desktopTerminalVisible || store.mobilePane === 'chat'}
+          scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
+          socketConnected={socketConnected}
+          store={store}
+        />
+      }
+      terminal={
+        <TerminalFeature
+          onMobileJumpControlsChange={setMobileJumpControls}
+          scrollToBottomRequestKey={mobilePaneScrollRequests.terminal}
+          store={store}
+          terminal={terminal}
+        />
+      }
       composer={<ComposerFeature clis={clis} controller={controller} socketConnected={socketConnected} store={store} />}
     />
   );

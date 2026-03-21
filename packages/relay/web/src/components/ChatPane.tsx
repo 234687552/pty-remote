@@ -15,6 +15,7 @@ import type {
   ToolResultChatMessageBlock,
   ToolUseChatMessageBlock
 } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import type { MobileJumpControls } from '@/features/workspace/types.ts';
 
 interface MarkdownNode {
   children?: MarkdownNode[];
@@ -37,17 +38,42 @@ interface ToolCallMeta {
   useBlockId?: string;
 }
 
+interface ActivityGroup {
+  anchorMessage?: ChatMessage;
+  createdAt: string;
+  entries: ChatMessage[];
+  id: string;
+  status: MessageStatus;
+  title: string;
+  turnId: string;
+}
+
+type ChatPaneDisplayItem =
+  | {
+      type: 'activity_group';
+      group: ActivityGroup;
+    }
+  | {
+      type: 'message';
+      message: ChatMessage;
+    };
+
 interface ChatPaneProps {
   activeProviderId: ProviderId | null;
+  conversationScrollKey: string | null;
   connected: boolean;
   hasOlderMessages: boolean;
   messages: ChatMessage[];
+  onMobileJumpControlsChange?: (controls: MobileJumpControls | null) => void;
   olderMessagesLoading: boolean;
+  paneVisible: boolean;
+  scrollToBottomRequestKey: number;
   visible: boolean;
   onLoadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
 }
 
 const QUESTION_JUMP_LONG_PRESS_DELAY_MS = 420;
+const SCROLL_BOTTOM_THRESHOLD_PX = 12;
 
 let mermaidRenderSequence = 0;
 let mermaidLoader: Promise<MermaidApi> | null = null;
@@ -813,6 +839,33 @@ function MessageAttachmentGallery({ attachments }: { attachments: ChatAttachment
   );
 }
 
+function getMessageTextBlocks(message: ChatMessage): Extract<ChatMessageBlock, { type: 'text' }>[] {
+  return message.blocks.filter((block): block is Extract<ChatMessageBlock, { type: 'text' }> => block.type === 'text');
+}
+
+function getMessagePlainText(message: ChatMessage): string {
+  return getMessageTextBlocks(message)
+    .map((block) => block.text)
+    .join('\n\n')
+    .trim();
+}
+
+function hasToolUseBlock(message: ChatMessage): boolean {
+  return message.blocks.some((block) => block.type === 'tool_use');
+}
+
+function getFirstToolUseBlock(message: ChatMessage): ToolUseChatMessageBlock | null {
+  return message.blocks.find((block): block is ToolUseChatMessageBlock => block.type === 'tool_use') ?? null;
+}
+
+function truncateActivityTitle(value: string, maxChars = 96): string {
+  const normalized = value.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, maxChars - 3)}...`;
+}
+
 function hasNonTextBlock(message: ChatMessage): boolean {
   return message.blocks.some((block) => block.type !== 'text');
 }
@@ -1044,6 +1097,144 @@ function isCodexReasoningMessage(message: ChatMessage): boolean {
   return message.id.startsWith('codex:assistant_reasoning:');
 }
 
+function isCodexCommentaryMessage(message: ChatMessage): boolean {
+  return message.role === 'assistant' && message.meta?.phase === 'commentary' && Boolean(getMessagePlainText(message));
+}
+
+function isCodexFinalAnswerMessage(message: ChatMessage): boolean {
+  return message.role === 'assistant' && message.meta?.phase === 'final_answer';
+}
+
+function createActivityGroupStatus(entries: ChatMessage[]): MessageStatus {
+  if (entries.some((entry) => entry.status === 'error')) {
+    return 'error';
+  }
+  if (entries.some((entry) => entry.status === 'streaming')) {
+    return 'streaming';
+  }
+  return 'complete';
+}
+
+function createActivityGroupTitle(anchorMessage: ChatMessage | undefined, entries: ChatMessage[]): string {
+  const anchorText = anchorMessage ? truncateActivityTitle(getMessagePlainText(anchorMessage)) : '';
+  if (anchorText) {
+    return anchorText;
+  }
+
+  const firstToolUseBlock = entries.map((entry) => getFirstToolUseBlock(entry)).find(Boolean);
+  if (firstToolUseBlock) {
+    const compactTitle = getCompactToolTitle(firstToolUseBlock.toolName, firstToolUseBlock.input);
+    const compactPreview = getCompactToolPreview(firstToolUseBlock.toolName, firstToolUseBlock.input, 88);
+    return truncateActivityTitle(`${compactTitle}: ${compactPreview}`);
+  }
+
+  return 'Activity';
+}
+
+function createActivityGroup(
+  turnId: string,
+  sequenceIndex: number,
+  entries: ChatMessage[],
+  anchorMessage?: ChatMessage
+): ActivityGroup {
+  return {
+    anchorMessage,
+    createdAt: anchorMessage?.createdAt ?? entries[0]?.createdAt ?? new Date(0).toISOString(),
+    entries,
+    id: anchorMessage ? `activity:${anchorMessage.id}` : `activity:${entries[0]?.id ?? `${turnId}:${sequenceIndex}`}`,
+    status: createActivityGroupStatus(entries),
+    title: createActivityGroupTitle(anchorMessage, entries),
+    turnId
+  };
+}
+
+function buildCodexDisplayItems(messages: ChatMessage[]): ChatPaneDisplayItem[] {
+  const items: ChatPaneDisplayItem[] = [];
+  const sequenceByTurnId = new Map<string, number>();
+
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+
+    if (message.role === 'user' || isCodexReasoningMessage(message) || isCodexFinalAnswerMessage(message)) {
+      items.push({ type: 'message', message });
+      continue;
+    }
+
+    const turnId = message.meta?.turnId?.trim();
+    if (!turnId) {
+      items.push({ type: 'message', message });
+      continue;
+    }
+
+    if (isCodexCommentaryMessage(message)) {
+      const entries: ChatMessage[] = [];
+      let cursor = index + 1;
+
+      while (cursor < messages.length) {
+        const nextMessage = messages[cursor];
+        const nextTurnId = nextMessage.meta?.turnId?.trim();
+        if (
+          nextMessage.role === 'user' ||
+          nextTurnId !== turnId ||
+          isCodexReasoningMessage(nextMessage) ||
+          isCodexCommentaryMessage(nextMessage) ||
+          isCodexFinalAnswerMessage(nextMessage)
+        ) {
+          break;
+        }
+
+        entries.push(nextMessage);
+        cursor += 1;
+      }
+
+      if (entries.length > 0) {
+        const sequenceIndex = (sequenceByTurnId.get(turnId) ?? 0) + 1;
+        sequenceByTurnId.set(turnId, sequenceIndex);
+        items.push({ type: 'activity_group', group: createActivityGroup(turnId, sequenceIndex, entries, message) });
+        index = cursor - 1;
+        continue;
+      }
+
+      items.push({ type: 'message', message });
+      continue;
+    }
+
+    if (hasToolUseBlock(message)) {
+      const entries: ChatMessage[] = [message];
+      let cursor = index + 1;
+
+      while (cursor < messages.length) {
+        const nextMessage = messages[cursor];
+        const nextTurnId = nextMessage.meta?.turnId?.trim();
+        if (
+          nextMessage.role === 'user' ||
+          nextTurnId !== turnId ||
+          isCodexReasoningMessage(nextMessage) ||
+          isCodexCommentaryMessage(nextMessage) ||
+          isCodexFinalAnswerMessage(nextMessage)
+        ) {
+          break;
+        }
+
+        entries.push(nextMessage);
+        cursor += 1;
+      }
+
+      if (entries.length > 1) {
+        const sequenceIndex = (sequenceByTurnId.get(turnId) ?? 0) + 1;
+        sequenceByTurnId.set(turnId, sequenceIndex);
+        items.push({ type: 'activity_group', group: createActivityGroup(turnId, sequenceIndex, entries) });
+        index = cursor - 1;
+        continue;
+      }
+    }
+
+    items.push({ type: 'message', message });
+  }
+
+  return items;
+}
+
 function MessageContent({ message, toolCallIndex }: { message: ChatMessage; toolCallIndex: Map<string, ToolCallMeta> }) {
   if (message.blocks.length === 0 && (message.attachments?.length ?? 0) === 0) {
     return null;
@@ -1085,8 +1276,79 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
   );
 }
 
-export function ChatPane({ activeProviderId, connected, hasOlderMessages, messages, olderMessagesLoading, visible, onLoadOlderMessages }: ChatPaneProps) {
+function ActivityGroupCard({
+  group,
+  toolCallIndex
+}: {
+  group: ActivityGroup;
+  toolCallIndex: Map<string, ToolCallMeta>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const countLabel = `${group.entries.length}项`;
+
+  return (
+    <section className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        className={`w-full px-3.5 py-2.5 text-left transition hover:bg-zinc-50/80 ${expanded ? 'bg-zinc-50/70' : ''}`}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        <div className={`flex gap-2.5 ${expanded ? 'items-start' : 'items-center'}`}>
+          <div className={`flex h-5 w-5 shrink-0 items-center justify-center ${expanded ? 'pt-0.5' : ''}`}>
+            <ToolStatusIcon status={group.status} />
+          </div>
+          <div
+            className={`min-w-0 flex-1 text-sm font-medium text-zinc-900 ${expanded ? 'whitespace-normal break-words leading-5' : 'truncate'}`}
+          >
+            {group.title}
+          </div>
+          <span
+            className={`inline-flex shrink-0 items-center rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium tabular-nums text-zinc-500 ${expanded ? 'mt-0.5' : ''}`}
+          >
+            {countLabel}
+          </span>
+          <span className={`shrink-0 text-zinc-500 ${expanded ? 'mt-0.5' : ''}`}>
+            <svg viewBox="0 0 16 16" aria-hidden="true" className={`h-4 w-4 transition ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="1.7">
+              <path d="m4.5 6.5 3.5 3 3.5-3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </span>
+        </div>
+      </button>
+
+      {expanded ? (
+        <div className="border-t border-zinc-200 px-3.5 py-3">
+          <div className="divide-y divide-zinc-200">
+            {group.entries.map((entry) => (
+              <div key={entry.id} className="py-3 first:pt-0 last:pb-0">
+                <MessageContent message={entry} toolCallIndex={toolCallIndex} />
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+export function ChatPane({
+  activeProviderId,
+  conversationScrollKey,
+  connected,
+  hasOlderMessages,
+  messages,
+  onMobileJumpControlsChange,
+  olderMessagesLoading,
+  paneVisible,
+  scrollToBottomRequestKey,
+  visible,
+  onLoadOlderMessages
+}: ChatPaneProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
+  const autoScrollToBottomRef = useRef(true);
+  const previousLatestRenderableMessageSignatureRef = useRef<string | null>(null);
+  const previousConversationScrollKeyRef = useRef<string | null>(null);
+  const previousScrollToBottomRequestKeyRef = useRef(scrollToBottomRequestKey);
   const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const questionJumpPressTimeoutRef = useRef<number | null>(null);
   const questionJumpLongPressTriggeredRef = useRef(false);
@@ -1095,14 +1357,49 @@ export function ChatPane({ activeProviderId, connected, hasOlderMessages, messag
   const showOlderMessagesButton = hasOlderMessages && (activeProviderId !== 'codex' || isNearTop);
 
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
+  const displayItems = useMemo<ChatPaneDisplayItem[]>(
+    () =>
+      activeProviderId === 'codex'
+        ? buildCodexDisplayItems(renderableMessages)
+        : renderableMessages.map((message) => ({ type: 'message' as const, message })),
+    [activeProviderId, renderableMessages]
+  );
   // Tool results can arrive as standalone user messages in Claude transcripts.
   // Keep them out of the main message list, but still index them so tool cards
   // reflect the actual completion/error state.
   const toolCallIndex = useMemo(() => createToolCallIndex(messages), [messages]);
   const questionMessageIds = useMemo(
-    () => renderableMessages.filter((message) => message.role === 'user').map((message) => message.id),
-    [renderableMessages]
+    () =>
+      displayItems
+        .flatMap((item) => (item.type === 'message' && item.message.role === 'user' ? [item.message.id] : [])),
+    [displayItems]
   );
+
+  useEffect(() => {
+    if (!onMobileJumpControlsChange) {
+      return;
+    }
+
+    if (!visible) {
+      onMobileJumpControlsChange(null);
+      return;
+    }
+
+    onMobileJumpControlsChange({
+      canJumpUp: questionMessageIds.length > 0,
+      canJumpDown: questionMessageIds.length > 0,
+      upLabel: '跳到上一条提问，长按直达顶部',
+      downLabel: '跳到下一条提问，长按直达底部',
+      onJumpUp: () => handleJumpToQuestion('up'),
+      onJumpDown: () => handleJumpToQuestion('down'),
+      onJumpUpLongPress: () => handleJumpToMessagesEdge('up'),
+      onJumpDownLongPress: () => handleJumpToMessagesEdge('down')
+    });
+
+    return () => {
+      onMobileJumpControlsChange(null);
+    };
+  }, [onMobileJumpControlsChange, questionMessageIds.length, visible, conversationScrollKey, renderableMessages.length]);
   useEffect(() => {
     return () => {
       if (questionJumpPressTimeoutRef.current !== null) {
@@ -1112,22 +1409,62 @@ export function ChatPane({ activeProviderId, connected, hasOlderMessages, messag
   }, []);
 
   useEffect(() => {
+    if (previousScrollToBottomRequestKeyRef.current === scrollToBottomRequestKey) {
+      return;
+    }
+    previousScrollToBottomRequestKeyRef.current = scrollToBottomRequestKey;
+
+    if (!paneVisible) {
+      return;
+    }
+
     const messagesElement = messagesRef.current;
     if (!messagesElement) {
       return;
     }
 
+    autoScrollToBottomRef.current = true;
+    messagesElement.scrollTo({ top: messagesElement.scrollHeight });
+    setIsNearTop(false);
+  }, [paneVisible, scrollToBottomRequestKey]);
+
+  useEffect(() => {
+    const messagesElement = messagesRef.current;
+    if (!messagesElement) {
+      return;
+    }
+
+    const latestRenderableMessage = renderableMessages.at(-1) ?? null;
+    const latestRenderableMessageSignature = latestRenderableMessage
+      ? createMessageRenderSignature(latestRenderableMessage)
+      : null;
+    const hasNewUserMessage =
+      latestRenderableMessage?.role === 'user' &&
+      previousLatestRenderableMessageSignatureRef.current !== latestRenderableMessageSignature;
+    previousLatestRenderableMessageSignatureRef.current = latestRenderableMessageSignature;
+
     const preservedScroll = preserveMessagesScrollRef.current;
     if (preservedScroll) {
       messagesElement.scrollTop = preservedScroll.scrollTop + (messagesElement.scrollHeight - preservedScroll.scrollHeight);
       preserveMessagesScrollRef.current = null;
+      autoScrollToBottomRef.current = isScrolledToBottom(messagesElement);
       setIsNearTop(messagesElement.scrollTop <= 12);
       return;
     }
 
-    messagesElement.scrollTo({ top: messagesElement.scrollHeight });
-    setIsNearTop(false);
-  }, [renderableMessages]);
+    const isConversationChanged = previousConversationScrollKeyRef.current !== conversationScrollKey;
+    previousConversationScrollKeyRef.current = conversationScrollKey;
+
+    if (isConversationChanged || (hasNewUserMessage && paneVisible) || autoScrollToBottomRef.current) {
+      messagesElement.scrollTo({ top: messagesElement.scrollHeight });
+      autoScrollToBottomRef.current = true;
+      setIsNearTop(false);
+      return;
+    }
+
+    autoScrollToBottomRef.current = isScrolledToBottom(messagesElement);
+    setIsNearTop(messagesElement.scrollTop <= 12);
+  }, [conversationScrollKey, displayItems, paneVisible, renderableMessages]);
 
   function setQuestionMessageRef(messageId: string, node: HTMLDivElement | null): void {
     if (node) {
@@ -1181,8 +1518,10 @@ export function ChatPane({ activeProviderId, connected, hasOlderMessages, messag
   }
 
   function handleMessagesScroll(event: React.UIEvent<HTMLDivElement>): void {
-    const nextTop = event.currentTarget.scrollTop;
+    const { currentTarget } = event;
+    const nextTop = currentTarget.scrollTop;
     const nextNearTop = nextTop <= 12;
+    autoScrollToBottomRef.current = isScrolledToBottom(currentTarget);
     if (nextNearTop !== isNearTop) {
       setIsNearTop(nextNearTop);
     }
@@ -1193,6 +1532,8 @@ export function ChatPane({ activeProviderId, connected, hasOlderMessages, messag
     if (!container) {
       return;
     }
+
+    autoScrollToBottomRef.current = direction === 'down';
 
     container.scrollTo({
       top: direction === 'up' ? 0 : container.scrollHeight,
@@ -1291,22 +1632,29 @@ export function ChatPane({ activeProviderId, connected, hasOlderMessages, messag
           onScroll={handleMessagesScroll}
           className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-3 py-4 sm:px-3 lg:px-4"
         >
-          {renderableMessages.length === 0
+          {displayItems.length === 0
             ? null
-            : renderableMessages.map((message) => (
-                <div
-                  key={message.id}
-                  ref={message.role === 'user' ? (node) => setQuestionMessageRef(message.id, node) : undefined}
-                >
-                  <MessageShell message={message}>
-                    <MessageContent message={message} toolCallIndex={toolCallIndex} />
-                  </MessageShell>
-                </div>
-              ))}
+            : displayItems.map((item) => {
+                if (item.type === 'activity_group') {
+                  return <ActivityGroupCard key={item.group.id} group={item.group} toolCallIndex={toolCallIndex} />;
+                }
+
+                const { message } = item;
+                return (
+                  <div
+                    key={message.id}
+                    ref={message.role === 'user' ? (node) => setQuestionMessageRef(message.id, node) : undefined}
+                  >
+                    <MessageShell message={message}>
+                      <MessageContent message={message} toolCallIndex={toolCallIndex} />
+                    </MessageShell>
+                  </div>
+                );
+              })}
         </div>
 
         {questionMessageIds.length > 0 ? (
-          <div className="pointer-events-none absolute right-3 bottom-14 z-10 md:right-4 md:bottom-16">
+          <div className="pointer-events-none absolute right-3 bottom-14 z-10 hidden lg:block md:right-4 md:bottom-16">
             <div className="pointer-events-auto flex flex-col overflow-hidden rounded-xl border border-zinc-200/80 bg-white/65 shadow-[0_8px_20px_rgba(0,0,0,0.08)] backdrop-blur-sm">
               <button
                 type="button"
@@ -1343,4 +1691,27 @@ export function ChatPane({ activeProviderId, connected, hasOlderMessages, messag
       </div>
     </div>
   );
+}
+
+function isScrolledToBottom(element: HTMLDivElement): boolean {
+  return element.scrollHeight - element.clientHeight - element.scrollTop <= SCROLL_BOTTOM_THRESHOLD_PX;
+}
+
+function createMessageRenderSignature(message: ChatMessage): string {
+  const attachmentsSignature = (message.attachments ?? [])
+    .map((attachment) => `${attachment.attachmentId}:${attachment.filename}:${attachment.size}`)
+    .join('|');
+  const blocksSignature = message.blocks
+    .map((block) => {
+      if (block.type === 'text') {
+        return `text:${block.text}`;
+      }
+      if (block.type === 'tool_use') {
+        return `tool_use:${block.toolCallId ?? ''}:${block.toolName}:${block.input}`;
+      }
+      return `tool_result:${block.toolCallId ?? ''}:${block.isError ? '1' : '0'}:${block.content}`;
+    })
+    .join('|');
+
+  return `${message.id}|${message.role}|${attachmentsSignature}|${blocksSignature}`;
 }

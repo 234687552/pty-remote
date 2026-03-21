@@ -137,6 +137,7 @@ function messageEqual(left: ChatMessage | undefined, right: ChatMessage | undefi
     left.role === right.role &&
     left.status === right.status &&
     left.createdAt === right.createdAt &&
+    JSON.stringify(left.meta ?? null) === JSON.stringify(right.meta ?? null) &&
     JSON.stringify(left.blocks) === JSON.stringify(right.blocks)
   );
 }
@@ -158,6 +159,7 @@ function sleep(ms: number): Promise<void> {
 const AWAITING_JSONL_TURN_STALE_MS = 4000;
 const READY_TIMEOUT_MAX_RETRIES = 2;
 const TERMINAL_READY_BOTTOM_LINES = 8;
+const INTERRUPT_READY_CHECK_DELAY_MS = 250;
 
 function materializeTerminalFrameLinesText(lines: TerminalFrameLine[]): string {
   return lines
@@ -408,50 +410,9 @@ export class CodexManager {
       return;
     }
 
-    const previousMessages = handle.runtime.messages;
-    const previousHasOlderMessages = handle.runtime.hasOlderMessages;
-
     this.clearLastError(handle);
-    handle.awaitingJsonlTurn = false;
-    if (handle.jsonlMessagesState.runtimePhase !== 'idle') {
-      handle.jsonlMessagesState.runtimePhase = 'idle';
-      handle.jsonlMessagesState.activityRevision += 1;
-      refreshCodexJsonlMessageStatuses(handle.jsonlMessagesState);
-    }
-
-    const nextAllMessages = materializeCodexJsonlMessages(handle.jsonlMessagesState);
-    const nextMessages = this.selectRecentMessages(nextAllMessages);
-    const nextHasOlderMessages = nextAllMessages.length > nextMessages.length;
-    const allMessagesChanged = !messagesEqual(handle.runtime.allMessages, nextAllMessages);
-    const messagesChanged = !messagesEqual(handle.runtime.messages, nextMessages);
-    const hasOlderMessagesChanged = handle.runtime.hasOlderMessages !== nextHasOlderMessages;
-
-    if (allMessagesChanged) {
-      handle.runtime.allMessages = nextAllMessages;
-    }
-    if (messagesChanged) {
-      handle.runtime.messages = nextMessages;
-    }
-    if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
-      handle.runtime.hasOlderMessages = nextHasOlderMessages;
-    }
-
-    this.stopHandlePtyPreservingReplay(handle, 'stop-active-run');
-    this.setStatus(handle, 'idle', true);
-
-    if (this.isActiveHandle(handle) && (allMessagesChanged || messagesChanged || hasOlderMessagesChanged)) {
-      const upsertPayload = this.createMessagesUpsertPayload(
-        handle,
-        previousMessages,
-        nextMessages,
-        previousHasOlderMessages,
-        nextHasOlderMessages
-      );
-      if (upsertPayload) {
-        this.callbacks.emitMessagesUpsert(upsertPayload);
-      }
-    }
-
+    await this.sendInterruptSequence(handle);
+    await this.maybeMarkHandleReadyAfterInterrupt(handle);
     this.scheduleJsonlRefresh(0, 'stop-active-run');
   }
 
@@ -1540,6 +1501,80 @@ export class CodexManager {
     if (shouldForceSubmit) {
       await sleep(120);
       handle.pty.pty.write('\r');
+    }
+  }
+
+  private async sendInterruptSequence(handle: CodexHandle): Promise<void> {
+    if (!handle.pty) {
+      return;
+    }
+
+    this.log('info', 'sending codex interrupt sequence', {
+      ...this.handleContext(handle),
+      runtimeStatus: handle.runtime.status
+    });
+
+    handle.pty.pty.write('\x1b');
+  }
+
+  private async maybeMarkHandleReadyAfterInterrupt(handle: CodexHandle): Promise<void> {
+    await sleep(INTERRUPT_READY_CHECK_DELAY_MS);
+    if (!this.isActiveHandle(handle) || !handle.pty) {
+      return;
+    }
+
+    const previousMessages = handle.runtime.messages;
+    const previousHasOlderMessages = handle.runtime.hasOlderMessages;
+
+    try {
+      const { bottomText } = await this.getHandleTerminalView(handle);
+      if (!looksReadyForInput(bottomText)) {
+        return;
+      }
+
+      handle.awaitingJsonlTurn = false;
+      if (handle.jsonlMessagesState.runtimePhase !== 'idle') {
+        handle.jsonlMessagesState.runtimePhase = 'idle';
+        handle.jsonlMessagesState.activityRevision += 1;
+        refreshCodexJsonlMessageStatuses(handle.jsonlMessagesState);
+      }
+
+      const nextAllMessages = materializeCodexJsonlMessages(handle.jsonlMessagesState);
+      const nextMessages = this.selectRecentMessages(nextAllMessages);
+      const nextHasOlderMessages = nextAllMessages.length > nextMessages.length;
+      const allMessagesChanged = !messagesEqual(handle.runtime.allMessages, nextAllMessages);
+      const messagesChanged = !messagesEqual(handle.runtime.messages, nextMessages);
+      const hasOlderMessagesChanged = handle.runtime.hasOlderMessages !== nextHasOlderMessages;
+
+      if (allMessagesChanged) {
+        handle.runtime.allMessages = nextAllMessages;
+      }
+      if (messagesChanged) {
+        handle.runtime.messages = nextMessages;
+      }
+      if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
+        handle.runtime.hasOlderMessages = nextHasOlderMessages;
+      }
+
+      this.setStatus(handle, 'idle', true);
+
+      if (this.isActiveHandle(handle) && (allMessagesChanged || messagesChanged || hasOlderMessagesChanged)) {
+        const upsertPayload = this.createMessagesUpsertPayload(
+          handle,
+          previousMessages,
+          nextMessages,
+          previousHasOlderMessages,
+          nextHasOlderMessages
+        );
+        if (upsertPayload) {
+          this.callbacks.emitMessagesUpsert(upsertPayload);
+        }
+      }
+    } catch (error) {
+      this.log('warn', 'failed to confirm codex ready state after interrupt', {
+        ...this.handleContext(handle),
+        error: errorMessage(error, 'Failed to confirm ready state')
+      });
     }
   }
 

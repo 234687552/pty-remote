@@ -58,6 +58,7 @@ function compareMessageChronology(left: ChatMessage, right: ChatMessage): number
 }
 
 function createMessageSemanticKey(message: ChatMessage): string {
+  const metaSignature = `${message.meta?.turnId ?? ''}:${message.meta?.phase ?? ''}`;
   const blocksSignature = message.blocks
     .map((block) => {
       if (block.type === 'text') {
@@ -69,7 +70,7 @@ function createMessageSemanticKey(message: ChatMessage): string {
       return `tool_result:${block.toolCallId ?? ''}:${block.isError ? '1' : '0'}:${block.content.trim()}`;
     })
     .join('|');
-  return `${message.role}|${message.createdAt}|${blocksSignature}`;
+  return `${message.role}|${message.createdAt}|${metaSignature}|${blocksSignature}`;
 }
 
 export function mergeChronologicalMessages(left: ChatMessage[], right: ChatMessage[]): ChatMessage[] {

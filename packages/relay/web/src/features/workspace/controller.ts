@@ -74,6 +74,7 @@ export interface WorkspaceController {
 
 interface UseWorkspaceControllerParams {
   clis: CliDescriptor[];
+  requestMobilePaneScrollToBottom?: () => void;
   sendCommand: CliSocketController['sendCommand'];
   socketConnected: boolean;
   store: WorkspaceStore;
@@ -219,6 +220,7 @@ function getConnectedCliForProvider(
 
 export function useWorkspaceController({
   clis,
+  requestMobilePaneScrollToBottom,
   sendCommand,
   socketConnected,
   store,
@@ -1284,7 +1286,7 @@ export function useWorkspaceController({
         current.filter((attachment) => attachment.conversationId !== activeConversation.id)
       );
       store.setPrompt('');
-      store.setMobilePane('chat');
+      requestMobilePaneScrollToBottom?.();
     } catch (submitError) {
       store.setError(submitError instanceof Error ? submitError.message : '发送失败');
     }

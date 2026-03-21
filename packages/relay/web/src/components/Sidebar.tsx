@@ -45,6 +45,7 @@ interface SidebarProps {
   onListRecentProjectSessions: (providerId: ProviderId, maxSessions?: number) => Promise<ProjectSessionSummary[]>;
   onMobileOpenChange: (open: boolean) => void;
   onSelectCli: (cliId: string | null) => void;
+  onSelectProject: (project: ProjectEntry) => void;
 }
 
 const SWIPE_DELETE_ACTION_WIDTH = 82;
@@ -144,7 +145,8 @@ export function Sidebar({
   onPickProjectDirectory,
   onListRecentProjectSessions,
   onMobileOpenChange,
-  onSelectCli
+  onSelectCli,
+  onSelectProject
 }: SidebarProps) {
   const [createConversationPending, setCreateConversationPending] = useState(false);
   const [createConversationDialogProject, setCreateConversationDialogProject] = useState<ProjectEntry | null>(null);
@@ -518,6 +520,12 @@ export function Sidebar({
     clearLongPress(rowKey, -1);
   }
 
+  function closeMobileSidebar(): void {
+    if (mobileOpen) {
+      onMobileOpenChange(false);
+    }
+  }
+
   function shouldBlockRowAction(rowKey: string): boolean {
     if (suppressClickRowKeyRef.current === rowKey) {
       suppressClickRowKeyRef.current = null;
@@ -529,6 +537,34 @@ export function Sidebar({
       return true;
     }
     return false;
+  }
+
+  function getProjectDefaultConversation(project: ProjectEntry): ProjectConversationEntry | null {
+    const providerOrder = activeProviderId
+      ? [activeProviderId, ...ALL_PROVIDERS.filter((providerId) => providerId !== activeProviderId)]
+      : ALL_PROVIDERS;
+
+    for (const providerId of providerOrder) {
+      const conversations = sortConversationEntries(projectConversationsByKey[getProjectProviderKey(project.id, providerId)] ?? []);
+      if (conversations.length > 0) {
+        return conversations[0] ?? null;
+      }
+    }
+
+    return null;
+  }
+
+  function handleProjectSelect(project: ProjectEntry): void {
+    closeAllSwipeRows();
+
+    const nextConversation = getProjectDefaultConversation(project);
+    if (nextConversation) {
+      onActivateConversation(project, nextConversation.providerId, nextConversation);
+    } else {
+      onSelectProject(project);
+    }
+
+    closeMobileSidebar();
   }
 
   async function handlePrimaryAction(): Promise<void> {
@@ -545,9 +581,7 @@ export function Sidebar({
       }
 
       await onCreateConversation(activeProject, createProviderId);
-      if (mobileOpen) {
-        onMobileOpenChange(false);
-      }
+      closeMobileSidebar();
     } finally {
       setCreateConversationPending(false);
     }
@@ -585,9 +619,7 @@ export function Sidebar({
     try {
       await onCreateConversation(createConversationDialogProject, createConversationDialogProviderId);
       setCreateConversationDialogProject(null);
-      if (mobileOpen) {
-        onMobileOpenChange(false);
-      }
+      closeMobileSidebar();
     } catch (error) {
       setCreateConversationDialogError(error instanceof Error ? error.message : '创建会话失败');
     } finally {
@@ -658,9 +690,7 @@ export function Sidebar({
       });
       setCreateProjectDialogOpen(false);
       setCreateProjectCwd('');
-      if (mobileOpen) {
-        onMobileOpenChange(false);
-      }
+      closeMobileSidebar();
     } catch (error) {
       setCreateProjectError(error instanceof Error ? error.message : '新建项目失败');
     } finally {
@@ -770,9 +800,7 @@ export function Sidebar({
     try {
       await onImportConversationFromSession(session.providerId, session);
       setHistoryDialogOpen(false);
-      if (mobileOpen) {
-        onMobileOpenChange(false);
-      }
+      closeMobileSidebar();
     } catch (error) {
       setHistoryError(error instanceof Error ? error.message : '导入历史会话失败');
     } finally {
@@ -783,10 +811,13 @@ export function Sidebar({
   const sidebarContent = (
     <>
       <div className="border-b border-zinc-200/80 bg-white/90 px-3 py-2 backdrop-blur-sm">
+        <div className="flex justify-center pb-2 lg:hidden">
+          <div className="h-1 w-10 rounded-full bg-zinc-300" aria-hidden="true" />
+        </div>
         <div className="text-xs font-medium text-zinc-500">会话目录</div>
       </div>
 
-      <div className="flex-1 space-y-2.5 overflow-auto p-2.5">
+      <div className="flex flex-1 flex-col-reverse gap-2.5 overflow-auto p-2.5 lg:block lg:space-y-2.5">
         {projects.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-zinc-200 bg-zinc-50 p-4 text-sm text-zinc-500">
             暂无目录。
@@ -812,7 +843,14 @@ export function Sidebar({
               >
                 <div className="rounded-xl">
                   <div className="flex items-start gap-2">
-                    <div className="min-w-0 flex-1 text-left">
+                    <button
+                      type="button"
+                      onClick={() => handleProjectSelect(project)}
+                      className={[
+                        'min-w-0 flex-1 rounded-xl px-1 py-1 text-left transition',
+                        isActiveProject ? 'hover:bg-white/70' : 'hover:bg-zinc-100'
+                      ].join(' ')}
+                    >
                       <div className="truncate text-[13px] font-semibold">{project.label}</div>
                       <div
                         className={[
@@ -822,7 +860,7 @@ export function Sidebar({
                       >
                         {project.cwd}
                       </div>
-                    </div>
+                    </button>
                     <button
                       type="button"
                       onPointerDown={(event) => {
@@ -848,7 +886,7 @@ export function Sidebar({
                   </div>
                 </div>
 
-                <div className="mt-2 space-y-1">
+                <div className="mt-2 flex flex-col-reverse gap-1 lg:block lg:space-y-1">
                   {conversations.length === 0 ? (
                     <div
                       className={[
@@ -919,6 +957,7 @@ export function Sidebar({
                                   return;
                                 }
                                 onActivateConversation(project, conversation.providerId, conversation);
+                                closeMobileSidebar();
                               }}
                               className={[
                                 'block min-w-0 w-full rounded-xl border px-2.5 py-2 text-left transition',
@@ -1042,16 +1081,11 @@ export function Sidebar({
           type="button"
           aria-label="关闭边栏蒙版"
           onPointerDown={(event) => {
-            if (event.pointerType === 'mouse' && event.button !== 0) {
-              return;
-            }
-            event.preventDefault();
-            onMobileOpenChange(false);
+            event.stopPropagation();
           }}
           onClick={(event) => {
-            if (event.detail !== 0) {
-              return;
-            }
+            event.preventDefault();
+            event.stopPropagation();
             onMobileOpenChange(false);
           }}
           className={[
@@ -1062,9 +1096,12 @@ export function Sidebar({
 
         <aside
           className={[
-            'absolute top-0 left-0 flex h-full w-[20rem] max-w-[82vw] flex-col border-r border-zinc-200 bg-white shadow-[0_18px_60px_rgba(0,0,0,0.18)] transition-transform duration-300 ease-out',
-            mobileOpen ? 'translate-x-0' : '-translate-x-full'
+            'absolute inset-x-0 bottom-0 flex max-h-[min(82svh,44rem)] w-full flex-col rounded-t-[1.75rem] border-t border-zinc-200 bg-white shadow-[0_-18px_60px_rgba(0,0,0,0.18)] transition-transform duration-300 ease-out sm:mx-auto sm:max-w-[28rem] sm:rounded-[1.75rem] sm:border',
+            mobileOpen ? 'translate-y-0' : 'translate-y-full'
           ].join(' ')}
+          style={{
+            paddingBottom: 'max(0px, env(safe-area-inset-bottom))'
+          }}
         >
           {sidebarContent}
         </aside>

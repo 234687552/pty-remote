@@ -51,10 +51,16 @@ type TerminalBridgeMethods = Omit<TerminalBridge, 'frameSnapshot' | 'terminalHos
 const TERMINAL_FONT_SIZE_PX = 12;
 const TERMINAL_LINE_HEIGHT = 1.2;
 const TERMINAL_MEASURE_TEXT = 'MMMMMMMMMM';
+const TERMINAL_SCROLL_BOTTOM_THRESHOLD_PX = 12;
 
 interface TerminalMeasure {
   cellHeight: number;
   cellWidth: number;
+}
+
+interface CommitFrameSnapshotOptions {
+  forceScrollToBottom?: boolean;
+  preserveScroll?: boolean;
 }
 
 function isResetPatch(patch: TerminalFramePatch): boolean {
@@ -125,17 +131,18 @@ export function useTerminalBridge({
   const appliedProviderIdRef = useRef<ProviderId | null>(null);
   const terminalResumePendingRef = useRef(false);
   const terminalResyncRequestedRef = useRef(false);
+  const terminalPinnedToBottomRef = useRef(true);
   const bufferedTerminalPatchesRef = useRef<TerminalFramePatchPayload[]>([]);
   const frameSnapshotRef = useRef<TerminalFrameSnapshot | null>(null);
   const terminalMethodsRef = useRef<TerminalBridgeMethods | null>(null);
   const terminalBridgeRef = useRef<TerminalBridge | null>(null);
   const [frameSnapshot, setFrameSnapshot] = useState<TerminalFrameSnapshot | null>(null);
 
-  function commitFrameSnapshot(nextSnapshot: TerminalFrameSnapshot | null, options: { preserveScroll?: boolean } = {}): void {
+  function commitFrameSnapshot(nextSnapshot: TerminalFrameSnapshot | null, options: CommitFrameSnapshotOptions = {}): void {
     frameSnapshotRef.current = nextSnapshot;
     setFrameSnapshot(nextSnapshot);
     requestAnimationFrame(() => {
-      if (!options.preserveScroll) {
+      if (!options.preserveScroll && (options.forceScrollToBottom || terminalPinnedToBottomRef.current)) {
         jumpToEdge('down');
       }
       scheduleResize();
@@ -204,7 +211,10 @@ export function useTerminalBridge({
     }
   }
 
-  async function requestTerminalFrameSync(targetSessionId: string | null): Promise<void> {
+  async function requestTerminalFrameSync(
+    targetSessionId: string | null,
+    options: { forceScrollToBottom?: boolean } = {}
+  ): Promise<void> {
     const socket = socketRef.current;
     if (!socket?.connected) {
       throw new Error('Socket is not connected');
@@ -247,7 +257,9 @@ export function useTerminalBridge({
       });
     });
 
-    commitFrameSnapshot(applySyncResult(frameSnapshotRef.current, result));
+    commitFrameSnapshot(applySyncResult(frameSnapshotRef.current, result), {
+      forceScrollToBottom: options.forceScrollToBottom
+    });
     appliedSessionIdRef.current = targetSessionId;
     appliedCliIdRef.current = activeCliId;
     appliedProviderIdRef.current = activeProviderId;
@@ -365,9 +377,12 @@ export function useTerminalBridge({
 
     prepareForResume();
     if (isTargetContextChanged) {
-      commitFrameSnapshot(createEmptyTerminalFrameSnapshot(targetSessionId ?? null), { preserveScroll: false });
+      commitFrameSnapshot(createEmptyTerminalFrameSnapshot(targetSessionId ?? null), {
+        preserveScroll: false,
+        forceScrollToBottom: true
+      });
     }
-    await requestTerminalFrameSync(targetSessionId);
+    await requestTerminalFrameSync(targetSessionId, { forceScrollToBottom: isTargetContextChanged });
   }
 
   function jumpToEdge(direction: 'up' | 'down'): void {
@@ -375,6 +390,8 @@ export function useTerminalBridge({
     if (!viewport) {
       return;
     }
+
+    terminalPinnedToBottomRef.current = direction === 'down';
 
     if (direction === 'up') {
       viewport.scrollTop = 0;
@@ -385,19 +402,29 @@ export function useTerminalBridge({
   }
 
   useEffect(() => {
-    if (!terminalHostRef.current || !terminalViewportRef.current) {
+    const terminalHost = terminalHostRef.current;
+    const terminalViewport = terminalViewportRef.current;
+    if (!terminalHost || !terminalViewport) {
       return;
     }
 
+    const updatePinnedToBottom = () => {
+      terminalPinnedToBottomRef.current = isViewportScrolledToBottom(terminalViewport);
+    };
+    updatePinnedToBottom();
+
     const observer = new ResizeObserver(() => {
+      updatePinnedToBottom();
       scheduleResize();
     });
-    observer.observe(terminalViewportRef.current);
+    observer.observe(terminalViewport);
 
     const handleWindowResize = () => {
+      updatePinnedToBottom();
       scheduleResize();
     };
 
+    terminalViewport.addEventListener('scroll', updatePinnedToBottom, { passive: true });
     window.addEventListener('resize', handleWindowResize);
     scheduleResize();
 
@@ -407,6 +434,7 @@ export function useTerminalBridge({
         resizeFrameRef.current = null;
       }
       observer.disconnect();
+      terminalViewport.removeEventListener('scroll', updatePinnedToBottom);
       window.removeEventListener('resize', handleWindowResize);
     };
   }, []);
@@ -457,4 +485,8 @@ export function useTerminalBridge({
   terminalBridgeRef.current.frameSnapshot = frameSnapshot;
 
   return terminalBridgeRef.current;
+}
+
+function isViewportScrolledToBottom(viewport: HTMLDivElement): boolean {
+  return viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop <= TERMINAL_SCROLL_BOTTOM_THRESHOLD_PX;
 }
