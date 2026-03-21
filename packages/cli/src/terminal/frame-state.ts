@@ -138,6 +138,10 @@ export class HeadlessTerminalFrameState {
     return cloneTerminalFrameSnapshot(this.materializedSnapshot.snapshot);
   }
 
+  async flush(): Promise<void> {
+    await this.pendingWriteChain;
+  }
+
   reset(sessionId: string | null): TerminalFramePatch {
     const previousTerminal = this.terminal;
     const previousWriteChain = this.pendingWriteChain;

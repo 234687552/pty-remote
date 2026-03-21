@@ -124,9 +124,12 @@ export function Composer({
       onSubmit={onSubmit}
       className="shrink-0 bg-transparent px-2 py-1 pb-[calc(env(safe-area-inset-bottom)+0.25rem)] md:mt-4 md:px-0 md:py-0"
     >
-      <div className="mb-px grid grid-cols-3 gap-1 text-[10px] font-medium md:flex md:flex-wrap md:gap-1.5 md:text-[11px]">
+      <div className="mb-1 grid grid-cols-3 gap-0.5 px-1 text-[9px] font-medium md:mb-px md:flex md:flex-wrap md:gap-1.5 md:px-0 md:text-[11px]">
         {[conversationBadge, socketBadge, cliBadge].map((badge) => (
-          <span key={badge.label} className={['truncate rounded-full px-2 py-0.5 text-center md:px-2.5', badge.className].join(' ')}>
+          <span
+            key={badge.label}
+            className={['truncate rounded-full px-1.5 py-0.5 text-center opacity-80 md:px-2.5 md:opacity-100', badge.className].join(' ')}
+          >
             {badge.label}: {badge.value}
           </span>
         ))}

@@ -659,7 +659,7 @@ export class PtyManager {
   }
 
   private ensureJsonlWatcher(handle: PtyHandle, sessionId: string | null): void {
-    if (!this.isActiveHandle(handle)) {
+    if (!this.isActiveHandle(handle) && !handle.pty) {
       this.closeJsonlWatcher(handle);
       return;
     }
@@ -681,17 +681,21 @@ export class PtyManager {
 
     try {
       handle.jsonlWatcher = watchFs(dirPath, { persistent: false }, (_eventType, changedFileName) => {
-        if (!this.isActiveHandle(handle) || handle.sessionId !== sessionId) {
+        if ((!this.isActiveHandle(handle) && !handle.pty) || handle.sessionId !== sessionId) {
           return;
         }
         if (typeof changedFileName === 'string' && changedFileName.length > 0 && changedFileName !== fileName) {
           return;
         }
-        this.scheduleJsonlRefresh(0);
+        if (this.isActiveHandle(handle)) {
+          this.scheduleJsonlRefresh(0);
+          return;
+        }
+        void this.refreshMessagesFromJsonl(handle);
       });
       handle.watchedJsonlSessionId = sessionId;
       handle.jsonlWatcher.on('error', (error) => {
-        if (!this.isActiveHandle(handle) || handle.sessionId !== sessionId) {
+        if ((!this.isActiveHandle(handle) && !handle.pty) || handle.sessionId !== sessionId) {
           return;
         }
         this.closeJsonlWatcher(handle);
@@ -940,10 +944,6 @@ export class PtyManager {
         handle.runtime.status = nextRuntimeStatus;
       }
 
-      if (!this.isActiveHandle(handle)) {
-        return;
-      }
-
       if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged || statusChanged) {
         const upsertPayload = this.createMessagesUpsertPayload(
           handle,
@@ -955,7 +955,9 @@ export class PtyManager {
         if (upsertPayload) {
           this.callbacks.emitMessagesUpsert(upsertPayload);
         }
-        this.scheduleSnapshotEmit(statusChanged ? 0 : this.options.snapshotEmitDebounceMs);
+        if (this.isActiveHandle(handle)) {
+          this.scheduleSnapshotEmit(statusChanged ? 0 : this.options.snapshotEmitDebounceMs);
+        }
       }
 
       if (this.shouldContinueJsonlRefresh(handle)) {
@@ -1074,6 +1076,9 @@ export class PtyManager {
       this.activeThreadKey = null;
     }
     this.pruneInactiveHandleState(handle);
+    if (handle.pty) {
+      this.ensureJsonlWatcher(handle, handle.sessionId);
+    }
     if (this.jsonlRefreshTimer) {
       clearTimeout(this.jsonlRefreshTimer);
       this.jsonlRefreshTimer = null;
@@ -1244,7 +1249,7 @@ export class PtyManager {
     void handle.terminalFrame
       .enqueueOutput(chunk)
       .then((patch) => {
-        if (patch && this.isActiveHandle(handle)) {
+        if (patch) {
           this.emitTerminalFramePatch(handle, patch);
         }
       })
@@ -1296,6 +1301,14 @@ export class PtyManager {
           runtimeStatus: handle.runtime.status
         });
         handle.runtime.lastError = 'Claude CLI exited unexpectedly';
+      }
+      try {
+        await this.refreshMessagesFromJsonl(handle);
+      } catch (error) {
+        this.log('error', 'failed to finalize detached claude messages after pty exit', {
+          ...this.handleContext(handle),
+          error: errorMessage(error, 'Failed to finalize detached messages')
+        });
       }
       this.discardInactiveHandle(handle);
       return;
@@ -1400,6 +1413,9 @@ export class PtyManager {
 
   private pruneInactiveHandleState(handle: PtyHandle): void {
     if (this.isActiveHandle(handle)) {
+      return;
+    }
+    if (handle.pty) {
       return;
     }
 

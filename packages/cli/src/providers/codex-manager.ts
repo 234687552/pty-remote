@@ -8,6 +8,7 @@ import type {
   SelectConversationResultPayload,
   TerminalFramePatchPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
+import type { TerminalFrameSnapshot } from '@lzdi/pty-remote-protocol/terminal-frame.ts';
 import type { ChatMessage, ProviderId, RuntimeSnapshot, RuntimeStatus } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import {
   applyCodexJsonlLine,
@@ -155,6 +156,15 @@ function sleep(ms: number): Promise<void> {
 }
 
 const AWAITING_JSONL_TURN_STALE_MS = 4000;
+const READY_TIMEOUT_MAX_RETRIES = 2;
+const TERMINAL_READY_TEXT_MAX_LINES = 120;
+
+function materializeTerminalFrameText(snapshot: TerminalFrameSnapshot, maxLines = TERMINAL_READY_TEXT_MAX_LINES): string {
+  return snapshot.lines
+    .slice(-maxLines)
+    .map((line) => line.runs.map((run) => run.text).join('').replace(/\s+$/u, ''))
+    .join('\n');
+}
 
 export class CodexManager {
   private readonly providerId: ProviderId = 'codex';
@@ -353,7 +363,7 @@ export class CodexManager {
     await this.ensureHandleSession(handle);
 
     try {
-      await this.waitForHandleReady(handle);
+      await this.waitForHandleReadyWithRetry(handle);
       handle.awaitingJsonlTurn = true;
       handle.lastUserInputAt = Date.now();
       this.setStatus(handle, 'running', true);
@@ -679,7 +689,7 @@ export class CodexManager {
   }
 
   private ensureJsonlWatcher(handle: CodexHandle, filePath: string | null): void {
-    if (!this.isActiveHandle(handle)) {
+    if (!this.isActiveHandle(handle) && !handle.pty) {
       this.closeJsonlWatcher(handle);
       return;
     }
@@ -700,17 +710,21 @@ export class CodexManager {
 
     try {
       handle.jsonlWatcher = watchFs(dirPath, { persistent: false }, (_eventType, changedFileName) => {
-        if (!this.isActiveHandle(handle) || handle.sessionFilePath !== filePath) {
+        if ((!this.isActiveHandle(handle) && !handle.pty) || handle.sessionFilePath !== filePath) {
           return;
         }
         if (typeof changedFileName === 'string' && changedFileName.length > 0 && changedFileName !== fileName) {
           return;
         }
-        this.scheduleJsonlRefresh(0, 'jsonl-watcher');
+        if (this.isActiveHandle(handle)) {
+          this.scheduleJsonlRefresh(0, 'jsonl-watcher');
+          return;
+        }
+        void this.refreshMessagesFromJsonl(handle);
       });
       handle.watchedJsonlFilePath = filePath;
       handle.jsonlWatcher.on('error', (error) => {
-        if (!this.isActiveHandle(handle) || handle.sessionFilePath !== filePath) {
+        if ((!this.isActiveHandle(handle) && !handle.pty) || handle.sessionFilePath !== filePath) {
           return;
         }
         this.closeJsonlWatcher(handle);
@@ -852,8 +866,10 @@ export class CodexManager {
     handle.discoveryStartedAt = null;
     this.resetJsonlParsingState(handle, match.sessionId);
 
-    if (this.isActiveHandle(handle)) {
+    if (this.isActiveHandle(handle) || handle.pty) {
       this.ensureJsonlWatcher(handle, match.filePath);
+    }
+    if (this.isActiveHandle(handle)) {
       this.emitSnapshotNow();
     }
   }
@@ -962,10 +978,6 @@ export class CodexManager {
         handle.runtime.status = nextRuntimeStatus;
       }
 
-      if (!this.isActiveHandle(handle)) {
-        return;
-      }
-
       if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged || statusChanged) {
         const upsertPayload = this.createMessagesUpsertPayload(
           handle,
@@ -977,7 +989,9 @@ export class CodexManager {
         if (upsertPayload) {
           this.callbacks.emitMessagesUpsert(upsertPayload);
         }
-        this.scheduleSnapshotEmit(statusChanged ? 0 : this.options.snapshotEmitDebounceMs);
+        if (this.isActiveHandle(handle)) {
+          this.scheduleSnapshotEmit(statusChanged ? 0 : this.options.snapshotEmitDebounceMs);
+        }
       }
 
       if (this.shouldContinueJsonlRefresh(handle)) {
@@ -1115,6 +1129,9 @@ export class CodexManager {
       this.activeThreadKey = null;
     }
     this.pruneInactiveHandleState(handle);
+    if (handle.pty) {
+      this.ensureJsonlWatcher(handle, handle.sessionFilePath);
+    }
     if (this.jsonlRefreshTimer) {
       clearTimeout(this.jsonlRefreshTimer);
       this.jsonlRefreshTimer = null;
@@ -1297,7 +1314,7 @@ export class CodexManager {
     void handle.terminalFrame
       .enqueueOutput(chunk)
       .then((patch) => {
-        if (patch && this.isActiveHandle(handle)) {
+        if (patch) {
           this.emitTerminalFramePatch(handle, patch);
         }
       })
@@ -1350,6 +1367,14 @@ export class CodexManager {
         });
         handle.runtime.lastError = 'Codex CLI exited unexpectedly';
       }
+      try {
+        await this.refreshMessagesFromJsonl(handle);
+      } catch (error) {
+        this.log('error', 'failed to finalize detached codex messages after pty exit', {
+          ...this.handleContext(handle),
+          error: errorMessage(error, 'Failed to finalize detached messages')
+        });
+      }
       this.discardInactiveHandle(handle);
       return;
     }
@@ -1372,12 +1397,31 @@ export class CodexManager {
     this.setLastError(handle, 'Codex CLI exited unexpectedly');
   }
 
-  private async autoSkipUpdatePrompt(handle: CodexHandle): Promise<boolean> {
+  private async getHandleTerminalText(handle: CodexHandle): Promise<string> {
+    await handle.terminalFrame.flush();
+    return materializeTerminalFrameText(handle.terminalFrame.getSnapshot());
+  }
+
+  private restartHandleSessionForReadyRetry(handle: CodexHandle, attempt: number): void {
+    this.log('warn', 'codex ready check timed out; restarting pty before retry', {
+      ...this.handleContext(handle),
+      attempt,
+      maxRetries: READY_TIMEOUT_MAX_RETRIES,
+      recentOutputTail: tailForLog(handle.pty?.recentOutput)
+    });
+    this.stopHandlePtyPreservingReplay(handle, 'ready-timeout-retry', {
+      attempt,
+      maxRetries: READY_TIMEOUT_MAX_RETRIES
+    });
+    this.startHandleSession(handle);
+  }
+
+  private async autoSkipUpdatePrompt(handle: CodexHandle, terminalText: string): Promise<boolean> {
     if (!handle.pty || handle.pty.startupUpdatePromptHandled) {
       return false;
     }
 
-    if (!looksLikeUpdatePrompt(handle.pty.recentOutput)) {
+    if (!looksLikeUpdatePrompt(terminalText)) {
       return false;
     }
 
@@ -1390,6 +1434,23 @@ export class CodexManager {
     return true;
   }
 
+  private async waitForHandleReadyWithRetry(handle: CodexHandle): Promise<void> {
+    let retryCount = 0;
+
+    while (true) {
+      try {
+        await this.waitForHandleReady(handle);
+        return;
+      } catch (error) {
+        if (!(error instanceof Error) || error.message !== 'Codex CLI startup timed out' || retryCount >= READY_TIMEOUT_MAX_RETRIES) {
+          throw error;
+        }
+        retryCount += 1;
+        this.restartHandleSessionForReadyRetry(handle, retryCount);
+      }
+    }
+  }
+
   private async waitForHandleReady(handle: CodexHandle): Promise<void> {
     const deadline = Date.now() + this.options.codexReadyTimeoutMs;
 
@@ -1398,16 +1459,16 @@ export class CodexManager {
         throw new Error('Codex PTY session is not running');
       }
 
-      const currentOutput = handle.pty.recentOutput;
-      if (looksReadyForInput(currentOutput)) {
+      const terminalText = await this.getHandleTerminalText(handle);
+      if (looksReadyForInput(terminalText)) {
         return;
       }
 
-      if (await this.autoSkipUpdatePrompt(handle)) {
+      if (await this.autoSkipUpdatePrompt(handle, terminalText)) {
         continue;
       }
 
-      if (looksLikeDirectoryTrustPrompt(currentOutput)) {
+      if (looksLikeDirectoryTrustPrompt(terminalText)) {
         handle.pty.pty.write('\r');
         await sleep(350);
         continue;
@@ -1429,7 +1490,7 @@ export class CodexManager {
       throw new Error('Codex PTY session is not running');
     }
 
-    const shouldForceSubmit = showsStarterPrompt(handle.pty.recentOutput);
+    const shouldForceSubmit = showsStarterPrompt(await this.getHandleTerminalText(handle));
     const normalizedContent = content.replace(/\r\n/g, '\n');
     if (normalizedContent.includes('\n')) {
       handle.pty.pty.write('\x1b[200~');
@@ -1458,6 +1519,9 @@ export class CodexManager {
 
   private pruneInactiveHandleState(handle: CodexHandle): void {
     if (this.isActiveHandle(handle)) {
+      return;
+    }
+    if (handle.pty) {
       return;
     }
 

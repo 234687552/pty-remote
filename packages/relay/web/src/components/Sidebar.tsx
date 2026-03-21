@@ -924,7 +924,7 @@ export function Sidebar({
                                 'block min-w-0 w-full rounded-xl border px-2.5 py-2 text-left transition',
                                 isActiveConversation
                                   ? isActiveProject
-                                    ? 'border-zinc-300 bg-white text-zinc-950 shadow-sm'
+                                    ? 'border-sky-200 bg-sky-50 text-zinc-950 shadow-sm'
                                     : 'border-sky-200 bg-sky-100 text-zinc-950'
                                   : isActiveProject
                                     ? 'border-transparent bg-transparent text-zinc-800 hover:bg-white/70'
