@@ -47,6 +47,9 @@ export interface ManagedPtyHandleSummary {
 
 export type CliCommandName =
   | 'send-message'
+  | 'list-slash-commands'
+  | 'upload-attachment'
+  | 'delete-attachment'
   | 'stop-message'
   | 'reset-session'
   | 'get-runtime-snapshot'
@@ -60,6 +63,19 @@ export type CliCommandName =
 
 export interface CliCommandPayloadMap {
   'send-message': { content: string };
+  'list-slash-commands': Record<string, never>;
+  'upload-attachment': {
+    contentBase64: string;
+    conversationKey: string | null;
+    cwd: string;
+    filename: string;
+    mimeType: string;
+    sessionId: string | null;
+    size: number;
+  };
+  'delete-attachment': {
+    attachmentId: string;
+  };
   'stop-message': Record<string, never>;
   'reset-session': Record<string, never>;
   'get-runtime-snapshot': Record<string, never>;
@@ -127,8 +143,24 @@ export interface SelectConversationResultPayload {
   clientRequestId?: string | null;
 }
 
+export interface UploadAttachmentResultPayload {
+  attachmentId: string;
+  filename: string;
+  mimeType: string;
+  path: string;
+  size: number;
+}
+
+export interface ListSlashCommandsResultPayload {
+  providerId: ProviderId;
+  commands: string[];
+}
+
 export interface CliCommandResultPayloadMap {
   'send-message': null;
+  'list-slash-commands': ListSlashCommandsResultPayload;
+  'upload-attachment': UploadAttachmentResultPayload;
+  'delete-attachment': null;
   'stop-message': null;
   'reset-session': null;
   'get-runtime-snapshot': GetRuntimeSnapshotResultPayload;

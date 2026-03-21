@@ -46,6 +46,7 @@ export interface ProviderRuntime {
   getOlderMessages(beforeMessageId?: string, maxMessages?: number): Promise<GetOlderMessagesResultPayload>;
   getRegistrationPayload(): ProviderRuntimeRegistration;
   getSnapshot(): RuntimeSnapshot;
+  listSlashCommands(): Promise<string[]>;
   listProjectConversations(projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]>;
   listManagedPtyHandles(): Promise<ManagedPtyHandleSummary[]>;
   primeActiveTerminalFrame(): Promise<void>;

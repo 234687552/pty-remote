@@ -13,14 +13,17 @@ import type {
   CliRegisterPayload,
   CliRegisterResult,
   GetRuntimeSnapshotResultPayload,
+  ListSlashCommandsResultPayload,
   ListManagedPtyHandlesResultPayload,
   ListProjectSessionsResultPayload,
   PickProjectDirectoryResultPayload,
+  UploadAttachmentResultPayload,
   RuntimeSnapshotPayload,
   TerminalFramePatchPayload,
   TerminalSessionEvictedPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import { AttachmentManager } from '../attachments/manager.ts';
 import { createClaudeProviderRuntime } from '../providers/claude.ts';
 import { createCodexProviderRuntime, type CodexProviderRuntimeOptions } from '../providers/codex.ts';
 import type { ProviderRuntime } from '../providers/provider-runtime.ts';
@@ -93,6 +96,7 @@ const CLAUDE_PERMISSION_MODE = sanitizePermissionMode(getConfigValue('CLAUDE_PER
 let socketClient: Socket | null = null;
 let shuttingDown = false;
 let shutdownPromise: Promise<void> | null = null;
+const attachmentManager = new AttachmentManager();
 
 const runtimeOptions: PtyManagerOptions = {
   claudeBin: getConfigValue('CLAUDE_BIN') ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude'),
@@ -325,7 +329,60 @@ function requireTargetProviderId(envelope: CliCommandEnvelope): ProviderId {
 async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCommandResult> {
   try {
     if (envelope.name === 'send-message') {
-      await getRuntime(requireTargetProviderId(envelope)).dispatchMessage((envelope.payload as { content: string }).content);
+      const content = (envelope.payload as { content: string }).content;
+      await getRuntime(requireTargetProviderId(envelope)).dispatchMessage(content);
+      attachmentManager.markReferencedPathsAsSent(content);
+      return { ok: true, payload: null };
+    }
+
+    if (envelope.name === 'list-slash-commands') {
+      const runtime = getRuntime(requireTargetProviderId(envelope));
+      return {
+        ok: true,
+        payload: {
+          providerId: runtime.providerId,
+          commands: await runtime.listSlashCommands()
+        } satisfies ListSlashCommandsResultPayload
+      };
+    }
+
+    if (envelope.name === 'upload-attachment') {
+      const providerId = requireTargetProviderId(envelope);
+      const payload = envelope.payload as {
+        contentBase64: string;
+        conversationKey: string | null;
+        cwd: string;
+        filename: string;
+        mimeType: string;
+        sessionId: string | null;
+        size: number;
+      };
+      const attachment = await attachmentManager.uploadAttachment({
+        contentBase64: payload.contentBase64,
+        conversationKey: payload.conversationKey,
+        cwd: payload.cwd,
+        filename: payload.filename,
+        mimeType: payload.mimeType,
+        providerId,
+        sessionId: payload.sessionId,
+        size: payload.size
+      });
+
+      return {
+        ok: true,
+        payload: {
+          attachmentId: attachment.attachmentId,
+          filename: attachment.filename,
+          mimeType: attachment.mimeType,
+          path: attachment.path,
+          size: attachment.size
+        } satisfies UploadAttachmentResultPayload
+      };
+    }
+
+    if (envelope.name === 'delete-attachment') {
+      const payload = envelope.payload as { attachmentId: string };
+      await attachmentManager.deleteAttachment(payload.attachmentId);
       return { ok: true, payload: null };
     }
 
@@ -384,8 +441,13 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
 
     if (envelope.name === 'cleanup-project') {
       const payload = envelope.payload as { cwd: string };
-      const runtime = getRuntime(requireTargetProviderId(envelope));
+      const providerId = requireTargetProviderId(envelope);
+      const runtime = getRuntime(providerId);
       await runtime.cleanupProject(payload.cwd);
+      await attachmentManager.cleanupProject({
+        cwd: payload.cwd,
+        providerId
+      });
       return { ok: true, payload: null };
     }
 
@@ -395,10 +457,17 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
         conversationKey: string;
         sessionId: string | null;
       };
-      const runtime = getRuntime(requireTargetProviderId(envelope));
+      const providerId = requireTargetProviderId(envelope);
+      const runtime = getRuntime(providerId);
       await runtime.cleanupConversation({
         cwd: payload.cwd,
         conversationKey: payload.conversationKey,
+        sessionId: payload.sessionId ?? null
+      });
+      await attachmentManager.cleanupConversation({
+        conversationKey: payload.conversationKey,
+        cwd: payload.cwd,
+        providerId,
         sessionId: payload.sessionId ?? null
       });
       return { ok: true, payload: null };
@@ -573,6 +642,7 @@ async function shutdownCliClient(reason: string, exitCode = 0): Promise<void> {
   shutdownPromise = (async () => {
     console.log(`shutting down cli client (${reason})`);
     await Promise.all(SUPPORTED_PROVIDERS.map((providerId) => getRuntime(providerId).shutdown()));
+    await attachmentManager.shutdown();
     socketClient?.removeAllListeners();
     socketClient?.disconnect();
     socketClient = null;
@@ -598,6 +668,7 @@ process.once('SIGHUP', () => {
 });
 
 export async function startCliClient(): Promise<void> {
+  attachmentManager.start();
   connectSocketClient();
   console.log(`cli client connecting to ${SOCKET_URL} as ${CLI_ID}`);
 }

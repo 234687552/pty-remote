@@ -1,6 +1,7 @@
 import type { ProjectSessionSummary } from '@lzdi/pty-remote-protocol/protocol.ts';
 
 import { listClaudeRecentSessions } from './claude-history.ts';
+import { listProviderSlashCommands } from './slash-commands.ts';
 import { PtyManager, type PtyManagerOptions } from '../cli/pty-manager.ts';
 
 import type { ProviderRuntime, ProviderRuntimeCallbacks, ProviderRuntimeSelection } from './provider-runtime.ts';
@@ -33,6 +34,9 @@ export function createClaudeProviderRuntime(
     },
     getSnapshot() {
       return manager.getSnapshot();
+    },
+    listSlashCommands() {
+      return listProviderSlashCommands('claude');
     },
     listProjectConversations(_projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]> {
       return listClaudeRecentSessions(maxSessions);

@@ -8,7 +8,7 @@ import type {
   SelectConversationResultPayload,
   TerminalFramePatchPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
-import type { TerminalFrameSnapshot } from '@lzdi/pty-remote-protocol/terminal-frame.ts';
+import type { TerminalFrameLine, TerminalFrameSnapshot } from '@lzdi/pty-remote-protocol/terminal-frame.ts';
 import type { ChatMessage, ProviderId, RuntimeSnapshot, RuntimeStatus } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import {
   applyCodexJsonlLine,
@@ -157,13 +157,34 @@ function sleep(ms: number): Promise<void> {
 
 const AWAITING_JSONL_TURN_STALE_MS = 4000;
 const READY_TIMEOUT_MAX_RETRIES = 2;
-const TERMINAL_READY_TEXT_MAX_LINES = 120;
+const TERMINAL_READY_BOTTOM_LINES = 8;
 
-function materializeTerminalFrameText(snapshot: TerminalFrameSnapshot, maxLines = TERMINAL_READY_TEXT_MAX_LINES): string {
-  return snapshot.lines
-    .slice(-maxLines)
+function materializeTerminalFrameLinesText(lines: TerminalFrameLine[]): string {
+  return lines
     .map((line) => line.runs.map((run) => run.text).join('').replace(/\s+$/u, ''))
     .join('\n');
+}
+
+function getVisibleTerminalFrameLines(snapshot: TerminalFrameSnapshot): TerminalFrameLine[] {
+  if (snapshot.lines.length === 0 || snapshot.rows <= 0) {
+    return [];
+  }
+
+  const visibleStartIndex = Math.max(0, snapshot.viewportY - snapshot.tailStart);
+  const visibleEndIndex = Math.min(snapshot.lines.length, visibleStartIndex + snapshot.rows);
+  return snapshot.lines.slice(visibleStartIndex, visibleEndIndex);
+}
+
+function trimTrailingEmptyTerminalLines(lines: TerminalFrameLine[]): TerminalFrameLine[] {
+  let endIndex = lines.length;
+  while (endIndex > 0) {
+    const text = lines[endIndex - 1]?.runs.map((run) => run.text).join('').trim() ?? '';
+    if (text.length > 0) {
+      break;
+    }
+    endIndex -= 1;
+  }
+  return lines.slice(0, endIndex);
 }
 
 export class CodexManager {
@@ -1397,9 +1418,19 @@ export class CodexManager {
     this.setLastError(handle, 'Codex CLI exited unexpectedly');
   }
 
-  private async getHandleTerminalText(handle: CodexHandle): Promise<string> {
+  private async getHandleTerminalView(handle: CodexHandle): Promise<{
+    bottomText: string;
+    visibleText: string;
+  }> {
     await handle.terminalFrame.flush();
-    return materializeTerminalFrameText(handle.terminalFrame.getSnapshot());
+    const snapshot = handle.terminalFrame.getSnapshot();
+    const visibleLines = getVisibleTerminalFrameLines(snapshot);
+    const trimmedVisibleLines = trimTrailingEmptyTerminalLines(visibleLines);
+    const bottomLines = trimmedVisibleLines.slice(-TERMINAL_READY_BOTTOM_LINES);
+    return {
+      visibleText: materializeTerminalFrameLinesText(visibleLines),
+      bottomText: materializeTerminalFrameLinesText(bottomLines)
+    };
   }
 
   private restartHandleSessionForReadyRetry(handle: CodexHandle, attempt: number): void {
@@ -1416,12 +1447,12 @@ export class CodexManager {
     this.startHandleSession(handle);
   }
 
-  private async autoSkipUpdatePrompt(handle: CodexHandle, terminalText: string): Promise<boolean> {
+  private async autoSkipUpdatePrompt(handle: CodexHandle, visibleText: string): Promise<boolean> {
     if (!handle.pty || handle.pty.startupUpdatePromptHandled) {
       return false;
     }
 
-    if (!looksLikeUpdatePrompt(terminalText)) {
+    if (!looksLikeUpdatePrompt(visibleText)) {
       return false;
     }
 
@@ -1459,28 +1490,31 @@ export class CodexManager {
         throw new Error('Codex PTY session is not running');
       }
 
-      const terminalText = await this.getHandleTerminalText(handle);
-      if (looksReadyForInput(terminalText)) {
-        return;
-      }
-
-      if (await this.autoSkipUpdatePrompt(handle, terminalText)) {
+      const { bottomText, visibleText } = await this.getHandleTerminalView(handle);
+      if (await this.autoSkipUpdatePrompt(handle, visibleText)) {
         continue;
       }
 
-      if (looksLikeDirectoryTrustPrompt(terminalText)) {
+      if (looksLikeDirectoryTrustPrompt(visibleText)) {
         handle.pty.pty.write('\r');
         await sleep(350);
         continue;
       }
 
+      if (looksReadyForInput(bottomText)) {
+        return;
+      }
+
       await sleep(250);
     }
 
+    const { bottomText, visibleText } = await this.getHandleTerminalView(handle);
     this.log('error', 'codex startup timed out waiting for ready prompt', {
       ...this.handleContext(handle),
       readyTimeoutMs: this.options.codexReadyTimeoutMs,
-      recentOutputTail: tailForLog(handle.pty?.recentOutput)
+      recentOutputTail: tailForLog(handle.pty?.recentOutput),
+      terminalBottomText: bottomText,
+      terminalVisibleText: visibleText
     });
     throw new Error('Codex CLI startup timed out');
   }
@@ -1490,7 +1524,8 @@ export class CodexManager {
       throw new Error('Codex PTY session is not running');
     }
 
-    const shouldForceSubmit = showsStarterPrompt(await this.getHandleTerminalText(handle));
+    const { bottomText } = await this.getHandleTerminalView(handle);
+    const shouldForceSubmit = showsStarterPrompt(bottomText);
     const normalizedContent = content.replace(/\r\n/g, '\n');
     if (normalizedContent.includes('\n')) {
       handle.pty.pty.write('\x1b[200~');

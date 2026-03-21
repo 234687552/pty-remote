@@ -174,3 +174,29 @@ SOCKET_URL=http://127.0.0.1:3001 npx -y @lzdi/pty-remote-cli
 ```bash
 curl http://127.0.0.1:3001/healthz
 ```
+
+## GitHub 自动发包
+
+仓库内置了 GitHub Actions 工作流：
+
+- workflow: `.github/workflows/publish-npm.yml`
+- 触发方式：
+  - 手动 `workflow_dispatch`
+  - 推送 tag：`v*`
+
+发布行为：
+
+- 先执行 `npm ci`
+- 再执行 `npm run build`
+- 最后按 workspace 依赖顺序自动发布所有 `private: false` 的包
+- 已经存在于 npm 的同版本会自动跳过
+
+需要在 GitHub 仓库里配置：
+
+- `NPM_TOKEN`
+
+如果只是本地预演发布顺序，可以运行：
+
+```bash
+DRY_RUN=1 npm run release:publish
+```

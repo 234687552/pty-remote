@@ -104,38 +104,22 @@ function tailOutput(text: string, maxChars = 8_000): string {
 
 const RUNNING_LINE_PATTERN = /(^|\n)\s*[•◦]\s+[^\n]*esc to interrupt[^\n]*$/gimu;
 const PROMPT_LINE_PATTERN = /(^|\n)\s*[›>]\s*[^\n]*$/gimu;
-const PROMPT_HINT_PATTERN = /Use \/skills to list available skills|\? for shortcuts/gi;
 const DIRECTORY_TRUST_PROMPT_PATTERN = /Do you trust the contents of this directory\?/i;
 const UPDATE_AVAILABLE_PROMPT_PATTERN = /Update\s+available!?/i;
 const UPDATE_SKIP_OPTION_PATTERN = /(^|\n)\s*2\.\s*Skip(?:\s|$)/im;
 const STARTER_PROMPT_PATTERN =
   /Use \/skills to list available skills|Improve documentation in @filename|To get started, describe a task|Implement\s+\{feature\}|Implement\s+<feature>/i;
 
-function findLastMatchIndex(pattern: RegExp, text: string): number {
-  let lastIndex = -1;
-
-  for (const match of text.matchAll(pattern)) {
-    lastIndex = match.index ?? lastIndex;
-  }
-
-  return lastIndex;
-}
-
 export function getCodexPtyLifecycle(output: string): CodexPtyLifecycle {
   const tail = tailOutput(output);
-  const lastRunningIndex = findLastMatchIndex(RUNNING_LINE_PATTERN, tail);
-  const lastPromptIndex = findLastMatchIndex(PROMPT_LINE_PATTERN, tail);
-  const lastHintIndex = findLastMatchIndex(PROMPT_HINT_PATTERN, tail);
+  const hasRunningLine = RUNNING_LINE_PATTERN.test(tail);
+  const hasPromptLine = PROMPT_LINE_PATTERN.test(tail);
 
-  if (lastRunningIndex > Math.max(lastPromptIndex, lastHintIndex)) {
+  if (hasRunningLine) {
     return 'running';
   }
 
-  if (lastPromptIndex >= 0) {
-    return 'idle';
-  }
-
-  if (lastHintIndex >= 0 && lastRunningIndex < 0) {
+  if (hasPromptLine) {
     return 'idle';
   }
 

@@ -7,6 +7,7 @@ import type { Mermaid as MermaidApi } from 'mermaid';
 import type { PanZoom as PanZoomInstance } from 'panzoom';
 
 import type {
+  ChatAttachment,
   ChatMessage,
   ChatMessageBlock,
   MessageStatus,
@@ -784,6 +785,34 @@ function ToolDetailSection({ label, children }: { children: React.ReactNode; lab
   );
 }
 
+function MessageAttachmentGallery({ attachments }: { attachments: ChatAttachment[] }) {
+  if (attachments.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-2">
+      {attachments.map((attachment) => (
+        <div
+          key={attachment.attachmentId}
+          className="overflow-hidden rounded-xl border border-zinc-200 bg-white"
+        >
+          {attachment.previewUrl && attachment.mimeType.startsWith('image/') ? (
+            <img src={attachment.previewUrl} alt={attachment.filename} className="max-h-48 w-auto max-w-full object-contain" />
+          ) : (
+            <div className="flex min-h-20 min-w-40 items-center justify-center px-3 py-4 text-sm text-zinc-500">
+              {attachment.filename}
+            </div>
+          )}
+          <div className="border-t border-zinc-200/80 bg-zinc-50 px-2.5 py-1.5 text-[11px] text-zinc-600">
+            <div className="truncate font-medium text-zinc-700">{attachment.filename}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function hasNonTextBlock(message: ChatMessage): boolean {
   return message.blocks.some((block) => block.type !== 'text');
 }
@@ -835,6 +864,10 @@ function createToolCallIndex(messages: ChatMessage[]): Map<string, ToolCallMeta>
 }
 
 function hasRenderableMessageContent(message: ChatMessage): boolean {
+  if ((message.attachments?.length ?? 0) > 0) {
+    return true;
+  }
+
   return message.blocks.some((block) => {
     if (block.type === 'tool_use') {
       return true;
@@ -1012,7 +1045,7 @@ function isCodexReasoningMessage(message: ChatMessage): boolean {
 }
 
 function MessageContent({ message, toolCallIndex }: { message: ChatMessage; toolCallIndex: Map<string, ToolCallMeta> }) {
-  if (message.blocks.length === 0) {
+  if (message.blocks.length === 0 && (message.attachments?.length ?? 0) === 0) {
     return null;
   }
 
@@ -1020,6 +1053,9 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
 
   return (
     <div className="space-y-2">
+      {message.attachments && message.attachments.length > 0 ? (
+        <MessageAttachmentGallery attachments={message.attachments} />
+      ) : null}
       {message.blocks.map((block, index) => {
         if (block.type === 'text') {
           return (
@@ -1246,38 +1282,10 @@ export function ChatPane({ activeProviderId, connected, hasOlderMessages, messag
     >
       <div className="relative flex min-h-[22rem] min-w-0 flex-1 flex-col overflow-hidden bg-transparent sm:min-h-[24rem] lg:min-h-[28rem] lg:rounded-3xl lg:border lg:border-zinc-200 lg:bg-white lg:shadow-sm">
         <div className="hidden px-3 py-3 sm:px-4 lg:block lg:border-b lg:border-zinc-200">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <h2 className="text-lg font-semibold">Messages</h2>
-            </div>
-            {showOlderMessagesButton ? (
-              <button
-                type="button"
-                onClick={() => {
-                  void handleLoadOlderMessages();
-                }}
-                className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
-                disabled={!connected || olderMessagesLoading}
-              >
-                {olderMessagesLoading ? '加载中...' : '加载更早消息'}
-              </button>
-            ) : null}
+          <div>
+            <h2 className="text-lg font-semibold">Messages</h2>
           </div>
         </div>
-        {showOlderMessagesButton ? (
-          <div className="px-3 pb-2 lg:hidden">
-            <button
-              type="button"
-              onClick={() => {
-                void handleLoadOlderMessages();
-              }}
-              className="rounded-xl border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
-              disabled={!connected || olderMessagesLoading}
-            >
-              {olderMessagesLoading ? '加载中...' : '加载更早消息'}
-            </button>
-          </div>
-        ) : null}
         <div
           ref={messagesRef}
           onScroll={handleMessagesScroll}

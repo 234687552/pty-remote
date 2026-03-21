@@ -16,7 +16,7 @@ import {
 } from '@/lib/workspace.ts';
 import type { ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
-import type { WorkspacePane } from './types.ts';
+import type { ComposerAttachment, SentAttachmentBinding, WorkspacePane } from './types.ts';
 
 interface WorkspaceState {
   error: string;
@@ -24,10 +24,12 @@ interface WorkspaceState {
   mobilePane: WorkspacePane;
   olderMessages: ChatMessage[];
   olderMessagesLoading: boolean;
+  pendingAttachments: ComposerAttachment[];
   projectLoadingId: string | null;
   projectConversationsByKey: Record<string, ProjectConversationEntry[]>;
   projectsRefreshing: boolean;
   prompt: string;
+  sentAttachmentBindingsByConversationId: Record<string, SentAttachmentBinding[]>;
   sidebarToggleTop: number;
   snapshot: RuntimeSnapshot;
   workspaceState: PersistedWorkspaceState;
@@ -73,6 +75,10 @@ type WorkspaceAction =
       value: SetStateAction<boolean>;
     }
   | {
+      type: 'pending-attachments/set';
+      value: SetStateAction<ComposerAttachment[]>;
+    }
+  | {
       type: 'project-loading-id/set';
       value: SetStateAction<string | null>;
     }
@@ -83,6 +89,11 @@ type WorkspaceAction =
   | {
       type: 'prompt/set';
       value: SetStateAction<string>;
+    }
+  | {
+      type: 'sent-attachment-bindings/patched';
+      conversationId: string;
+      updater: (bindings: SentAttachmentBinding[]) => SentAttachmentBinding[];
     }
   | {
       type: 'snapshot/set';
@@ -110,10 +121,12 @@ export interface WorkspaceStore {
   mobilePane: WorkspacePane;
   olderMessages: ChatMessage[];
   olderMessagesLoading: boolean;
+  pendingAttachments: ComposerAttachment[];
   projectLoadingId: string | null;
   projectConversationsByKey: Record<string, ProjectConversationEntry[]>;
   projectsRefreshing: boolean;
   prompt: string;
+  sentAttachmentBindingsByConversationId: Record<string, SentAttachmentBinding[]>;
   sidebarToggleTop: number;
   snapshot: RuntimeSnapshot;
   workspaceState: PersistedWorkspaceState;
@@ -129,6 +142,7 @@ export interface WorkspaceStore {
   setMobilePane: Dispatch<SetStateAction<WorkspacePane>>;
   setOlderMessages: Dispatch<SetStateAction<ChatMessage[]>>;
   setOlderMessagesLoading: Dispatch<SetStateAction<boolean>>;
+  setPendingAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
   setProjectLoadingId: Dispatch<SetStateAction<string | null>>;
   setProjectConversations: (
     projectId: string,
@@ -137,6 +151,10 @@ export interface WorkspaceStore {
   ) => void;
   setProjectsRefreshing: Dispatch<SetStateAction<boolean>>;
   setPrompt: Dispatch<SetStateAction<string>>;
+  setSentAttachmentBindings: (
+    conversationId: string,
+    updater: (bindings: SentAttachmentBinding[]) => SentAttachmentBinding[]
+  ) => void;
   setSidebarToggleTop: Dispatch<SetStateAction<number>>;
   setSnapshot: Dispatch<SetStateAction<RuntimeSnapshot>>;
 }
@@ -186,10 +204,12 @@ function createInitialWorkspaceState(): WorkspaceState {
     mobilePane: 'chat',
     olderMessages: [],
     olderMessagesLoading: false,
+    pendingAttachments: [],
     projectLoadingId: null,
     projectConversationsByKey,
     projectsRefreshing: false,
     prompt: '',
+    sentAttachmentBindingsByConversationId: {},
     sidebarToggleTop: workspaceState.sidebarToggleTop,
     snapshot: createEmptySnapshot(),
     workspaceState
@@ -252,12 +272,29 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       return { ...state, olderMessages: resolveStateUpdate(state.olderMessages, action.value) };
     case 'older-messages-loading/set':
       return { ...state, olderMessagesLoading: resolveStateUpdate(state.olderMessagesLoading, action.value) };
+    case 'pending-attachments/set':
+      return { ...state, pendingAttachments: resolveStateUpdate(state.pendingAttachments, action.value) };
     case 'project-loading-id/set':
       return { ...state, projectLoadingId: resolveStateUpdate(state.projectLoadingId, action.value) };
     case 'projects-refreshing/set':
       return { ...state, projectsRefreshing: resolveStateUpdate(state.projectsRefreshing, action.value) };
     case 'prompt/set':
       return { ...state, prompt: resolveStateUpdate(state.prompt, action.value) };
+    case 'sent-attachment-bindings/patched': {
+      const currentBindings = state.sentAttachmentBindingsByConversationId[action.conversationId] ?? [];
+      const nextBindings = action.updater(currentBindings);
+      if (nextBindings === currentBindings) {
+        return state;
+      }
+
+      return {
+        ...state,
+        sentAttachmentBindingsByConversationId: {
+          ...state.sentAttachmentBindingsByConversationId,
+          [action.conversationId]: nextBindings
+        }
+      };
+    }
     case 'snapshot/set': {
       const nextSnapshot = resolveStateUpdate(state.snapshot, action.value);
       if (!hasRuntimeTargetChanged(state.snapshot, nextSnapshot)) {
@@ -358,6 +395,10 @@ export function useWorkspaceStore(): WorkspaceStore {
     dispatch({ type: 'older-messages-loading/set', value });
   };
 
+  const setPendingAttachments: Dispatch<SetStateAction<ComposerAttachment[]>> = (value) => {
+    dispatch({ type: 'pending-attachments/set', value });
+  };
+
   const setProjectLoadingId: Dispatch<SetStateAction<string | null>> = (value) => {
     dispatch({ type: 'project-loading-id/set', value });
   };
@@ -369,6 +410,13 @@ export function useWorkspaceStore(): WorkspaceStore {
   const setPrompt: Dispatch<SetStateAction<string>> = (value) => {
     dispatch({ type: 'prompt/set', value });
   };
+
+  function setSentAttachmentBindings(
+    conversationId: string,
+    updater: (bindings: SentAttachmentBinding[]) => SentAttachmentBinding[]
+  ): void {
+    dispatch({ type: 'sent-attachment-bindings/patched', conversationId, updater });
+  }
 
   const setSidebarToggleTop: Dispatch<SetStateAction<number>> = (value) => {
     dispatch({ type: 'sidebar-toggle/previewed', value });
@@ -400,10 +448,12 @@ export function useWorkspaceStore(): WorkspaceStore {
     mobilePane: state.mobilePane,
     olderMessages: state.olderMessages,
     olderMessagesLoading: state.olderMessagesLoading,
+    pendingAttachments: state.pendingAttachments,
     projectLoadingId: state.projectLoadingId,
     projectConversationsByKey: state.projectConversationsByKey,
     projectsRefreshing: state.projectsRefreshing,
     prompt: state.prompt,
+    sentAttachmentBindingsByConversationId: state.sentAttachmentBindingsByConversationId,
     sidebarToggleTop: state.sidebarToggleTop,
     snapshot: state.snapshot,
     workspaceState: state.workspaceState,
@@ -419,10 +469,12 @@ export function useWorkspaceStore(): WorkspaceStore {
     setMobilePane,
     setOlderMessages,
     setOlderMessagesLoading,
+    setPendingAttachments,
     setProjectLoadingId,
     setProjectConversations,
     setProjectsRefreshing,
     setPrompt,
+    setSentAttachmentBindings,
     setSidebarToggleTop,
     setSnapshot
   };

@@ -9,8 +9,10 @@ import type {
   ManagedPtyHandleSummary,
   PickProjectDirectoryResultPayload,
   ProjectSessionSummary,
-  SelectConversationResultPayload
+  SelectConversationResultPayload,
+  UploadAttachmentResultPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
+import type { ChatAttachment } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import { PROVIDER_LABELS, type CliDescriptor, type ProviderId, type RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import type { CliSocketController } from '@/hooks/useCliSocket.ts';
@@ -32,6 +34,7 @@ import {
 
 import { selectWorkspaceDerivedState } from './selectors.ts';
 import type { WorkspaceStore } from './store.ts';
+import type { ComposerAttachment } from './types.ts';
 
 export interface ManagedPtyHandleView extends ManagedPtyHandleSummary {
   providerId: ProviderId;
@@ -43,6 +46,7 @@ export interface ManagedPtyHandleView extends ManagedPtyHandleSummary {
 
 export interface WorkspaceController {
   activateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
+  addImageAttachments: (files: File[]) => Promise<void>;
   addProject: (input: { cwd: string; providerId: ProviderId }) => Promise<void>;
   createConversation: (project: ProjectEntry, providerId: ProviderId) => Promise<void>;
   deleteConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
@@ -52,6 +56,7 @@ export interface WorkspaceController {
   listManagedPtyHandles: () => Promise<ManagedPtyHandleView[]>;
   loadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
   pickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
+  removePendingAttachment: (localId: string) => Promise<void>;
   selectCli: (cliId: string | null) => void;
   selectProject: (project: ProjectEntry) => void;
   reorderConversation: (
@@ -60,6 +65,7 @@ export interface WorkspaceController {
     sourceConversationId: string,
     targetConversationId: string
   ) => Promise<void>;
+  sendCommand: CliSocketController['sendCommand'];
   selectProvider: (project: ProjectEntry, providerId: ProviderId) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   stopMessage: () => Promise<void>;
@@ -72,6 +78,118 @@ interface UseWorkspaceControllerParams {
   socketConnected: boolean;
   store: WorkspaceStore;
   terminal: TerminalBridge;
+}
+
+const MAX_IMAGE_UPLOAD_BYTES = 4 * 1024 * 1024;
+const IMAGE_COMPRESSION_THRESHOLD_BYTES = 1024 * 1024;
+const IMAGE_MAX_DIMENSION = 1600;
+const IMAGE_JPEG_QUALITY = 0.82;
+
+function createAttachmentPreviewUrl(file: File): string {
+  return URL.createObjectURL(file);
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      const base64 = result.split(',')[1] ?? '';
+      if (!base64) {
+        reject(new Error('图片读取失败'));
+        return;
+      }
+      resolve(base64);
+    };
+    reader.onerror = () => {
+      reject(reader.error ?? new Error('图片读取失败'));
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImageElement(file: Blob): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const url = URL.createObjectURL(file);
+    image.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('图片加载失败'));
+    };
+    image.src = url;
+  });
+}
+
+async function compressImageIfNeeded(file: File): Promise<File> {
+  if (!file.type.startsWith('image/') || file.size <= IMAGE_COMPRESSION_THRESHOLD_BYTES) {
+    return file;
+  }
+
+  const image = await loadImageElement(file);
+  const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(image.naturalWidth, image.naturalHeight));
+  if (!(scale < 1) && file.size <= IMAGE_COMPRESSION_THRESHOLD_BYTES) {
+    return file;
+  }
+
+  const targetWidth = Math.max(1, Math.round(image.naturalWidth * scale));
+  const targetHeight = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('图片压缩失败');
+  }
+
+  context.drawImage(image, 0, 0, targetWidth, targetHeight);
+  const outputMimeType = file.type === 'image/png' ? 'image/png' : 'image/jpeg';
+  const compressedBlob = await new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          reject(new Error('图片压缩失败'));
+          return;
+        }
+        resolve(blob);
+      },
+      outputMimeType,
+      outputMimeType === 'image/jpeg' ? IMAGE_JPEG_QUALITY : undefined
+    );
+  });
+
+  if (compressedBlob.size >= file.size) {
+    return file;
+  }
+
+  const nextName =
+    outputMimeType === file.type
+      ? file.name
+      : file.name.replace(/\.[^.]+$/, outputMimeType === 'image/jpeg' ? '.jpg' : '.png');
+
+  return new File([compressedBlob], nextName, {
+    type: outputMimeType,
+    lastModified: file.lastModified
+  });
+}
+
+function revokeAttachmentPreview(attachment: Pick<ComposerAttachment, 'previewUrl'>): void {
+  if (!attachment.previewUrl) {
+    return;
+  }
+  URL.revokeObjectURL(attachment.previewUrl);
+}
+
+function buildPromptWithAttachmentPaths(text: string, attachments: ChatAttachment[]): string {
+  const lines = attachments.map((attachment) => `@${attachment.path}`);
+  const trimmedText = text.trim();
+  if (trimmedText) {
+    lines.push('', trimmedText);
+  }
+  return lines.join('\n').trim();
 }
 
 function supportsProvider(cli: CliDescriptor, providerId: ProviderId | null): boolean {
@@ -110,6 +228,8 @@ export function useWorkspaceController({
     { status: 'idle' } | { requestId: number; requestKey: string; requestToken: string; status: 'selecting' }
   >({ status: 'idle' });
   const conversationActivationSeqRef = useRef(0);
+  const pendingAttachmentsRef = useRef(store.pendingAttachments);
+  const sentAttachmentBindingsRef = useRef(store.sentAttachmentBindingsByConversationId);
   const sidebarToggleTopRef = useRef(store.sidebarToggleTop);
 
   const {
@@ -133,7 +253,24 @@ export function useWorkspaceController({
   );
   const activeCliConnected = Boolean(activeCli?.connected);
 
+  pendingAttachmentsRef.current = store.pendingAttachments;
+  sentAttachmentBindingsRef.current = store.sentAttachmentBindingsByConversationId;
   sidebarToggleTopRef.current = store.sidebarToggleTop;
+
+  useEffect(() => {
+    return () => {
+      for (const attachment of pendingAttachmentsRef.current) {
+        revokeAttachmentPreview(attachment);
+      }
+      for (const bindings of Object.values(sentAttachmentBindingsRef.current)) {
+        for (const binding of bindings) {
+          for (const attachment of binding.attachments) {
+            revokeAttachmentPreview(attachment);
+          }
+        }
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!activeConversation || !activeProviderId) {
@@ -172,6 +309,30 @@ export function useWorkspaceController({
       terminal.scheduleResize();
     }
   }, [store.mobilePane, terminal]);
+
+  useEffect(() => {
+    const staleAttachments = store.pendingAttachments.filter((attachment) => attachment.conversationId !== activeConversation?.id);
+    if (staleAttachments.length === 0) {
+      return;
+    }
+
+    store.setPendingAttachments((current) => current.filter((attachment) => attachment.conversationId === activeConversation?.id));
+
+    for (const attachment of staleAttachments) {
+      revokeAttachmentPreview(attachment);
+      if (attachment.status !== 'ready' || !attachment.attachmentId) {
+        continue;
+      }
+      void sendCommand(
+        'delete-attachment',
+        {
+          attachmentId: attachment.attachmentId
+        },
+        attachment.cliId,
+        attachment.providerId
+      ).catch(() => undefined);
+    }
+  }, [activeConversation?.id, sendCommand, store.pendingAttachments]);
 
   useEffect(() => {
     terminal.scheduleResize();
@@ -659,6 +820,151 @@ export function useWorkspaceController({
     }
   }
 
+  async function addImageAttachments(files: File[]): Promise<void> {
+    if (!activeCliId || !activeProject || !activeConversation || !activeProviderId) {
+      store.setError('请先选择一个会话后再插入图片');
+      return;
+    }
+
+    const imageFiles = files.filter((file) => file.type.startsWith('image/'));
+    if (imageFiles.length === 0) {
+      store.setError('只支持插入图片文件');
+      return;
+    }
+
+    for (const originalFile of imageFiles) {
+      let file = originalFile;
+      try {
+        file = await compressImageIfNeeded(originalFile);
+      } catch (compressionError) {
+        store.setError(compressionError instanceof Error ? compressionError.message : '图片压缩失败');
+        continue;
+      }
+
+      if (file.size > MAX_IMAGE_UPLOAD_BYTES) {
+        store.setError('图片不能超过 4MB');
+        continue;
+      }
+
+      const localId = crypto.randomUUID();
+      const previewUrl = createAttachmentPreviewUrl(file);
+      const draftAttachment: ComposerAttachment = {
+        attachmentId: '',
+        cliId: activeCliId,
+        conversationId: activeConversation.id,
+        filename: file.name,
+        localId,
+        mimeType: file.type || 'image/png',
+        path: '',
+        previewUrl,
+        providerId: activeProviderId,
+        size: file.size,
+        status: 'uploading'
+      };
+
+      store.setPendingAttachments((current) => [...current, draftAttachment]);
+
+      try {
+        const contentBase64 = await fileToBase64(file);
+        const result = await sendCommand(
+          'upload-attachment',
+          {
+            contentBase64,
+            conversationKey: activeConversation.conversationKey,
+            cwd: activeProject.cwd,
+            filename: file.name,
+            mimeType: file.type || 'image/png',
+            sessionId: activeConversation.sessionId ?? null,
+            size: file.size
+          },
+          activeCliId,
+          activeProviderId
+        );
+        const payload = result.payload as UploadAttachmentResultPayload | undefined;
+        if (!payload?.attachmentId || !payload.path) {
+          throw new Error('图片上传失败');
+        }
+
+        const attachmentStillTracked = pendingAttachmentsRef.current.some((attachment) => attachment.localId === localId);
+        if (!attachmentStillTracked) {
+          revokeAttachmentPreview(draftAttachment);
+          await sendCommand(
+            'delete-attachment',
+            {
+              attachmentId: payload.attachmentId
+            },
+            activeCliId,
+            activeProviderId
+          );
+          continue;
+        }
+
+        store.setPendingAttachments((current) =>
+          current.map((attachment) =>
+            attachment.localId === localId
+              ? {
+                  ...attachment,
+                  attachmentId: payload.attachmentId,
+                  filename: payload.filename,
+                  mimeType: payload.mimeType,
+                  path: payload.path,
+                  size: payload.size,
+                  status: 'ready'
+                }
+              : attachment
+          )
+        );
+      } catch (uploadError) {
+        const message = uploadError instanceof Error ? uploadError.message : '图片上传失败';
+        const attachmentStillTracked = pendingAttachmentsRef.current.some((attachment) => attachment.localId === localId);
+        if (!attachmentStillTracked) {
+          revokeAttachmentPreview(draftAttachment);
+          continue;
+        }
+
+        store.setPendingAttachments((current) =>
+          current.map((attachment) =>
+            attachment.localId === localId
+              ? {
+                  ...attachment,
+                  error: message,
+                  status: 'error'
+                }
+              : attachment
+          )
+        );
+        store.setError(message);
+      }
+    }
+  }
+
+  async function removePendingAttachment(localId: string): Promise<void> {
+    const targetAttachment = pendingAttachmentsRef.current.find((attachment) => attachment.localId === localId) ?? null;
+    if (!targetAttachment) {
+      return;
+    }
+
+    store.setPendingAttachments((current) => current.filter((attachment) => attachment.localId !== localId));
+    revokeAttachmentPreview(targetAttachment);
+
+    if (targetAttachment.status !== 'ready' || !targetAttachment.attachmentId) {
+      return;
+    }
+
+    try {
+      await sendCommand(
+        'delete-attachment',
+        {
+          attachmentId: targetAttachment.attachmentId
+        },
+        targetAttachment.cliId,
+        targetAttachment.providerId
+      );
+    } catch (deleteError) {
+      store.setError(deleteError instanceof Error ? deleteError.message : '删除图片失败');
+    }
+  }
+
   async function deleteConversation(
     project: ProjectEntry,
     providerId: ProviderId,
@@ -932,19 +1238,51 @@ export function useWorkspaceController({
 
   async function submitPrompt(event: React.FormEvent): Promise<void> {
     event.preventDefault();
-    const content = store.prompt.trim();
-    if (!content) {
-      store.setError('请输入消息');
-      return;
-    }
     if (!activeCliId || !activeProject || !activeConversation || !activeProviderId) {
       store.setError('请先在侧边栏选择一个 project / provider / conversation');
+      return;
+    }
+
+    const pendingAttachments = store.pendingAttachments.filter((attachment) => attachment.conversationId === activeConversation.id);
+    if (pendingAttachments.some((attachment) => attachment.status !== 'ready')) {
+      store.setError('请先等待图片上传完成');
+      return;
+    }
+
+    const readyAttachments: ChatAttachment[] = pendingAttachments.map((attachment) => ({
+      attachmentId: attachment.attachmentId,
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+      path: attachment.path,
+      previewUrl: attachment.previewUrl,
+      size: attachment.size
+    }));
+    const rawText = store.prompt.trim();
+    const content = buildPromptWithAttachmentPaths(rawText, readyAttachments);
+    if (!content) {
+      store.setError('请输入消息');
       return;
     }
 
     try {
       store.setError('');
       await sendCommand('send-message', { content }, activeCliId, activeProviderId);
+      if (readyAttachments.length > 0) {
+        store.setSentAttachmentBindings(activeConversation.id, (current) => [
+          ...current,
+          {
+            attachments: readyAttachments,
+            composedContent: content,
+            conversationId: activeConversation.id,
+            createdAt: new Date().toISOString(),
+            displayText: rawText,
+            id: crypto.randomUUID()
+          }
+        ]);
+      }
+      store.setPendingAttachments((current) =>
+        current.filter((attachment) => attachment.conversationId !== activeConversation.id)
+      );
       store.setPrompt('');
       store.setMobilePane('chat');
     } catch (submitError) {
@@ -994,6 +1332,7 @@ export function useWorkspaceController({
 
   return {
     activateConversation,
+    addImageAttachments,
     addProject,
     createConversation,
     deleteConversation,
@@ -1003,7 +1342,9 @@ export function useWorkspaceController({
     listRecentProjectSessions,
     loadOlderMessages,
     pickProjectDirectory,
+    removePendingAttachment,
     reorderConversation,
+    sendCommand,
     selectCli,
     selectProject,
     selectProvider,

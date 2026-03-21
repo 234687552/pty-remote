@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+
+import type { ComposerAttachment } from '@/features/workspace/types.ts';
 
 interface StatusBadge {
   className: string;
@@ -7,16 +9,22 @@ interface StatusBadge {
 }
 
 interface ComposerProps {
+  attachments: ComposerAttachment[];
   busy: boolean;
+  canAttach: boolean;
+  canCompose: boolean;
   canSend: boolean;
   canStop: boolean;
   cliBadge: StatusBadge;
   conversationBadge: StatusBadge;
   footerErrorText: string;
   prompt: string;
+  slashCommands: string[];
   socketBadge: StatusBadge;
   placeholder: string;
+  onAddImages: (files: File[]) => void;
   onPromptChange: (value: string) => void;
+  onRemoveAttachment: (localId: string) => void;
   onStop: () => void;
   onSubmit: (event: React.FormEvent) => void;
 }
@@ -74,7 +82,10 @@ const COMPOSER_MIN_HEIGHT_PX = 86;
 const COMPOSER_MAX_HEIGHT_PX = 134;
 
 export function Composer({
+  attachments,
   busy,
+  canAttach,
+  canCompose,
   canSend,
   canStop,
   cliBadge,
@@ -82,14 +93,77 @@ export function Composer({
   footerErrorText,
   placeholder,
   prompt,
+  slashCommands,
   socketBadge,
+  onAddImages,
   onPromptChange,
+  onRemoveAttachment,
   onStop,
   onSubmit
 }: ComposerProps) {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const pendingSelectionRef = useRef<number | null>(null);
   const [composerHeight, setComposerHeight] = useState(COMPOSER_MIN_HEIGHT_PX);
   const [promptScrollable, setPromptScrollable] = useState(false);
+  const [selection, setSelection] = useState({ start: prompt.length, end: prompt.length });
+  const [selectedSlashIndex, setSelectedSlashIndex] = useState(0);
+
+  const activeSlashToken = useMemo(() => {
+    if (selection.start !== selection.end) {
+      return null;
+    }
+
+    let tokenStart = selection.start;
+    while (tokenStart > 0 && !/\s/u.test(prompt[tokenStart - 1] ?? '')) {
+      tokenStart -= 1;
+    }
+
+    let tokenEnd = selection.start;
+    while (tokenEnd < prompt.length && !/\s/u.test(prompt[tokenEnd] ?? '')) {
+      tokenEnd += 1;
+    }
+
+    const token = prompt.slice(tokenStart, tokenEnd);
+    if (!token.startsWith('/')) {
+      return null;
+    }
+
+    return {
+      start: tokenStart,
+      end: tokenEnd,
+      query: token.slice(1).toLowerCase()
+    };
+  }, [prompt, selection]);
+
+  const slashSuggestions = useMemo(() => {
+    if (!activeSlashToken) {
+      return [];
+    }
+
+    const query = activeSlashToken.query;
+    if (!query) {
+      return slashCommands;
+    }
+
+    return [...slashCommands]
+      .map((command) => {
+        const lower = command.toLowerCase();
+        let score = Number.POSITIVE_INFINITY;
+        if (lower === query) {
+          score = 0;
+        } else if (lower.startsWith(query)) {
+          score = 1;
+        } else if (lower.includes(query)) {
+          score = 2;
+        }
+
+        return { command, score };
+      })
+      .filter((entry) => Number.isFinite(entry.score))
+      .sort((left, right) => left.score - right.score || left.command.localeCompare(right.command))
+      .map((entry) => entry.command);
+  }, [activeSlashToken, slashCommands]);
 
   useEffect(() => {
     const textarea = promptRef.current;
@@ -117,13 +191,77 @@ export function Composer({
     return () => {
       resizeObserver.disconnect();
     };
+  }, [prompt, attachments.length]);
+
+  useEffect(() => {
+    const selection = pendingSelectionRef.current;
+    const textarea = promptRef.current;
+    if (selection == null || !textarea) {
+      return;
+    }
+
+    pendingSelectionRef.current = null;
+    textarea.focus();
+    textarea.setSelectionRange(selection, selection);
+    setSelection({ start: selection, end: selection });
   }, [prompt]);
+
+  useEffect(() => {
+    if (slashSuggestions.length === 0) {
+      setSelectedSlashIndex(0);
+      return;
+    }
+
+    setSelectedSlashIndex((current) => Math.min(current, slashSuggestions.length - 1));
+  }, [slashSuggestions]);
+
+  function handleImageInputChange(event: React.ChangeEvent<HTMLInputElement>): void {
+    const files = Array.from(event.target.files ?? []);
+    if (files.length > 0) {
+      onAddImages(files);
+    }
+    event.currentTarget.value = '';
+  }
+
+  function insertPromptText(text: string): void {
+    if (!canCompose) {
+      return;
+    }
+
+    const textarea = promptRef.current;
+    const selectionStart = textarea?.selectionStart ?? prompt.length;
+    const selectionEnd = textarea?.selectionEnd ?? prompt.length;
+    const nextPrompt = `${prompt.slice(0, selectionStart)}${text}${prompt.slice(selectionEnd)}`;
+    pendingSelectionRef.current = selectionStart + text.length;
+    onPromptChange(nextPrompt);
+  }
+
+  function applySlashCommand(command: string): void {
+    if (!command || !activeSlashToken) {
+      return;
+    }
+
+    const before = prompt.slice(0, activeSlashToken.start);
+    const after = prompt.slice(activeSlashToken.end);
+    const replacement = after.startsWith(' ') || after.length === 0 ? `/${command} ` : `/${command}`;
+    pendingSelectionRef.current = activeSlashToken.start + replacement.length;
+    onPromptChange(`${before}${replacement}${after}`);
+  }
 
   return (
     <form
       onSubmit={onSubmit}
       className="shrink-0 bg-transparent px-2 py-1 pb-[calc(env(safe-area-inset-bottom)+0.25rem)] md:mt-4 md:px-0 md:py-0"
     >
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        className="hidden"
+        onChange={handleImageInputChange}
+      />
+
       <div className="mb-1 grid grid-cols-3 gap-0.5 px-1 text-[9px] font-medium md:mb-px md:flex md:flex-wrap md:gap-1.5 md:px-0 md:text-[11px]">
         {[conversationBadge, socketBadge, cliBadge].map((badge) => (
           <span
@@ -136,17 +274,140 @@ export function Composer({
       </div>
 
       <div className="relative rounded-[1.5rem] border border-zinc-200/80 bg-zinc-100/90 shadow-[0_1px_0_rgba(255,255,255,0.55)_inset] md:bg-white md:shadow-none">
+        {canCompose && slashSuggestions.length > 0 ? (
+          <div className="absolute inset-x-4 bottom-14 z-20 max-h-56 overflow-y-auto rounded-3xl border border-zinc-200 bg-white p-1 shadow-[0_20px_50px_rgba(15,23,42,0.12)] backdrop-blur">
+            {slashSuggestions.map((command, index) => {
+              const selected = index === selectedSlashIndex;
+              return (
+                <button
+                  key={command}
+                  type="button"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => applySlashCommand(command)}
+                  className={[
+                    'flex w-full items-center justify-between rounded-2xl px-4 py-2 text-left text-sm transition',
+                    selected ? 'bg-zinc-900 text-white' : 'text-zinc-700 hover:bg-zinc-100'
+                  ].join(' ')}
+                >
+                  <span className="font-medium">/{command}</span>
+                  <span className={selected ? 'text-white/65' : 'text-zinc-400'}>↵</span>
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
+
+        {attachments.length > 0 ? (
+          <div className="flex flex-wrap gap-2 px-4 pt-3">
+            {attachments.map((attachment) => (
+              <div
+                key={attachment.localId}
+                className={[
+                  'relative overflow-hidden rounded-2xl border border-zinc-200 bg-white',
+                  attachment.status === 'error' ? 'border-red-200 bg-red-50' : ''
+                ].join(' ')}
+              >
+                <div className="flex h-20 w-20 items-center justify-center overflow-hidden bg-zinc-100">
+                  {attachment.previewUrl ? (
+                    <img src={attachment.previewUrl} alt={attachment.filename} className="h-full w-full object-cover" />
+                  ) : (
+                    <span className="text-xs text-zinc-400">IMG</span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onRemoveAttachment(attachment.localId)}
+                  className="absolute top-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/70 text-white transition hover:bg-black"
+                  aria-label={`删除 ${attachment.filename}`}
+                >
+                  <svg viewBox="0 0 16 16" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+                    <path d="M4 4l8 8M12 4 4 12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                </button>
+                <div className="w-20 px-2 py-1.5">
+                  <div className="truncate text-[10px] font-medium text-zinc-700">{attachment.filename}</div>
+                  <div
+                    className={[
+                      'mt-0.5 text-[10px]',
+                      attachment.status === 'ready'
+                        ? 'text-emerald-600'
+                        : attachment.status === 'error'
+                          ? 'text-red-600'
+                          : 'text-zinc-500'
+                    ].join(' ')}
+                  >
+                    {attachment.status === 'ready' ? '已就绪' : attachment.status === 'error' ? '上传失败' : '上传中'}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+
         <textarea
           ref={promptRef}
           value={prompt}
-          onChange={(event) => onPromptChange(event.target.value)}
+          onChange={(event) => {
+            onPromptChange(event.target.value);
+            setSelection({
+              start: event.target.selectionStart,
+              end: event.target.selectionEnd
+            });
+          }}
           onKeyDown={(event) => {
+            if (slashSuggestions.length > 0) {
+              if (event.key === 'ArrowDown') {
+                event.preventDefault();
+                setSelectedSlashIndex((current) => (current + 1) % slashSuggestions.length);
+                return;
+              }
+
+              if (event.key === 'ArrowUp') {
+                event.preventDefault();
+                setSelectedSlashIndex((current) => (current - 1 + slashSuggestions.length) % slashSuggestions.length);
+                return;
+              }
+
+              if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) {
+                event.preventDefault();
+                applySlashCommand(slashSuggestions[selectedSlashIndex] ?? slashSuggestions[0] ?? '');
+                return;
+              }
+            }
+
             if (event.key !== 'Enter' || event.shiftKey) {
               return;
             }
 
             event.preventDefault();
             event.currentTarget.form?.requestSubmit();
+          }}
+          onPaste={(event) => {
+            const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'));
+            if (imageFiles.length === 0) {
+              return;
+            }
+
+            event.preventDefault();
+            onAddImages(imageFiles);
+          }}
+          onClick={(event) => {
+            setSelection({
+              start: event.currentTarget.selectionStart,
+              end: event.currentTarget.selectionEnd
+            });
+          }}
+          onKeyUp={(event) => {
+            setSelection({
+              start: event.currentTarget.selectionStart,
+              end: event.currentTarget.selectionEnd
+            });
+          }}
+          onSelect={(event) => {
+            setSelection({
+              start: event.currentTarget.selectionStart,
+              end: event.currentTarget.selectionEnd
+            });
           }}
           rows={1}
           placeholder={placeholder}
@@ -156,7 +417,7 @@ export function Composer({
             promptScrollable ? 'overflow-y-auto' : 'overflow-y-hidden'
           ].join(' ')}
           style={{ height: `${composerHeight}px` }}
-          disabled={!canSend}
+          disabled={!canCompose}
         />
         <div className="pointer-events-none absolute inset-x-0 bottom-1 flex items-center justify-between px-5">
           <div className="pointer-events-auto flex items-center gap-2.5 text-zinc-500">
@@ -164,8 +425,25 @@ export function Composer({
               <button
                 key={button.id}
                 type="button"
-                className="flex h-6 min-w-6 items-center justify-center text-zinc-500 transition hover:text-zinc-800"
+                onClick={() => {
+                  if (button.id === 'image') {
+                    fileInputRef.current?.click();
+                    return;
+                  }
+
+                  if (button.id === 'slash') {
+                    insertPromptText('/');
+                  }
+                }}
+                className="flex h-6 min-w-6 items-center justify-center text-zinc-500 transition hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
                 aria-label={button.label}
+                disabled={
+                  button.id === 'image'
+                    ? !canAttach
+                    : button.id === 'slash'
+                      ? !canCompose
+                      : false
+                }
               >
                 {button.icon}
               </button>

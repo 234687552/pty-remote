@@ -321,13 +321,29 @@ export function getMessagePlainText(message: ChatMessage | undefined): string {
 
   return message.blocks
     .map((block) => (block.type === 'text' ? block.text : ''))
+    .join('\n')
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith('@/'))
     .join(' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
+function getMessagePreviewText(message: ChatMessage | undefined): string {
+  const plainText = getMessagePlainText(message);
+  if (plainText) {
+    return plainText;
+  }
+
+  if (!message?.attachments || message.attachments.length === 0) {
+    return '';
+  }
+
+  return message.attachments.map((attachment) => attachment.filename).join(', ');
+}
+
 function getLatestUserTextMessage(messages: ChatMessage[]): ChatMessage | undefined {
-  return [...messages].reverse().find((message) => message.role === 'user' && Boolean(getMessagePlainText(message)));
+  return [...messages].reverse().find((message) => message.role === 'user' && Boolean(getMessagePreviewText(message)));
 }
 
 export function createDraftConversation(
@@ -414,7 +430,7 @@ export function hydrateConversationFromSnapshot(
   messages: ChatMessage[]
 ): ProjectConversationEntry {
   const latestUserMessage = getLatestUserTextMessage(messages);
-  const previewSource = getMessagePlainText(latestUserMessage);
+  const previewSource = getMessagePreviewText(latestUserMessage);
 
   return {
     ...conversation,

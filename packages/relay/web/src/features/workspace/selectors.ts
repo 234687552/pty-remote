@@ -1,4 +1,4 @@
-import { PROVIDER_LABELS, type CliDescriptor, type ChatMessage, type ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import { PROVIDER_LABELS, type ChatMessage, type ChatMessageBlock, type CliDescriptor, type ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import {
   createEmptySnapshot,
@@ -16,7 +16,7 @@ import {
 } from '@/lib/workspace.ts';
 
 import type { WorkspaceStore } from './store.ts';
-import type { StatusBadge } from './types.ts';
+import type { SentAttachmentBinding, StatusBadge } from './types.ts';
 
 export interface WorkspaceDerivedState {
   activeCli: CliDescriptor | null;
@@ -26,6 +26,8 @@ export interface WorkspaceDerivedState {
   activeProviderId: ProviderId | null;
   activeConversation: ProjectConversationEntry | null;
   busy: boolean;
+  canAttach: boolean;
+  canCompose: boolean;
   canSend: boolean;
   canStop: boolean;
   connected: boolean;
@@ -33,7 +35,11 @@ export interface WorkspaceDerivedState {
 }
 
 export interface ComposerViewModel {
+  activeCliId: string | null;
+  activeProviderId: ProviderId | null;
   busy: boolean;
+  canAttach: boolean;
+  canCompose: boolean;
   canSend: boolean;
   canStop: boolean;
   cliBadge: StatusBadge;
@@ -86,6 +92,85 @@ export function selectVisibleMessages(store: WorkspaceStore): ChatMessage[] {
   return mergeChronologicalMessages(store.olderMessages, store.snapshot.messages);
 }
 
+function getUserMessageText(message: ChatMessage): string {
+  return message.blocks
+    .filter((block): block is Extract<ChatMessageBlock, { type: 'text' }> => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n\n')
+    .trim();
+}
+
+function createDisplayTextBlocks(messageId: string, displayText: string): ChatMessageBlock[] {
+  const trimmed = displayText.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  return [
+    {
+      id: `${messageId}:attachment-text:0`,
+      type: 'text',
+      text: trimmed
+    }
+  ];
+}
+
+function bindAttachmentsToMessages(messages: ChatMessage[], bindings: SentAttachmentBinding[]): ChatMessage[] {
+  if (bindings.length === 0) {
+    return messages;
+  }
+
+  const userMessageIndexes = messages
+    .map((message, index) => ({ index, message }))
+    .filter(({ message }) => message.role === 'user');
+  const matchedMessageIndexes = new Map<number, SentAttachmentBinding>();
+  let searchIndex = userMessageIndexes.length - 1;
+
+  for (let bindingIndex = bindings.length - 1; bindingIndex >= 0; bindingIndex -= 1) {
+    const binding = bindings[bindingIndex];
+    for (let userIndex = searchIndex; userIndex >= 0; userIndex -= 1) {
+      const candidate = userMessageIndexes[userIndex];
+      if (!candidate) {
+        continue;
+      }
+
+      if (getUserMessageText(candidate.message) !== binding.composedContent) {
+        continue;
+      }
+
+      matchedMessageIndexes.set(candidate.index, binding);
+      searchIndex = userIndex - 1;
+      break;
+    }
+  }
+
+  const matchedBindingIds = new Set([...matchedMessageIndexes.values()].map((binding) => binding.id));
+  const displayMessages = messages.map((message, index) => {
+    const binding = matchedMessageIndexes.get(index);
+    if (!binding) {
+      return message;
+    }
+
+    return {
+      ...message,
+      blocks: createDisplayTextBlocks(message.id, binding.displayText),
+      attachments: binding.attachments
+    };
+  });
+  const optimisticMessages = bindings
+    .filter((binding) => !matchedBindingIds.has(binding.id))
+    .map((binding) => ({
+      id: `local:attachment-binding:${binding.id}`,
+      role: 'user' as const,
+      blocks: createDisplayTextBlocks(`local:attachment-binding:${binding.id}`, binding.displayText),
+      attachments: binding.attachments,
+      status: 'complete' as const,
+      createdAt: binding.createdAt
+    }));
+
+  return mergeChronologicalMessages(displayMessages, optimisticMessages);
+}
+
 export function selectWorkspaceDerivedState(
   store: WorkspaceStore,
   clis: CliDescriptor[],
@@ -105,12 +190,24 @@ export function selectWorkspaceDerivedState(
     Boolean(activeConversation) &&
     store.snapshot.providerId === activeProviderId &&
     store.snapshot.conversationKey === activeConversation!.conversationKey;
+  const pendingAttachments = activeConversation
+    ? store.pendingAttachments.filter((attachment) => attachment.conversationId === activeConversation.id)
+    : [];
+  const readyAttachmentCount = pendingAttachments.filter((attachment) => attachment.status === 'ready').length;
+  const attachmentsReady = pendingAttachments.every((attachment) => attachment.status === 'ready');
+  const sentAttachmentBindings = activeConversation
+    ? store.sentAttachmentBindingsByConversationId[activeConversation.id] ?? []
+    : [];
   const visibleMessages =
     activeProject && activeConversation && conversationMatchesRuntime
-      ? selectVisibleMessages(store)
+      ? bindAttachmentsToMessages(selectVisibleMessages(store), sentAttachmentBindings)
       : [];
   const connected = Boolean(socketConnected && activeCli?.connected);
   const busy = isBusyStatus(store.snapshot.status);
+  const canCompose = connected && !busy && Boolean(activeProject && activeConversation && activeProviderId);
+  const canAttach = connected && Boolean(activeProject && activeConversation && activeProviderId);
+  const hasDraftContent = Boolean(store.prompt.trim()) || readyAttachmentCount > 0;
+  const canSend = canCompose && attachmentsReady && hasDraftContent;
 
   return {
     activeCli,
@@ -120,7 +217,9 @@ export function selectWorkspaceDerivedState(
     activeProviderId,
     activeConversation,
     busy,
-    canSend: connected && !busy && Boolean(activeProject && activeConversation && activeProviderId),
+    canAttach,
+    canCompose,
+    canSend,
     canStop: connected && busy && Boolean(activeProject && activeConversation && activeProviderId),
     connected,
     visibleMessages
@@ -156,7 +255,19 @@ export function selectMobileProjectTitle(store: WorkspaceStore, clis: CliDescrip
 }
 
 export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescriptor[], socketConnected: boolean): ComposerViewModel {
-  const { activeCli, activeCliId, activeProject, activeProviderId, activeConversation, busy, canSend, canStop, connected } =
+  const {
+    activeCli,
+    activeCliId,
+    activeProject,
+    activeProviderId,
+    activeConversation,
+    busy,
+    canAttach,
+    canCompose,
+    canSend,
+    canStop,
+    connected
+  } =
     selectWorkspaceDerivedState(store, clis, socketConnected);
   const providerLabel = activeProviderId ? PROVIDER_LABELS[activeProviderId] : 'provider';
   const hasCliCommandTimeout =
@@ -215,7 +326,11 @@ export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescript
   const placeholder = '';
 
   return {
+    activeCliId,
+    activeProviderId,
     busy,
+    canAttach,
+    canCompose,
     canSend,
     canStop,
     cliBadge,

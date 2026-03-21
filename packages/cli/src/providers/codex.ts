@@ -3,6 +3,7 @@ import type { ProjectSessionSummary } from '@lzdi/pty-remote-protocol/protocol.t
 import { listCodexRecentSessions } from './codex-history.ts';
 import { CodexManager, type CodexManagerOptions } from './codex-manager.ts';
 import type { ProviderRuntime, ProviderRuntimeCallbacks, ProviderRuntimeSelection } from './provider-runtime.ts';
+import { listProviderSlashCommands } from './slash-commands.ts';
 
 export type CodexProviderRuntimeOptions = CodexManagerOptions;
 
@@ -34,6 +35,9 @@ export function createCodexProviderRuntime(
     },
     getSnapshot() {
       return manager.getSnapshot();
+    },
+    listSlashCommands() {
+      return listProviderSlashCommands('codex');
     },
     listProjectConversations(_projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]> {
       return listCodexRecentSessions(maxSessions, options);

@@ -27,8 +27,10 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Build Web
-        run: npm run build:web
+      - name: Build
+        run: npm run build
 
-      - name: Publish
-        run: npm publish --access public
+      - name: Publish Public Workspaces
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm run release:publish

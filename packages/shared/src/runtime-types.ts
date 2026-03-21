@@ -10,6 +10,11 @@ export const PROVIDER_LABELS: Record<ProviderId, string> = {
 
 export const PROVIDER_ORDER: ProviderId[] = ['claude', 'codex'];
 
+export const BUILTIN_SLASH_COMMANDS: Record<ProviderId, string[]> = {
+  claude: ['clear', 'compact', 'context', 'cost', 'doctor', 'help', 'plan', 'stats', 'status'],
+  codex: ['review', 'new', 'compat', 'undo', 'diff', 'status']
+};
+
 export interface TextChatMessageBlock {
   id: string;
   type: 'text';
@@ -34,10 +39,20 @@ export interface ToolResultChatMessageBlock {
 
 export type ChatMessageBlock = TextChatMessageBlock | ToolUseChatMessageBlock | ToolResultChatMessageBlock;
 
+export interface ChatAttachment {
+  attachmentId: string;
+  filename: string;
+  mimeType: string;
+  path: string;
+  size: number;
+  previewUrl?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
   blocks: ChatMessageBlock[];
+  attachments?: ChatAttachment[];
   status: MessageStatus;
   createdAt: string;
 }
