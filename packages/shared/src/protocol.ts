@@ -53,7 +53,6 @@ export type CliCommandName =
   | 'stop-message'
   | 'reset-session'
   | 'get-runtime-snapshot'
-  | 'get-older-messages'
   | 'pick-project-directory'
   | 'list-project-conversations'
   | 'list-managed-pty-handles'
@@ -79,10 +78,6 @@ export interface CliCommandPayloadMap {
   'stop-message': Record<string, never>;
   'reset-session': Record<string, never>;
   'get-runtime-snapshot': Record<string, never>;
-  'get-older-messages': {
-    beforeMessageId?: string;
-    maxMessages?: number;
-  };
   'pick-project-directory': Record<string, never>;
   'list-project-conversations': {
     cwd: string;
@@ -107,14 +102,6 @@ export interface CliCommandPayloadMap {
 
 export interface GetRuntimeSnapshotResultPayload {
   snapshot: RuntimeSnapshot;
-}
-
-export interface GetOlderMessagesResultPayload {
-  messages: ChatMessage[];
-  providerId: ProviderId | null;
-  conversationKey: string | null;
-  sessionId: string | null;
-  hasOlderMessages: boolean;
 }
 
 export interface PickProjectDirectoryResultPayload {
@@ -164,7 +151,6 @@ export interface CliCommandResultPayloadMap {
   'stop-message': null;
   'reset-session': null;
   'get-runtime-snapshot': GetRuntimeSnapshotResultPayload;
-  'get-older-messages': GetOlderMessagesResultPayload;
   'pick-project-directory': PickProjectDirectoryResultPayload;
   'list-project-conversations': ListProjectSessionsResultPayload;
   'list-managed-pty-handles': ListManagedPtyHandlesResultPayload;

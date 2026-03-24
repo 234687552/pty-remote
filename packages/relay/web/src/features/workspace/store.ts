@@ -4,7 +4,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { MessagesUpsertPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ChatMessage, RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
-import { createEmptySnapshot, mergeChronologicalMessages } from '@/lib/runtime.ts';
+import { createEmptySnapshot } from '@/lib/runtime.ts';
 import {
   getProjectProviderKey,
   loadProjectConversationsState,
@@ -20,10 +20,7 @@ import type { ComposerAttachment, SentAttachmentBinding, WorkspacePane } from '.
 
 interface WorkspaceState {
   error: string;
-  hasOlderMessages: boolean;
   mobilePane: WorkspacePane;
-  olderMessages: ChatMessage[];
-  olderMessagesLoading: boolean;
   pendingAttachments: ComposerAttachment[];
   projectLoadingId: string | null;
   projectConversationsByKey: Record<string, ProjectConversationEntry[]>;
@@ -59,20 +56,8 @@ type WorkspaceAction =
       value: SetStateAction<string>;
     }
   | {
-      type: 'has-older-messages/set';
-      value: SetStateAction<boolean>;
-    }
-  | {
       type: 'mobile-pane/set';
       value: SetStateAction<WorkspacePane>;
-    }
-  | {
-      type: 'older-messages/set';
-      value: SetStateAction<ChatMessage[]>;
-    }
-  | {
-      type: 'older-messages-loading/set';
-      value: SetStateAction<boolean>;
     }
   | {
       type: 'pending-attachments/set';
@@ -108,19 +93,11 @@ type WorkspaceAction =
   | {
       type: 'runtime/messages-upserted';
       payload: MessagesUpsertPayload;
-    }
-  | {
-      type: 'runtime/older-messages-merged';
-      hasOlderMessages: boolean;
-      messages: ChatMessage[];
     };
 
 export interface WorkspaceStore {
   error: string;
-  hasOlderMessages: boolean;
   mobilePane: WorkspacePane;
-  olderMessages: ChatMessage[];
-  olderMessagesLoading: boolean;
   pendingAttachments: ComposerAttachment[];
   projectLoadingId: string | null;
   projectConversationsByKey: Record<string, ProjectConversationEntry[]>;
@@ -133,15 +110,11 @@ export interface WorkspaceStore {
   applyMessagesUpsert: (payload: MessagesUpsertPayload) => void;
   commitSidebarToggleTop: (value: number) => void;
   dispatch: Dispatch<WorkspaceAction>;
-  mergeOlderMessages: (messages: ChatMessage[], hasOlderMessages: boolean) => void;
   patchWorkspace: (updater: (current: PersistedWorkspaceState) => PersistedWorkspaceState) => void;
   resetRuntimeForCliChange: () => void;
   resetRuntimeForDraftThread: () => void;
   setError: Dispatch<SetStateAction<string>>;
-  setHasOlderMessages: Dispatch<SetStateAction<boolean>>;
   setMobilePane: Dispatch<SetStateAction<WorkspacePane>>;
-  setOlderMessages: Dispatch<SetStateAction<ChatMessage[]>>;
-  setOlderMessagesLoading: Dispatch<SetStateAction<boolean>>;
   setPendingAttachments: Dispatch<SetStateAction<ComposerAttachment[]>>;
   setProjectLoadingId: Dispatch<SetStateAction<string | null>>;
   setProjectConversations: (
@@ -197,13 +170,10 @@ function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPa
 
 function createInitialWorkspaceState(): WorkspaceState {
   const workspaceState = loadWorkspaceState();
-  const projectConversationsByKey = loadProjectConversationsState(workspaceState.projects);
+  const projectConversationsByKey = loadProjectConversationsState();
   return {
     error: '',
-    hasOlderMessages: false,
     mobilePane: 'chat',
-    olderMessages: [],
-    olderMessagesLoading: false,
     pendingAttachments: [],
     projectLoadingId: null,
     projectConversationsByKey,
@@ -264,14 +234,8 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
     }
     case 'error/set':
       return { ...state, error: resolveStateUpdate(state.error, action.value) };
-    case 'has-older-messages/set':
-      return { ...state, hasOlderMessages: resolveStateUpdate(state.hasOlderMessages, action.value) };
     case 'mobile-pane/set':
       return { ...state, mobilePane: resolveStateUpdate(state.mobilePane, action.value) };
-    case 'older-messages/set':
-      return { ...state, olderMessages: resolveStateUpdate(state.olderMessages, action.value) };
-    case 'older-messages-loading/set':
-      return { ...state, olderMessagesLoading: resolveStateUpdate(state.olderMessagesLoading, action.value) };
     case 'pending-attachments/set':
       return { ...state, pendingAttachments: resolveStateUpdate(state.pendingAttachments, action.value) };
     case 'project-loading-id/set':
@@ -303,46 +267,26 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
 
       return {
         ...state,
-        snapshot: nextSnapshot,
-        olderMessages: [],
-        hasOlderMessages: nextSnapshot.hasOlderMessages,
-        olderMessagesLoading: false
+        snapshot: nextSnapshot
       };
     }
     case 'runtime/reset-for-cli-change':
       return {
         ...state,
-        snapshot: createEmptySnapshot(),
-        olderMessages: [],
-        hasOlderMessages: false,
-        olderMessagesLoading: false
+        snapshot: createEmptySnapshot()
       };
     case 'runtime/reset-for-draft-thread':
       return {
         ...state,
-        snapshot: createEmptySnapshot(),
-        olderMessages: [],
-        hasOlderMessages: false,
-        olderMessagesLoading: false
+        snapshot: createEmptySnapshot()
       };
     case 'runtime/messages-upserted': {
       const nextSnapshot = applyMessagesUpsert(state.snapshot, action.payload);
-      const runtimeTargetChanged = hasRuntimeTargetChanged(state.snapshot, nextSnapshot);
       return {
         ...state,
-        snapshot: nextSnapshot,
-        olderMessages: runtimeTargetChanged ? [] : state.olderMessages,
-        olderMessagesLoading: runtimeTargetChanged ? false : state.olderMessagesLoading,
-        hasOlderMessages:
-          runtimeTargetChanged || state.olderMessages.length === 0 ? action.payload.hasOlderMessages : state.hasOlderMessages
+        snapshot: nextSnapshot
       };
     }
-    case 'runtime/older-messages-merged':
-      return {
-        ...state,
-        olderMessages: mergeChronologicalMessages(action.messages, state.olderMessages),
-        hasOlderMessages: action.hasOlderMessages
-      };
     default:
       return state;
   }
@@ -379,20 +323,8 @@ export function useWorkspaceStore(): WorkspaceStore {
     dispatch({ type: 'error/set', value });
   };
 
-  const setHasOlderMessages: Dispatch<SetStateAction<boolean>> = (value) => {
-    dispatch({ type: 'has-older-messages/set', value });
-  };
-
   const setMobilePane: Dispatch<SetStateAction<WorkspacePane>> = (value) => {
     dispatch({ type: 'mobile-pane/set', value });
-  };
-
-  const setOlderMessages: Dispatch<SetStateAction<ChatMessage[]>> = (value) => {
-    dispatch({ type: 'older-messages/set', value });
-  };
-
-  const setOlderMessagesLoading: Dispatch<SetStateAction<boolean>> = (value) => {
-    dispatch({ type: 'older-messages-loading/set', value });
   };
 
   const setPendingAttachments: Dispatch<SetStateAction<ComposerAttachment[]>> = (value) => {
@@ -438,16 +370,9 @@ export function useWorkspaceStore(): WorkspaceStore {
     dispatch({ type: 'runtime/messages-upserted', payload });
   }
 
-  function mergeOlderMessages(messages: ChatMessage[], hasOlderMessages: boolean): void {
-    dispatch({ type: 'runtime/older-messages-merged', messages, hasOlderMessages });
-  }
-
   return {
     error: state.error,
-    hasOlderMessages: state.hasOlderMessages,
     mobilePane: state.mobilePane,
-    olderMessages: state.olderMessages,
-    olderMessagesLoading: state.olderMessagesLoading,
     pendingAttachments: state.pendingAttachments,
     projectLoadingId: state.projectLoadingId,
     projectConversationsByKey: state.projectConversationsByKey,
@@ -460,15 +385,11 @@ export function useWorkspaceStore(): WorkspaceStore {
     applyMessagesUpsert: applyRuntimeMessagesUpsert,
     commitSidebarToggleTop,
     dispatch,
-    mergeOlderMessages,
     patchWorkspace,
     resetRuntimeForCliChange,
     resetRuntimeForDraftThread,
     setError,
-    setHasOlderMessages,
     setMobilePane,
-    setOlderMessages,
-    setOlderMessagesLoading,
     setPendingAttachments,
     setProjectLoadingId,
     setProjectConversations,

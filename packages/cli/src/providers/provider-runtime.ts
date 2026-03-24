@@ -1,5 +1,4 @@
 import type {
-  GetOlderMessagesResultPayload,
   ManagedPtyHandleSummary,
   ProviderRuntimeRegistration,
   ProjectSessionSummary,
@@ -43,7 +42,6 @@ export interface ProviderRuntime {
   }): Promise<void>;
   cleanupProject(cwd: string): Promise<void>;
   dispatchMessage(content: string): Promise<void>;
-  getOlderMessages(beforeMessageId?: string, maxMessages?: number): Promise<GetOlderMessagesResultPayload>;
   getRegistrationPayload(): ProviderRuntimeRegistration;
   getSnapshot(): RuntimeSnapshot;
   listSlashCommands(): Promise<string[]>;

@@ -1,7 +1,6 @@
 import type { ChatMessage, RuntimeSnapshot, RuntimeStatus } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 export const MOBILE_TERMINAL_BREAKPOINT = 768;
-export const MOBILE_TERMINAL_MIN_COLS = 80;
 
 export function createEmptySnapshot(): RuntimeSnapshot {
   return {

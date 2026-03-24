@@ -11,11 +11,12 @@ import type { WorkspaceStore } from '@/features/workspace/store.ts';
 interface ComposerFeatureProps {
   clis: CliDescriptor[];
   controller: WorkspaceController;
+  onComposerHeightChange?: (height: number) => void;
   socketConnected: boolean;
   store: WorkspaceStore;
 }
 
-export function ComposerFeature({ clis, controller, socketConnected, store }: ComposerFeatureProps) {
+export function ComposerFeature({ clis, controller, onComposerHeightChange, socketConnected, store }: ComposerFeatureProps) {
   const viewModel = selectComposerViewModel(store, clis, socketConnected);
   const [slashCommands, setSlashCommands] = useState<string[]>([]);
 
@@ -62,6 +63,7 @@ export function ComposerFeature({ clis, controller, socketConnected, store }: Co
       cliBadge={viewModel.cliBadge}
       conversationBadge={viewModel.conversationBadge}
       footerErrorText={viewModel.footerErrorText}
+      onComposerHeightChange={onComposerHeightChange}
       placeholder={viewModel.placeholder}
       prompt={store.prompt}
       slashCommands={slashCommands}

@@ -1,3 +1,4 @@
+import type { MessagesUpsertPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ChatMessage, ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import { getUtf8ByteLength } from '@/lib/runtime.ts';
 
@@ -158,6 +159,38 @@ export function updateCachedLastSeq(
     sessionId: sessionId ?? existing?.sessionId ?? null,
     messages: existing?.messages ?? [],
     lastSeq,
+    updatedAt: Date.now()
+  };
+  cache.order = [cacheKey, ...cache.order.filter((key) => key !== cacheKey)];
+  writeCache(cache);
+}
+
+export function applyCachedMessagesUpsert(payload: MessagesUpsertPayload): void {
+  if (!payload.providerId) {
+    return;
+  }
+
+  const cacheKey = resolveConversationCacheKey(payload.providerId, payload.conversationKey, payload.sessionId);
+  if (!cacheKey) {
+    return;
+  }
+
+  const cache = readCache();
+  const existing = cache.entries[cacheKey];
+  const messagesById = new Map((existing?.messages ?? []).map((message) => [message.id, message]));
+  for (const message of payload.upserts) {
+    messagesById.set(message.id, message);
+  }
+
+  cache.entries[cacheKey] = {
+    cacheKey,
+    providerId: payload.providerId,
+    conversationKey: payload.conversationKey,
+    sessionId: payload.sessionId,
+    messages: payload.recentMessageIds
+      .map((messageId) => messagesById.get(messageId))
+      .filter(Boolean) as ChatMessage[],
+    lastSeq: payload.seq ?? existing?.lastSeq ?? null,
     updatedAt: Date.now()
   };
   cache.order = [cacheKey, ...cache.order.filter((key) => key !== cacheKey)];

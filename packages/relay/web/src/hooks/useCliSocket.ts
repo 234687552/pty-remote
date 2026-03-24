@@ -74,33 +74,16 @@ export function useCliSocket({
   const onTerminalFramePatchRef = useRef(onTerminalFramePatch);
   const sendCommandRef = useRef<CliSocketController['sendCommand'] | null>(null);
 
-  useEffect(() => {
-    activeCliIdRef.current = activeCliId ?? null;
-  }, [activeCliId]);
-
-  useEffect(() => {
-    activeProviderIdRef.current = activeProviderId ?? null;
-  }, [activeProviderId]);
-
-  useEffect(() => {
-    activeConversationKeyRef.current = activeConversationKey ?? null;
-  }, [activeConversationKey]);
-
-  useEffect(() => {
-    activeSessionIdRef.current = activeSessionId ?? null;
-  }, [activeSessionId]);
-
-  useEffect(() => {
-    terminalEnabledRef.current = Boolean(terminalEnabled);
-  }, [terminalEnabled]);
-
-  useEffect(() => {
-    onConnectRef.current = onConnect;
-    onDisconnectRef.current = onDisconnect;
-    onSnapshotRef.current = onSnapshot;
-    onMessagesUpsertRef.current = onMessagesUpsert;
-    onTerminalFramePatchRef.current = onTerminalFramePatch;
-  }, [onConnect, onDisconnect, onMessagesUpsert, onSnapshot, onTerminalFramePatch]);
+  activeCliIdRef.current = activeCliId ?? null;
+  activeProviderIdRef.current = activeProviderId ?? null;
+  activeConversationKeyRef.current = activeConversationKey ?? null;
+  activeSessionIdRef.current = activeSessionId ?? null;
+  terminalEnabledRef.current = Boolean(terminalEnabled);
+  onConnectRef.current = onConnect;
+  onDisconnectRef.current = onDisconnect;
+  onSnapshotRef.current = onSnapshot;
+  onMessagesUpsertRef.current = onMessagesUpsert;
+  onTerminalFramePatchRef.current = onTerminalFramePatch;
 
   useEffect(() => {
     function emitRuntimeSubscription(socket: Socket | null): void {
@@ -154,6 +137,9 @@ export function useCliSocket({
       if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
         return;
       }
+      if (activeConversationKeyRef.current && payload.snapshot.conversationKey !== activeConversationKeyRef.current) {
+        return;
+      }
       onSnapshotRef.current?.(payload.snapshot);
     });
 
@@ -161,11 +147,17 @@ export function useCliSocket({
       if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
         return;
       }
+      if (activeConversationKeyRef.current && payload.conversationKey !== activeConversationKeyRef.current) {
+        return;
+      }
       onMessagesUpsertRef.current?.(payload);
     });
 
     socket.on('terminal:frame-patch', (payload: TerminalFramePatchPayload) => {
       if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
+        return;
+      }
+      if (activeConversationKeyRef.current && payload.conversationKey !== activeConversationKeyRef.current) {
         return;
       }
       onTerminalFramePatchRef.current?.(payload);

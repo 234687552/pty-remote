@@ -2,7 +2,6 @@ import { promises as fs, watch as watchFs, type FSWatcher } from 'node:fs';
 import path from 'node:path';
 
 import type {
-  GetOlderMessagesResultPayload,
   ManagedPtyHandleSummary,
   MessagesUpsertPayload,
   SelectConversationResultPayload,
@@ -45,7 +44,6 @@ export interface CodexManagerOptions extends CodexHistoryOptions {
   jsonlRefreshDebounceMs: number;
   snapshotEmitDebounceMs: number;
   snapshotMessagesMax: number;
-  olderMessagesPageMax: number;
   gcIntervalMs: number;
   detachedDraftTtlMs: number;
   detachedJsonlMissingTtlMs: number;
@@ -205,8 +203,6 @@ export class CodexManager {
   private jsonlRefreshTimer: NodeJS.Timeout | null = null;
 
   private jsonlRefreshDueAt: number | null = null;
-
-  private jsonlRefreshReason: string | null = null;
 
   private snapshotEmitTimer: NodeJS.Timeout | null = null;
 
@@ -455,36 +451,6 @@ export class CodexManager {
     for (const handle of matches) {
       this.destroyHandle(handle, 'cleanup-conversation');
     }
-  }
-
-  async getOlderMessages(beforeMessageId?: string, maxMessages = this.options.olderMessagesPageMax): Promise<GetOlderMessagesResultPayload> {
-    await this.refreshActiveMessages();
-    const handle = this.getActiveHandle();
-    if (!handle) {
-      return {
-        messages: [],
-        providerId: null,
-        conversationKey: null,
-        sessionId: null,
-        hasOlderMessages: false
-      };
-    }
-
-    const normalizedMaxMessages = Number.isFinite(maxMessages)
-      ? Math.max(1, Math.min(Math.floor(maxMessages), this.options.olderMessagesPageMax))
-      : this.options.olderMessagesPageMax;
-    const allMessages = handle.runtime.allMessages;
-    const boundaryIndex = beforeMessageId ? allMessages.findIndex((message) => message.id === beforeMessageId) : allMessages.length;
-    const end = boundaryIndex >= 0 ? boundaryIndex : allMessages.length;
-    const start = Math.max(0, end - normalizedMaxMessages);
-
-    return {
-      messages: cloneValue(allMessages.slice(start, end)),
-      providerId: this.providerId,
-      conversationKey: handle.threadKey,
-      sessionId: handle.sessionId,
-      hasOlderMessages: start > 0
-    };
   }
 
   async shutdown(): Promise<void> {
@@ -1002,7 +968,7 @@ export class CodexManager {
 
   private scheduleJsonlRefresh(
     delayMs = this.options.jsonlRefreshDebounceMs,
-    reason = 'unspecified'
+    _reason = 'unspecified'
   ): void {
     const now = Date.now();
     const normalizedDelayMs = Math.max(0, delayMs);
@@ -1018,11 +984,9 @@ export class CodexManager {
     }
 
     this.jsonlRefreshDueAt = nextDueAt;
-    this.jsonlRefreshReason = reason;
     this.jsonlRefreshTimer = setTimeout(() => {
       this.jsonlRefreshTimer = null;
       this.jsonlRefreshDueAt = null;
-      this.jsonlRefreshReason = null;
       const handle = this.getActiveHandle();
       if (!handle) {
         return;
@@ -1152,7 +1116,6 @@ export class CodexManager {
         clearTimeout(this.jsonlRefreshTimer);
         this.jsonlRefreshTimer = null;
         this.jsonlRefreshDueAt = null;
-        this.jsonlRefreshReason = null;
       }
       this.emitSnapshotNow();
     }

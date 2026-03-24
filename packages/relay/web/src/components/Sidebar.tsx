@@ -23,6 +23,7 @@ interface SidebarProps {
   onActivateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => void;
   onCreateConversation: (project: ProjectEntry, providerId: ProviderId) => Promise<void>;
   onDeleteConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
+  onRefreshConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
   onImportConversationFromSession: (
     providerId: ProviderId,
     session: ProjectSessionSummary
@@ -48,7 +49,7 @@ interface SidebarProps {
   onSelectProject: (project: ProjectEntry) => void;
 }
 
-const SWIPE_DELETE_ACTION_WIDTH = 82;
+const SWIPE_ACTION_WIDTH = 96;
 const DELETE_LONG_PRESS_DELAY_MS = 420;
 const LONG_PRESS_MOVE_THRESHOLD = 10;
 const RECENT_HISTORY_TOP_K = 12;
@@ -140,6 +141,7 @@ export function Sidebar({
   onActivateConversation,
   onCreateConversation,
   onDeleteConversation,
+  onRefreshConversation,
   onImportConversationFromSession,
   onListManagedPtyHandles,
   onPickProjectDirectory,
@@ -148,7 +150,6 @@ export function Sidebar({
   onSelectCli,
   onSelectProject
 }: SidebarProps) {
-  const [createConversationPending, setCreateConversationPending] = useState(false);
   const [createConversationDialogProject, setCreateConversationDialogProject] = useState<ProjectEntry | null>(null);
   const [createConversationDialogProviderId, setCreateConversationDialogProviderId] = useState<ProviderId>('claude');
   const [createConversationDialogSubmitting, setCreateConversationDialogSubmitting] = useState(false);
@@ -184,6 +185,7 @@ export function Sidebar({
     }[]
   >([]);
   const [deleteConversationPendingId, setDeleteConversationPendingId] = useState<string | null>(null);
+  const [refreshConversationPendingId, setRefreshConversationPendingId] = useState<string | null>(null);
   const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
   const [openSwipeRowKey, setOpenSwipeRowKey] = useState<string | null>(null);
   const longPressRef = useRef<{
@@ -195,8 +197,6 @@ export function Sidebar({
     triggered: boolean;
   } | null>(null);
   const suppressClickRowKeyRef = useRef<string | null>(null);
-  const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
-
   const connectedProviderIds = useMemo(
     () =>
       ALL_PROVIDERS.filter((providerId) =>
@@ -305,7 +305,7 @@ export function Sidebar({
   );
 
   function clampSwipeOffset(offset: number): number {
-    return Math.max(0, Math.min(SWIPE_DELETE_ACTION_WIDTH, Math.round(offset)));
+    return Math.max(0, Math.min(SWIPE_ACTION_WIDTH, Math.round(offset)));
   }
 
   function setSwipeOffset(rowKey: string, nextOffset: number): void {
@@ -342,8 +342,8 @@ export function Sidebar({
   function openSwipeRow(rowKey: string): void {
     setSwipeOffsets((current) => {
       const next: Record<string, number> = {};
-      next[rowKey] = SWIPE_DELETE_ACTION_WIDTH;
-      if (current[rowKey] === SWIPE_DELETE_ACTION_WIDTH && Object.keys(current).length === 1) {
+      next[rowKey] = SWIPE_ACTION_WIDTH;
+      if (current[rowKey] === SWIPE_ACTION_WIDTH && Object.keys(current).length === 1) {
         return current;
       }
       return next;
@@ -565,26 +565,6 @@ export function Sidebar({
     }
 
     closeMobileSidebar();
-  }
-
-  async function handlePrimaryAction(): Promise<void> {
-    if (!createProviderId || createConversationPending) {
-      return;
-    }
-
-    closeAllSwipeRows();
-    setCreateConversationPending(true);
-    try {
-      if (!activeProject) {
-        openCreateProjectDialog();
-        return;
-      }
-
-      await onCreateConversation(activeProject, createProviderId);
-      closeMobileSidebar();
-    } finally {
-      setCreateConversationPending(false);
-    }
   }
 
   function openCreateConversationDialog(project: ProjectEntry): void {
@@ -901,11 +881,15 @@ export function Sidebar({
                       const conversationSwipeRowKey = `conversation:${conversation.id}`;
                       const conversationSwipeOffset = swipeOffsets[conversationSwipeRowKey] ?? 0;
                       const conversationDeleteVisible =
-                        conversationSwipeOffset > 0 || deleteConversationPendingId === conversation.id;
+                        conversationSwipeOffset > 0 ||
+                        deleteConversationPendingId === conversation.id ||
+                        refreshConversationPendingId === conversation.id;
                       const isActiveConversation =
                         isActiveProject &&
                         conversation.providerId === activeProviderId &&
                         conversation.id === activeConversationId;
+                      const conversationActionPending =
+                        deleteConversationPendingId === conversation.id || refreshConversationPendingId === conversation.id;
                       return (
                         <div
                           key={conversation.id}
@@ -913,10 +897,47 @@ export function Sidebar({
                         >
                           <div
                             className={[
-                              'absolute inset-y-0 right-0 flex items-center pr-1.5 transition-opacity',
+                              'absolute inset-y-0 right-0 flex items-center gap-2 pr-1.5 transition-opacity',
                               conversationDeleteVisible ? 'opacity-100' : 'pointer-events-none opacity-0'
                             ].join(' ')}
                           >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                closeAllSwipeRows();
+                                setRefreshConversationPendingId(conversation.id);
+                                void onRefreshConversation(project, conversation.providerId, conversation).finally(() => {
+                                  setRefreshConversationPendingId((current) =>
+                                    current === conversation.id ? null : current
+                                  );
+                                });
+                              }}
+                              disabled={conversationActionPending}
+                              aria-label="重刷会话"
+                              title={refreshConversationPendingId === conversation.id ? '重刷中' : '重刷会话'}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500 text-white transition hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              <svg
+                                viewBox="0 0 20 20"
+                                fill="none"
+                                aria-hidden="true"
+                                className={`h-4 w-4 ${refreshConversationPendingId === conversation.id ? 'animate-spin' : ''}`}
+                              >
+                                <path
+                                  d="M16 10a6 6 0 1 1-1.73-4.22"
+                                  stroke="currentColor"
+                                  strokeWidth="1.7"
+                                  strokeLinecap="round"
+                                />
+                                <path
+                                  d="M16 4.8v3.8h-3.8"
+                                  stroke="currentColor"
+                                  strokeWidth="1.7"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                              </svg>
+                            </button>
                             <button
                               type="button"
                               onClick={() => {
@@ -926,12 +947,21 @@ export function Sidebar({
                                   setDeleteConversationPendingId((current) => (current === conversation.id ? null : current));
                                 });
                               }}
-                              disabled={
-                                deleteConversationPendingId !== null
-                              }
-                              className="inline-flex h-8 items-center rounded-lg bg-red-500 px-3 text-[11px] font-medium text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-50"
+                              disabled={conversationActionPending}
+                              aria-label="删除会话"
+                              title={deleteConversationPendingId === conversation.id ? '删除中' : '删除会话'}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-red-500 text-white transition hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-50"
                             >
-                              {deleteConversationPendingId === conversation.id ? '删除中' : '删除'}
+                              <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                                <path
+                                  d="M5.8 6.3h8.4M8 6.3V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.3m-5.7 0 0.55 8.1a1 1 0 0 0 1 .94h4.24a1 1 0 0 0 1-.94l0.55-8.1"
+                                  stroke="currentColor"
+                                  strokeWidth="1.7"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                />
+                                <path d="M8.8 9.1v4.2M11.2 9.1v4.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                              </svg>
                             </button>
                           </div>
                           <div

@@ -8,6 +8,7 @@ import type { MobileJumpControls, WorkspacePane } from '@/features/workspace/typ
 
 interface HeaderFeatureProps {
   clis: CliDescriptor[];
+  composerDockHeight: number;
   jumpControls: MobileJumpControls | null;
   mobilePane: WorkspacePane;
   mobileSidebarOpen: boolean;
@@ -20,6 +21,7 @@ interface HeaderFeatureProps {
 
 export function HeaderFeature({
   clis,
+  composerDockHeight,
   jumpControls,
   mobilePane,
   mobileSidebarOpen,
@@ -35,6 +37,7 @@ export function HeaderFeature({
   return (
     <AppHeader
       activeProviderId={store.workspaceState.activeProviderId}
+      composerDockHeight={composerDockHeight}
       jumpControls={jumpControls}
       mobileAgentLabel={activeProviderLabel}
       mobilePane={mobilePane}

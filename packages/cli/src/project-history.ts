@@ -41,26 +41,6 @@ function getLatestUserTextMessage(messages: ChatMessage[]): ChatMessage | undefi
   return [...messages].reverse().find((message) => message.role === 'user' && Boolean(getUserMessageText(message)));
 }
 
-function getMessagePreview(message: ChatMessage | undefined): string {
-  if (!message) {
-    return '';
-  }
-
-  const text = message.blocks
-    .map((block) => {
-      if (block.type === 'text') {
-        return block.text;
-      }
-      if (block.type === 'tool_use') {
-        return `${block.toolName} ${block.input}`;
-      }
-      return block.content;
-    })
-    .join(' ');
-
-  return normalizePreview(text);
-}
-
 function compactTitle(text: string): string {
   if (text.length <= 44) {
     return text;

@@ -8,8 +8,6 @@ export const PROVIDER_LABELS: Record<ProviderId, string> = {
   codex: 'codex'
 };
 
-export const PROVIDER_ORDER: ProviderId[] = ['claude', 'codex'];
-
 export const BUILTIN_SLASH_COMMANDS: Record<ProviderId, string[]> = {
   claude: ['clear', 'compact', 'context', 'cost', 'doctor', 'help', 'plan', 'stats', 'status'],
   codex: ['review', 'new', 'compat', 'undo', 'diff', 'status']

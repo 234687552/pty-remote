@@ -6,6 +6,7 @@ import type { MobileJumpControls, WorkspacePane } from '@/features/workspace/typ
 
 interface AppHeaderProps {
   activeProviderId: ProviderId | null;
+  composerDockHeight: number;
   jumpControls: MobileJumpControls | null;
   mobileAgentLabel: string;
   mobilePane: WorkspacePane;
@@ -42,6 +43,7 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
 
 export function AppHeader({
   activeProviderId,
+  composerDockHeight,
   jumpControls,
   mobileAgentLabel,
   mobilePane,
@@ -59,6 +61,7 @@ export function AppHeader({
   return (
     <header className="sticky top-0 z-20 -mb-3 h-0 pointer-events-none lg:static lg:mb-0 lg:h-auto lg:pointer-events-auto">
       <MobileFloatingControls
+        composerDockHeight={composerDockHeight}
         jumpControls={jumpControls}
         mobileAgentLabel={mobileAgentLabel}
         mobilePane={mobilePane}

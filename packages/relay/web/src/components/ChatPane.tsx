@@ -62,14 +62,11 @@ interface ChatPaneProps {
   activeProviderId: ProviderId | null;
   conversationScrollKey: string | null;
   connected: boolean;
-  hasOlderMessages: boolean;
   messages: ChatMessage[];
   onMobileJumpControlsChange?: (controls: MobileJumpControls | null) => void;
-  olderMessagesLoading: boolean;
   paneVisible: boolean;
   scrollToBottomRequestKey: number;
   visible: boolean;
-  onLoadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
 }
 
 const QUESTION_JUMP_LONG_PRESS_DELAY_MS = 420;
@@ -1247,7 +1244,7 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
       {message.attachments && message.attachments.length > 0 ? (
         <MessageAttachmentGallery attachments={message.attachments} />
       ) : null}
-      {message.blocks.map((block, index) => {
+      {message.blocks.map((block) => {
         if (block.type === 'text') {
           return (
             <TextBlockContent
@@ -1335,14 +1332,11 @@ export function ChatPane({
   activeProviderId,
   conversationScrollKey,
   connected,
-  hasOlderMessages,
   messages,
   onMobileJumpControlsChange,
-  olderMessagesLoading,
   paneVisible,
   scrollToBottomRequestKey,
-  visible,
-  onLoadOlderMessages
+  visible
 }: ChatPaneProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const autoScrollToBottomRef = useRef(true);
@@ -1350,11 +1344,14 @@ export function ChatPane({
   const previousConversationScrollKeyRef = useRef<string | null>(null);
   const previousScrollToBottomRequestKeyRef = useRef(scrollToBottomRequestKey);
   const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
+  const reconnectMessagesScrollRef = useRef<{
+    conversationScrollKey: string | null;
+    scrollHeight: number;
+    scrollTop: number;
+  } | null>(null);
   const questionJumpPressTimeoutRef = useRef<number | null>(null);
   const questionJumpLongPressTriggeredRef = useRef(false);
   const questionMessageRefs = useRef(new Map<string, HTMLDivElement>());
-  const [isNearTop, setIsNearTop] = useState(true);
-  const showOlderMessagesButton = hasOlderMessages && (activeProviderId !== 'codex' || isNearTop);
 
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
   const displayItems = useMemo<ChatPaneDisplayItem[]>(
@@ -1409,6 +1406,32 @@ export function ChatPane({
   }, []);
 
   useEffect(() => {
+    const messagesElement = messagesRef.current;
+    if (!messagesElement) {
+      return;
+    }
+
+    if (!connected) {
+      if (renderableMessages.length === 0) {
+        return;
+      }
+      reconnectMessagesScrollRef.current = {
+        conversationScrollKey,
+        scrollHeight: messagesElement.scrollHeight,
+        scrollTop: messagesElement.scrollTop
+      };
+      return;
+    }
+
+    if (
+      reconnectMessagesScrollRef.current &&
+      reconnectMessagesScrollRef.current.conversationScrollKey !== conversationScrollKey
+    ) {
+      reconnectMessagesScrollRef.current = null;
+    }
+  }, [connected, conversationScrollKey, renderableMessages.length]);
+
+  useEffect(() => {
     if (previousScrollToBottomRequestKeyRef.current === scrollToBottomRequestKey) {
       return;
     }
@@ -1425,7 +1448,6 @@ export function ChatPane({
 
     autoScrollToBottomRef.current = true;
     messagesElement.scrollTo({ top: messagesElement.scrollHeight });
-    setIsNearTop(false);
   }, [paneVisible, scrollToBottomRequestKey]);
 
   useEffect(() => {
@@ -1448,7 +1470,14 @@ export function ChatPane({
       messagesElement.scrollTop = preservedScroll.scrollTop + (messagesElement.scrollHeight - preservedScroll.scrollHeight);
       preserveMessagesScrollRef.current = null;
       autoScrollToBottomRef.current = isScrolledToBottom(messagesElement);
-      setIsNearTop(messagesElement.scrollTop <= 12);
+      return;
+    }
+
+    const reconnectScroll = reconnectMessagesScrollRef.current;
+    if (connected && reconnectScroll && reconnectScroll.conversationScrollKey === conversationScrollKey && renderableMessages.length > 0) {
+      messagesElement.scrollTop = reconnectScroll.scrollTop + (messagesElement.scrollHeight - reconnectScroll.scrollHeight);
+      reconnectMessagesScrollRef.current = null;
+      autoScrollToBottomRef.current = isScrolledToBottom(messagesElement);
       return;
     }
 
@@ -1458,13 +1487,11 @@ export function ChatPane({
     if (isConversationChanged || (hasNewUserMessage && paneVisible) || autoScrollToBottomRef.current) {
       messagesElement.scrollTo({ top: messagesElement.scrollHeight });
       autoScrollToBottomRef.current = true;
-      setIsNearTop(false);
       return;
     }
 
     autoScrollToBottomRef.current = isScrolledToBottom(messagesElement);
-    setIsNearTop(messagesElement.scrollTop <= 12);
-  }, [conversationScrollKey, displayItems, paneVisible, renderableMessages]);
+  }, [connected, conversationScrollKey, displayItems, paneVisible, renderableMessages]);
 
   function setQuestionMessageRef(messageId: string, node: HTMLDivElement | null): void {
     if (node) {
@@ -1518,13 +1545,7 @@ export function ChatPane({
   }
 
   function handleMessagesScroll(event: React.UIEvent<HTMLDivElement>): void {
-    const { currentTarget } = event;
-    const nextTop = currentTarget.scrollTop;
-    const nextNearTop = nextTop <= 12;
-    autoScrollToBottomRef.current = isScrolledToBottom(currentTarget);
-    if (nextNearTop !== isNearTop) {
-      setIsNearTop(nextNearTop);
-    }
+    autoScrollToBottomRef.current = isScrolledToBottom(event.currentTarget);
   }
 
   function handleJumpToMessagesEdge(direction: 'up' | 'down'): void {
@@ -1594,24 +1615,6 @@ export function ChatPane({
     }
 
     handleJumpToQuestion(direction);
-  }
-
-  async function handleLoadOlderMessages(): Promise<void> {
-    if (messagesRef.current) {
-      preserveMessagesScrollRef.current = {
-        scrollHeight: messagesRef.current.scrollHeight,
-        scrollTop: messagesRef.current.scrollTop
-      };
-    }
-
-    try {
-      const loaded = await onLoadOlderMessages(messages[0]?.id);
-      if (!loaded) {
-        preserveMessagesScrollRef.current = null;
-      }
-    } catch {
-      preserveMessagesScrollRef.current = null;
-    }
   }
 
   return (

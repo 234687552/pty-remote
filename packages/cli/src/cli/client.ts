@@ -4,7 +4,6 @@ import { mkdirSync, promises as fs, readFileSync, writeFileSync } from 'node:fs'
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { fileURLToPath } from 'node:url';
 
 import { io, type Socket } from 'socket.io-client';
 import type {
@@ -30,8 +29,6 @@ import type { ProviderRuntime } from '../providers/provider-runtime.ts';
 import { loadCliConfig } from './cli-config.ts';
 import type { PtyManagerOptions } from './pty-manager.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 const DEFAULT_ROOT_DIR = path.resolve(process.cwd());
 const CONFIG_DIR = path.join(os.homedir(), '.pty-remote');
 const CLI_ID_FILE = path.join(CONFIG_DIR, 'cli-id');
@@ -83,7 +80,6 @@ const PROMPT_SUBMIT_DELAY_MS = getConfigInt('PROMPT_SUBMIT_DELAY_MS', 120, 0);
 const JSONL_REFRESH_DEBOUNCE_MS = getConfigInt('JSONL_REFRESH_DEBOUNCE_MS', 120, 0);
 const SNAPSHOT_EMIT_DEBOUNCE_MS = getConfigInt('SNAPSHOT_EMIT_DEBOUNCE_MS', 200, 0);
 const SNAPSHOT_MESSAGES_MAX = getConfigInt('SNAPSHOT_MESSAGES_MAX', 40, 1);
-const OLDER_MESSAGES_PAGE_MAX = getConfigInt('OLDER_MESSAGES_PAGE_MAX', 40, 1);
 const TERMINAL_COLS = getConfigInt('TERMINAL_COLS', 120, 1);
 const TERMINAL_ROWS = getConfigInt('TERMINAL_ROWS', 32, 1);
 const DETACHED_PTY_TTL_MS = getConfigInt('DETACHED_PTY_TTL_MS', 12 * 60 * 60 * 1000, 0);
@@ -111,7 +107,6 @@ const runtimeOptions: PtyManagerOptions = {
   jsonlRefreshDebounceMs: JSONL_REFRESH_DEBOUNCE_MS,
   snapshotEmitDebounceMs: SNAPSHOT_EMIT_DEBOUNCE_MS,
   snapshotMessagesMax: SNAPSHOT_MESSAGES_MAX,
-  olderMessagesPageMax: OLDER_MESSAGES_PAGE_MAX,
   gcIntervalMs: GC_INTERVAL_MS,
   detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
   detachedJsonlMissingTtlMs: DETACHED_JSONL_MISSING_TTL_MS,
@@ -131,7 +126,6 @@ const codexRuntimeOptions: CodexProviderRuntimeOptions = {
   jsonlRefreshDebounceMs: JSONL_REFRESH_DEBOUNCE_MS,
   snapshotEmitDebounceMs: SNAPSHOT_EMIT_DEBOUNCE_MS,
   snapshotMessagesMax: SNAPSHOT_MESSAGES_MAX,
-  olderMessagesPageMax: OLDER_MESSAGES_PAGE_MAX,
   gcIntervalMs: GC_INTERVAL_MS,
   detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
   detachedJsonlMissingTtlMs: DETACHED_JSONL_MISSING_TTL_MS,
@@ -404,15 +398,6 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
         payload: {
           snapshot: runtime.getSnapshot()
         } satisfies GetRuntimeSnapshotResultPayload
-      };
-    }
-
-    if (envelope.name === 'get-older-messages') {
-      const payload = envelope.payload as { beforeMessageId?: string; maxMessages?: number };
-      const runtime = getRuntime(requireTargetProviderId(envelope));
-      return {
-        ok: true,
-        payload: await runtime.getOlderMessages(payload.beforeMessageId, payload.maxMessages)
       };
     }
 

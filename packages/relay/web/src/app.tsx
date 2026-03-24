@@ -13,10 +13,11 @@ import { useWorkspaceStore } from '@/features/workspace/store.ts';
 import { useCliSocket } from '@/hooks/useCliSocket.ts';
 import { useTerminalBridge } from '@/hooks/useTerminalBridge.ts';
 import { getProjectProviderKey } from '@/lib/workspace.ts';
-import { readCachedLastSeq, updateCachedLastSeq, writeConversationCache } from '@/lib/messages-cache.ts';
+import { applyCachedMessagesUpsert, readCachedLastSeq, updateCachedLastSeq, writeConversationCache } from '@/lib/messages-cache.ts';
 import type { MobileJumpControls } from '@/features/workspace/types.ts';
 export function App() {
   const store = useWorkspaceStore();
+  const [mobileComposerDockHeight, setMobileComposerDockHeight] = useState(104);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobileJumpControls, setMobileJumpControls] = useState<MobileJumpControls | null>(null);
   const [mobilePaneScrollRequests, setMobilePaneScrollRequests] = useState({
@@ -85,6 +86,7 @@ export function App() {
     },
     onMessagesUpsert: (payload) => {
       store.applyMessagesUpsert(payload);
+      applyCachedMessagesUpsert(payload);
       if (payload.seq != null) {
         updateCachedLastSeq(payload.providerId ?? null, payload.conversationKey ?? null, payload.sessionId ?? null, payload.seq);
       }
@@ -110,6 +112,8 @@ export function App() {
       terminal.handleTerminalFramePatch(payload);
     }
   });
+  const activeCli = activeCliId ? clis.find((cli) => cli.cliId === activeCliId) ?? null : null;
+  const activeRuntime = activeProviderId ? activeCli?.runtimes[activeProviderId] ?? null : null;
 
   const controller = useWorkspaceController({
     clis,
@@ -140,6 +144,13 @@ export function App() {
     ) {
       return;
     }
+    if (
+      activeRuntime?.conversationKey !== activeConversation.conversationKey ||
+      (activeSessionId !== null && activeRuntime?.sessionId !== activeSessionId)
+    ) {
+      lastTerminalSyncKeyRef.current = null;
+      return;
+    }
 
     const nextTerminalKey = `${activeCliId}:${activeProviderId}:${activeConversation.conversationKey}:${activeSessionId ?? ''}`;
     if (lastTerminalSyncKeyRef.current === nextTerminalKey) {
@@ -155,6 +166,8 @@ export function App() {
     activeCliId,
     activeConversation,
     activeProviderId,
+    activeRuntime?.conversationKey,
+    activeRuntime?.sessionId,
     activeSessionId,
     socketConnected,
     store.snapshot.conversationKey,
@@ -175,10 +188,10 @@ export function App() {
   return (
     <AppShell
       sidebar={<SidebarFeature clis={clis} controller={controller} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} store={store} />}
-      mobilePane={store.mobilePane}
       renderHeader={() => (
         <HeaderFeature
           clis={clis}
+          composerDockHeight={mobileComposerDockHeight}
           jumpControls={mobileJumpControls}
           mobilePane={store.mobilePane}
           onMobilePaneChange={store.setMobilePane}
@@ -192,7 +205,6 @@ export function App() {
       chat={
         <ChatFeature
           clis={clis}
-          controller={controller}
           onMobileJumpControlsChange={setMobileJumpControls}
           paneVisible={desktopTerminalVisible || store.mobilePane === 'chat'}
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
@@ -208,7 +220,15 @@ export function App() {
           terminal={terminal}
         />
       }
-      composer={<ComposerFeature clis={clis} controller={controller} socketConnected={socketConnected} store={store} />}
+      composer={
+        <ComposerFeature
+          clis={clis}
+          controller={controller}
+          onComposerHeightChange={setMobileComposerDockHeight}
+          socketConnected={socketConnected}
+          store={store}
+        />
+      }
     />
   );
 }

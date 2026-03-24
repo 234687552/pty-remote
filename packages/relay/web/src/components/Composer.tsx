@@ -18,6 +18,7 @@ interface ComposerProps {
   cliBadge: StatusBadge;
   conversationBadge: StatusBadge;
   footerErrorText: string;
+  onComposerHeightChange?: (height: number) => void;
   prompt: string;
   slashCommands: string[];
   socketBadge: StatusBadge;
@@ -91,6 +92,7 @@ export function Composer({
   cliBadge,
   conversationBadge,
   footerErrorText,
+  onComposerHeightChange,
   placeholder,
   prompt,
   slashCommands,
@@ -101,9 +103,11 @@ export function Composer({
   onStop,
   onSubmit
 }: ComposerProps) {
+  const formRef = useRef<HTMLFormElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingSelectionRef = useRef<number | null>(null);
+  const isPromptComposingRef = useRef(false);
   const [composerHeight, setComposerHeight] = useState(COMPOSER_MIN_HEIGHT_PX);
   const [promptScrollable, setPromptScrollable] = useState(false);
   const [selection, setSelection] = useState({ start: prompt.length, end: prompt.length });
@@ -215,6 +219,28 @@ export function Composer({
     setSelectedSlashIndex((current) => Math.min(current, slashSuggestions.length - 1));
   }, [slashSuggestions]);
 
+  useEffect(() => {
+    const form = formRef.current;
+    if (!form || !onComposerHeightChange) {
+      return;
+    }
+
+    const syncComposerHeight = () => {
+      onComposerHeightChange(Math.ceil(form.getBoundingClientRect().height));
+    };
+
+    syncComposerHeight();
+
+    const resizeObserver = new ResizeObserver(() => {
+      syncComposerHeight();
+    });
+    resizeObserver.observe(form);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [onComposerHeightChange]);
+
   function handleImageInputChange(event: React.ChangeEvent<HTMLInputElement>): void {
     const files = Array.from(event.target.files ?? []);
     if (files.length > 0) {
@@ -248,8 +274,13 @@ export function Composer({
     onPromptChange(`${before}${replacement}${after}`);
   }
 
+  function isComposingKeyEvent(event: React.KeyboardEvent<HTMLTextAreaElement>): boolean {
+    return event.nativeEvent.isComposing || isPromptComposingRef.current || event.nativeEvent.keyCode === 229;
+  }
+
   return (
     <form
+      ref={formRef}
       onSubmit={onSubmit}
       className="shrink-0 bg-transparent px-2 py-1 pb-[calc(env(safe-area-inset-bottom)+0.25rem)] md:mt-4 md:px-0 md:py-0"
     >
@@ -355,6 +386,8 @@ export function Composer({
             });
           }}
           onKeyDown={(event) => {
+            const isComposing = isComposingKeyEvent(event);
+
             if (slashSuggestions.length > 0) {
               if (event.key === 'ArrowDown') {
                 event.preventDefault();
@@ -368,19 +401,25 @@ export function Composer({
                 return;
               }
 
-              if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) {
+              if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey && !(isComposing && event.key === 'Enter')) {
                 event.preventDefault();
                 applySlashCommand(slashSuggestions[selectedSlashIndex] ?? slashSuggestions[0] ?? '');
                 return;
               }
             }
 
-            if (event.key !== 'Enter' || event.shiftKey) {
+            if (event.key !== 'Enter' || event.shiftKey || isComposing) {
               return;
             }
 
             event.preventDefault();
             event.currentTarget.form?.requestSubmit();
+          }}
+          onCompositionStart={() => {
+            isPromptComposingRef.current = true;
+          }}
+          onCompositionEnd={() => {
+            isPromptComposingRef.current = false;
           }}
           onPaste={(event) => {
             const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'));

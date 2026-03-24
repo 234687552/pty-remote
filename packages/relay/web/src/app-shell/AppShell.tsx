@@ -1,17 +1,14 @@
 import type { ReactNode } from 'react';
 
-import type { WorkspacePane } from '@/features/workspace/types.ts';
-
 interface AppShellProps {
   chat: ReactNode;
   composer: ReactNode;
-  mobilePane: WorkspacePane;
   renderHeader: () => ReactNode;
   sidebar: ReactNode;
   terminal: ReactNode;
 }
 
-export function AppShell({ chat, composer, mobilePane, renderHeader, sidebar, terminal }: AppShellProps) {
+export function AppShell({ chat, composer, renderHeader, sidebar, terminal }: AppShellProps) {
   return (
     <div className="h-svh overflow-hidden bg-white text-zinc-900 lg:flex lg:h-dvh lg:bg-zinc-100">
       {sidebar}

@@ -2,8 +2,7 @@ import type { ProjectSessionSummary } from '@lzdi/pty-remote-protocol/protocol.t
 import { PROVIDER_LABELS, type ChatMessage, type ProviderId, type RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 export const PROJECTS_STORAGE_KEY = 'pty-remote.projects.v2';
-export const PROJECT_CONVERSATIONS_STORAGE_KEY = 'pty-remote.project-conversations.v1';
-const LEGACY_PROJECTS_STORAGE_KEY = 'pty-remote.projects.v1';
+export const PROJECT_CONVERSATIONS_STORAGE_KEY = 'pty-remote.project-conversations.v2';
 export const SIDEBAR_TOGGLE_MARGIN = 16;
 export const SIDEBAR_TOGGLE_SIZE = 40;
 
@@ -36,50 +35,8 @@ export interface PersistedWorkspaceState {
   sidebarToggleTop: number;
 }
 
-interface LegacyProjectEntry {
-  id: string;
-  cliId?: string;
-  cwd: string;
-  label: string;
-}
-
-interface LegacyWorkspaceState {
-  activeCliId: string | null;
-  activeProjectId: string | null;
-  activeThreadId: string | null;
-  projects: LegacyProjectEntry[];
-  sidebarCollapsed: boolean;
-  sidebarToggleTop: number;
-}
-
-interface PersistedProjectConversationsStateV2 {
-  version: 2;
-  byProjectKey: Record<string, ProjectConversationEntry[]>;
-  byDirectoryKey: Record<string, ProjectConversationEntry[]>;
-}
-
 export function getProjectProviderKey(projectId: string, providerId: ProviderId): string {
   return `${projectId}:${providerId}`;
-}
-
-function getDirectoryProviderKey(cwd: string, providerId: ProviderId): string {
-  return `${providerId}:${encodeURIComponent(cwd)}`;
-}
-
-function parseProjectProviderKey(key: string): { projectId: string; providerId: ProviderId } | null {
-  if (key.endsWith(':claude')) {
-    return {
-      projectId: key.slice(0, -':claude'.length),
-      providerId: 'claude'
-    };
-  }
-  if (key.endsWith(':codex')) {
-    return {
-      projectId: key.slice(0, -':codex'.length),
-      providerId: 'codex'
-    };
-  }
-  return null;
 }
 
 export function getThreadLabel(cwd: string): string {
@@ -115,21 +72,6 @@ function normalizeProjects(projects: { id: string; cwd: string; label: string }[
     }));
 }
 
-function migrateLegacyWorkspaceState(parsed: LegacyWorkspaceState): PersistedWorkspaceState {
-  return {
-    activeCliId: parsed.activeCliId ?? null,
-    activeProjectId: parsed.activeProjectId ?? null,
-    activeProviderId: 'claude',
-    activeConversationId: parsed.activeThreadId ?? null,
-    projects: normalizeProjects(parsed.projects ?? []),
-    sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
-    sidebarToggleTop: clampSidebarToggleTop(
-      typeof parsed.sidebarToggleTop === 'number' ? parsed.sidebarToggleTop : SIDEBAR_TOGGLE_MARGIN,
-      window.innerHeight
-    )
-  };
-}
-
 export function loadWorkspaceState(): PersistedWorkspaceState {
   try {
     const currentValue = window.localStorage.getItem(PROJECTS_STORAGE_KEY);
@@ -150,21 +92,11 @@ export function loadWorkspaceState(): PersistedWorkspaceState {
         };
       }
     }
-
-    const legacyValue = window.localStorage.getItem(LEGACY_PROJECTS_STORAGE_KEY);
-    if (!legacyValue) {
-      return createEmptyWorkspaceState();
-    }
-
-    const parsed = JSON.parse(legacyValue) as LegacyWorkspaceState;
-    if (!parsed || !Array.isArray(parsed.projects)) {
-      return createEmptyWorkspaceState();
-    }
-
-    return migrateLegacyWorkspaceState(parsed);
   } catch {
-    return createEmptyWorkspaceState();
+    // Fall back to a fresh workspace when persisted data is missing or invalid.
   }
+
+  return createEmptyWorkspaceState();
 }
 
 export function saveWorkspaceState(state: PersistedWorkspaceState): void {
@@ -230,7 +162,7 @@ function normalizeConversationsRecord(value: unknown): Record<string, ProjectCon
   return normalized;
 }
 
-export function loadProjectConversationsState(projects: ProjectEntry[] = []): Record<string, ProjectConversationEntry[]> {
+export function loadProjectConversationsState(): Record<string, ProjectConversationEntry[]> {
   try {
     const raw = window.localStorage.getItem(PROJECT_CONVERSATIONS_STORAGE_KEY);
     if (!raw) {
@@ -238,37 +170,7 @@ export function loadProjectConversationsState(projects: ProjectEntry[] = []): Re
     }
 
     const parsed = JSON.parse(raw) as unknown;
-    const normalizedProjects = normalizeProjects(projects);
-    const byProject = normalizeConversationsRecord(
-      (parsed as Partial<PersistedProjectConversationsStateV2> | null)?.byProjectKey ?? parsed
-    );
-    if ((parsed as Partial<PersistedProjectConversationsStateV2> | null)?.version !== 2) {
-      return byProject;
-    }
-
-    const byDirectory = normalizeConversationsRecord(
-      (parsed as Partial<PersistedProjectConversationsStateV2> | null)?.byDirectoryKey ?? {}
-    );
-    if (normalizedProjects.length === 0 || Object.keys(byDirectory).length === 0) {
-      return byProject;
-    }
-
-    const restored = { ...byProject };
-    for (const project of normalizedProjects) {
-      for (const providerId of ['claude', 'codex'] as const) {
-        const projectKey = getProjectProviderKey(project.id, providerId);
-        if ((restored[projectKey] ?? []).length > 0) {
-          continue;
-        }
-        const directoryKey = getDirectoryProviderKey(project.cwd, providerId);
-        const directoryConversations = byDirectory[directoryKey];
-        if (directoryConversations && directoryConversations.length > 0) {
-          restored[projectKey] = directoryConversations;
-        }
-      }
-    }
-
-    return restored;
+    return normalizeConversationsRecord(parsed);
   } catch {
     return {};
   }
@@ -279,28 +181,8 @@ export function saveProjectConversationsState(
   projects: ProjectEntry[] = []
 ): void {
   const normalizedByProject = normalizeConversationsRecord(state);
-  const normalizedProjects = normalizeProjects(projects);
-  const projectsById = new Map(normalizedProjects.map((project) => [project.id, project]));
-  const byDirectoryKey: Record<string, ProjectConversationEntry[]> = {};
-
-  for (const [projectKey, conversations] of Object.entries(normalizedByProject)) {
-    const parsed = parseProjectProviderKey(projectKey);
-    if (!parsed) {
-      continue;
-    }
-    const project = projectsById.get(parsed.projectId);
-    if (!project) {
-      continue;
-    }
-    byDirectoryKey[getDirectoryProviderKey(project.cwd, parsed.providerId)] = conversations;
-  }
-
-  const payload: PersistedProjectConversationsStateV2 = {
-    version: 2,
-    byProjectKey: normalizedByProject,
-    byDirectoryKey
-  };
-  window.localStorage.setItem(PROJECT_CONVERSATIONS_STORAGE_KEY, JSON.stringify(payload));
+  void projects;
+  window.localStorage.setItem(PROJECT_CONVERSATIONS_STORAGE_KEY, JSON.stringify(normalizedByProject));
 }
 
 export function compactPreview(text: string, maxChars = 56): string {

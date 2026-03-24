@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef } from 'react';
 import type React from 'react';
 
 import type {
-  GetOlderMessagesResultPayload,
   GetRuntimeSnapshotResultPayload,
   ListManagedPtyHandlesResultPayload,
   ListProjectSessionsResultPayload,
@@ -54,8 +53,8 @@ export interface WorkspaceController {
   importConversationFromSession: (providerId: ProviderId, session: ProjectSessionSummary) => Promise<void>;
   listRecentProjectSessions: (providerId: ProviderId, maxSessions?: number) => Promise<ProjectSessionSummary[]>;
   listManagedPtyHandles: () => Promise<ManagedPtyHandleView[]>;
-  loadOlderMessages: (beforeMessageId: string | undefined) => Promise<boolean>;
   pickProjectDirectory: (providerId: ProviderId) => Promise<string | null>;
+  refreshConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
   removePendingAttachment: (localId: string) => Promise<void>;
   selectCli: (cliId: string | null) => void;
   selectProject: (project: ProjectEntry) => void;
@@ -247,7 +246,6 @@ export function useWorkspaceController({
     [
       clis,
       socketConnected,
-      store.olderMessages,
       store.projectConversationsByKey,
       store.snapshot,
       store.workspaceState
@@ -478,9 +476,18 @@ export function useWorkspaceController({
 
     terminal.prepareForResume();
     store.resetRuntimeForCliChange();
-
-      void sendCommand('get-runtime-snapshot', {}, activeCliId, activeProviderId)
+    const snapshotCliId = activeCliId;
+    const snapshotProviderId = activeProviderId;
+    const snapshotConversationId = store.workspaceState.activeConversationId;
+    void sendCommand('get-runtime-snapshot', {}, activeCliId, activeProviderId)
       .then(async (result) => {
+        if (
+          store.workspaceState.activeCliId !== snapshotCliId ||
+          store.workspaceState.activeProviderId !== snapshotProviderId ||
+          store.workspaceState.activeConversationId !== snapshotConversationId
+        ) {
+          return;
+        }
         const nextSnapshot = (result.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
         store.setSnapshot(nextSnapshot);
       })
@@ -720,6 +727,9 @@ export function useWorkspaceController({
       }
 
       const runtimeSnapshotResult = await sendCommand('get-runtime-snapshot', {}, targetCli.cliId, providerId);
+      if (conversationActivationSeqRef.current !== requestId) {
+        return;
+      }
       const nextSnapshot =
         (runtimeSnapshotResult.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
       store.setSnapshot(nextSnapshot);
@@ -1032,6 +1042,53 @@ export function useWorkspaceController({
     }
   }
 
+  async function refreshConversation(
+    project: ProjectEntry,
+    providerId: ProviderId,
+    conversation: ProjectConversationEntry
+  ): Promise<void> {
+    try {
+      store.setError('');
+      const ownerCliId = conversation.ownerCliId?.trim() ?? '';
+      if (!ownerCliId) {
+        throw new Error('会话缺少 ownerCliId，无法定位所属 CLI');
+      }
+
+      const targetCli =
+        clis.find((cli) => cli.cliId === ownerCliId && cli.connected && supportsProvider(cli, providerId)) ?? null;
+      if (!targetCli) {
+        throw new Error(`会话所属 CLI 已离线或不支持 ${PROVIDER_LABELS[providerId]}（${ownerCliId}）`);
+      }
+
+      const isRefreshingActiveConversation =
+        store.workspaceState.activeProjectId === project.id &&
+        store.workspaceState.activeProviderId === providerId &&
+        store.workspaceState.activeConversationId === conversation.id;
+
+      if (isRefreshingActiveConversation) {
+        store.resetRuntimeForCliChange();
+        terminal.clearTerminal();
+      }
+
+      await sendCommand(
+        'cleanup-conversation',
+        {
+          cwd: project.cwd,
+          conversationKey: conversation.conversationKey,
+          sessionId: conversation.sessionId
+        },
+        targetCli.cliId,
+        providerId
+      );
+
+      await activateConversation(project, providerId, conversation);
+    } catch (refreshError) {
+      const message = refreshError instanceof Error ? refreshError.message : '重刷会话失败';
+      store.setError(message);
+      throw refreshError instanceof Error ? refreshError : new Error(message);
+    }
+  }
+
   async function importConversationFromSession(providerId: ProviderId, session: ProjectSessionSummary): Promise<void> {
     try {
       store.setError('');
@@ -1304,34 +1361,6 @@ export function useWorkspaceController({
     }
   }
 
-  async function loadOlderMessages(beforeMessageId: string | undefined): Promise<boolean> {
-    try {
-      store.setError('');
-      store.setOlderMessagesLoading(true);
-
-      const result = await sendCommand('get-older-messages', {
-        beforeMessageId,
-        maxMessages: 40
-      }, undefined, activeProviderId);
-      const payload = result.payload as GetOlderMessagesResultPayload | undefined;
-
-      if (
-        (payload?.providerId ?? null) !== store.snapshot.providerId ||
-        (payload?.conversationKey ?? null) !== store.snapshot.conversationKey
-      ) {
-        return false;
-      }
-
-      store.mergeOlderMessages(payload?.messages ?? [], Boolean(payload?.hasOlderMessages));
-      return Boolean(payload?.messages?.length);
-    } catch (loadError) {
-      store.setError(loadError instanceof Error ? loadError.message : '加载更早消息失败');
-      return false;
-    } finally {
-      store.setOlderMessagesLoading(false);
-    }
-  }
-
   return {
     activateConversation,
     addImageAttachments,
@@ -1342,8 +1371,8 @@ export function useWorkspaceController({
     importConversationFromSession,
     listManagedPtyHandles,
     listRecentProjectSessions,
-    loadOlderMessages,
     pickProjectDirectory,
+    refreshConversation,
     removePendingAttachment,
     reorderConversation,
     sendCommand,

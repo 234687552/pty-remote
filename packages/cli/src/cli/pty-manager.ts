@@ -3,7 +3,6 @@ import os from 'node:os';
 import path from 'node:path';
 
 import type {
-  GetOlderMessagesResultPayload,
   ManagedPtyHandleSummary,
   MessagesUpsertPayload,
   SelectConversationResultPayload,
@@ -42,7 +41,6 @@ export interface PtyManagerOptions {
   jsonlRefreshDebounceMs: number;
   snapshotEmitDebounceMs: number;
   snapshotMessagesMax: number;
-  olderMessagesPageMax: number;
   gcIntervalMs: number;
   detachedDraftTtlMs: number;
   detachedJsonlMissingTtlMs: number;
@@ -96,6 +94,7 @@ interface PtyHandle {
   jsonlReadOffset: number;
   jsonlPendingLine: string;
   awaitingJsonlTurn: boolean;
+  bypassPromptAutoAccepting: boolean;
   suppressNextPtyExitError: boolean;
   expectedPtyExitReason: string | null;
   runtime: AgentRuntimeState;
@@ -449,36 +448,6 @@ export class PtyManager {
     }
   }
 
-  async getOlderMessages(beforeMessageId?: string, maxMessages = this.options.olderMessagesPageMax): Promise<GetOlderMessagesResultPayload> {
-    await this.refreshActiveMessages();
-    const handle = this.getActiveHandle();
-    if (!handle) {
-      return {
-        messages: [],
-        providerId: null,
-        conversationKey: null,
-        sessionId: null,
-        hasOlderMessages: false
-      };
-    }
-
-    const normalizedMaxMessages = Number.isFinite(maxMessages)
-      ? Math.max(1, Math.min(Math.floor(maxMessages), this.options.olderMessagesPageMax))
-      : this.options.olderMessagesPageMax;
-    const allMessages = handle.runtime.allMessages;
-    const boundaryIndex = beforeMessageId ? allMessages.findIndex((message) => message.id === beforeMessageId) : allMessages.length;
-    const end = boundaryIndex >= 0 ? boundaryIndex : allMessages.length;
-    const start = Math.max(0, end - normalizedMaxMessages);
-
-    return {
-      messages: cloneValue(allMessages.slice(start, end)),
-      providerId: this.providerId,
-      conversationKey: handle.threadKey,
-      sessionId: handle.sessionId,
-      hasOlderMessages: start > 0
-    };
-  }
-
   async shutdown(): Promise<void> {
     if (this.jsonlRefreshTimer) {
       clearTimeout(this.jsonlRefreshTimer);
@@ -512,6 +481,7 @@ export class PtyManager {
       jsonlReadOffset: 0,
       jsonlPendingLine: '',
       awaitingJsonlTurn: false,
+      bypassPromptAutoAccepting: false,
       suppressNextPtyExitError: false,
       expectedPtyExitReason: null,
       runtime: this.createFreshState(selection.conversationKey, selection.sessionId),
@@ -641,6 +611,7 @@ export class PtyManager {
     handle.runtime = this.createFreshState(handle.threadKey, sessionId);
     handle.sessionId = sessionId;
     handle.awaitingJsonlTurn = false;
+    handle.bypassPromptAutoAccepting = false;
     handle.jsonlMissingSince = null;
     handle.lastJsonlActivityAt = null;
     handle.lastTerminalActivityAt = null;
@@ -1149,6 +1120,7 @@ export class PtyManager {
     handle.expectedPtyExitReason = reason;
     handle.pty = null;
     handle.awaitingJsonlTurn = false;
+    handle.bypassPromptAutoAccepting = false;
     this.emitTerminalSessionEvicted(handle, reason);
     this.resetTerminalReplay(handle);
     stopClaudePtySession(currentPty);
@@ -1172,11 +1144,13 @@ export class PtyManager {
     handle.expectedPtyExitReason = reason;
     handle.pty = null;
     handle.awaitingJsonlTurn = false;
+    handle.bypassPromptAutoAccepting = false;
     stopClaudePtySession(currentPty);
   }
 
   private startHandleSession(handle: PtyHandle, options?: { emitSnapshot?: boolean }): void {
     this.resetTerminalReplay(handle);
+    handle.bypassPromptAutoAccepting = false;
     handle.suppressNextPtyExitError = false;
     handle.expectedPtyExitReason = null;
     const token = ++handle.ptyToken;
@@ -1245,6 +1219,15 @@ export class PtyManager {
     handle.runtime.recentTerminalOutput = appendRecentOutput(session, chunk, this.options.recentOutputMaxChars);
     handle.lastTerminalActivityAt = Date.now();
     const isActiveHandle = this.isActiveHandle(handle);
+
+    if (looksLikeBypassPrompt(session.recentOutput) && !handle.bypassPromptAutoAccepting) {
+      void this.autoAcceptBypassPrompt(handle).catch((error) => {
+        this.log('error', 'failed to auto-accept claude bypass prompt', {
+          ...this.handleContext(handle),
+          error: errorMessage(error, 'Failed to accept bypass prompt')
+        });
+      });
+    }
 
     void handle.terminalFrame
       .enqueueOutput(chunk)
@@ -1334,18 +1317,38 @@ export class PtyManager {
 
   private async autoAcceptBypassPrompt(handle: PtyHandle): Promise<boolean> {
     if (!handle.pty) {
+      handle.bypassPromptAutoAccepting = false;
       return false;
     }
 
     if (!looksLikeBypassPrompt(handle.pty.recentOutput)) {
+      handle.bypassPromptAutoAccepting = false;
       return false;
     }
 
-    handle.pty.pty.write('\x1b[B');
-    await sleep(120);
-    handle.pty.pty.write('\r');
-    await sleep(320);
-    return true;
+    if (handle.bypassPromptAutoAccepting) {
+      return false;
+    }
+
+    handle.bypassPromptAutoAccepting = true;
+    const ptyToken = handle.ptyToken;
+
+    try {
+      handle.pty.pty.write('\x1b[B');
+      await sleep(120);
+
+      if (!handle.pty || handle.ptyToken !== ptyToken) {
+        return true;
+      }
+
+      handle.pty.pty.write('\r');
+      await sleep(320);
+      return true;
+    } finally {
+      if (handle.ptyToken === ptyToken) {
+        handle.bypassPromptAutoAccepting = false;
+      }
+    }
   }
 
   private async waitForHandleReady(handle: PtyHandle): Promise<void> {
@@ -1454,9 +1457,16 @@ export class PtyManager {
 
   private async gcDetachedHandles(): Promise<void> {
     const now = Date.now();
-    const detachedHandles = [...this.handles.values()].filter((handle) => handle.lifecycle === 'detached' && handle.pty);
+    const detachedHandles = [...this.handles.values()].filter(
+      (handle) => (handle.lifecycle === 'detached' || handle.lifecycle === 'error') && handle.pty && !this.isActiveHandle(handle)
+    );
 
     for (const handle of detachedHandles) {
+      if (handle.lifecycle === 'error') {
+        this.stopHandlePty(handle, 'gc-error-state-pty');
+        continue;
+      }
+
       if (handle.detachedAt && now - handle.detachedAt >= this.options.detachedPtyTtlMs) {
         this.stopHandlePty(handle, 'gc-detached-pty-ttl', {
           detachedForMs: now - handle.detachedAt
@@ -1493,7 +1503,7 @@ export class PtyManager {
     }
 
     const survivors = [...this.handles.values()]
-      .filter((handle) => handle.lifecycle === 'detached' && handle.pty)
+      .filter((handle) => (handle.lifecycle === 'detached' || handle.lifecycle === 'error') && handle.pty && !this.isActiveHandle(handle))
       .sort((left, right) => this.getLastActivityAt(left) - this.getLastActivityAt(right));
 
     while (survivors.length > this.options.maxDetachedPtys) {

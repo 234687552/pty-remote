@@ -65,6 +65,7 @@ interface TerminalSessionCacheEntry {
 interface CliRuntimeRecord {
   socket: Socket;
   descriptor: CliDescriptor;
+  disconnectedAt: number | null;
   runtimes: Partial<Record<ProviderId, CliProviderRuntimeRecord>>;
 }
 
@@ -312,11 +313,7 @@ function createProviderRuntimeDescriptor(
   };
 }
 
-function createProviderRuntimeRecord(
-  payload: CliRegisterPayload,
-  providerId: ProviderId,
-  previous?: CliProviderRuntimeRecord | null
-): CliProviderRuntimeRecord {
+function createProviderRuntimeRecord(previous?: CliProviderRuntimeRecord | null): CliProviderRuntimeRecord {
   return {
     snapshot: previous?.snapshot ?? null,
     terminalSessions: cloneTerminalSessions(previous?.terminalSessions)
@@ -363,6 +360,106 @@ function listCliDescriptors(): CliDescriptor[] {
   return [...cliRecords.values()]
     .map((record) => cloneValue(record.descriptor))
     .sort((left, right) => left.label.localeCompare(right.label) || left.cliId.localeCompare(right.cliId));
+}
+
+function getActiveConversationCacheKeys(): Set<string> {
+  const keys = new Set<string>();
+  for (const subscription of webRuntimeSubscriptions.values()) {
+    const cacheKey = resolveConversationCacheKey(
+      subscription.targetCliId,
+      subscription.targetProviderId,
+      subscription.conversationKey,
+      subscription.sessionId
+    );
+    if (cacheKey) {
+      keys.add(cacheKey);
+    }
+  }
+  return keys;
+}
+
+function getSubscribedCliIds(): Set<string> {
+  const cliIds = new Set<string>();
+  for (const subscription of webRuntimeSubscriptions.values()) {
+    const cliId = subscription.targetCliId?.trim();
+    if (cliId) {
+      cliIds.add(cliId);
+    }
+  }
+  return cliIds;
+}
+
+function dropConversationCachesForCli(cliId: string, retainedKeys: Set<string>): void {
+  const cliPrefix = `${cliId}:`;
+  for (const cacheKey of relayReplayBuffers.keys()) {
+    if (cacheKey.startsWith(cliPrefix) && !retainedKeys.has(cacheKey)) {
+      relayReplayBuffers.delete(cacheKey);
+    }
+  }
+  for (const cacheKey of relaySnapshotCache.keys()) {
+    if (cacheKey.startsWith(cliPrefix) && !retainedKeys.has(cacheKey)) {
+      relaySnapshotCache.delete(cacheKey);
+    }
+  }
+}
+
+function pruneReplayBuffers(activeCacheKeys: Set<string>, now = Date.now()): void {
+  for (const [cacheKey, buffer] of relayReplayBuffers.entries()) {
+    if (activeCacheKeys.has(cacheKey)) {
+      continue;
+    }
+    if (now - buffer.lastAccessedAt >= relayConfig.replayBufferTtlMs) {
+      relayReplayBuffers.delete(cacheKey);
+    }
+  }
+
+  if (relayReplayBuffers.size <= relayConfig.replayBufferKeysMax) {
+    return;
+  }
+
+  const evictable = [...relayReplayBuffers.entries()]
+    .filter(([cacheKey]) => !activeCacheKeys.has(cacheKey))
+    .sort((left, right) => left[1].lastAccessedAt - right[1].lastAccessedAt);
+  while (relayReplayBuffers.size > relayConfig.replayBufferKeysMax && evictable.length > 0) {
+    const candidate = evictable.shift();
+    if (!candidate) {
+      break;
+    }
+    relayReplayBuffers.delete(candidate[0]);
+  }
+}
+
+function pruneCliRecords(io: SocketIOServer, subscribedCliIds: Set<string>, retainedKeys: Set<string>, now = Date.now()): void {
+  let changed = false;
+  for (const [cliId, record] of cliRecords.entries()) {
+    if (record.descriptor.connected) {
+      record.disconnectedAt = null;
+      continue;
+    }
+    if (subscribedCliIds.has(cliId)) {
+      continue;
+    }
+    const lastSeenAtMs = record.descriptor.lastSeenAt ? Date.parse(record.descriptor.lastSeenAt) : Number.NaN;
+    const disconnectedAt = record.disconnectedAt ?? (Number.isFinite(lastSeenAtMs) ? lastSeenAtMs : now);
+    if (now - disconnectedAt < relayConfig.disconnectedCliTtlMs) {
+      continue;
+    }
+    cliRecords.delete(cliId);
+    dropConversationCachesForCli(cliId, retainedKeys);
+    changed = true;
+  }
+
+  if (changed) {
+    emitCliStatus(io);
+  }
+}
+
+function pruneRelayState(io: SocketIOServer): void {
+  const now = Date.now();
+  const activeCacheKeys = getActiveConversationCacheKeys();
+  const subscribedCliIds = getSubscribedCliIds();
+  pruneReplayBuffers(activeCacheKeys, now);
+  pruneCliRecords(io, subscribedCliIds, activeCacheKeys, now);
 }
 
 function getProviderRecord(record: CliRuntimeRecord, providerId: ProviderId): CliProviderRuntimeRecord | null {
@@ -954,10 +1051,11 @@ export async function startSocketServer(): Promise<void> {
       const record: CliRuntimeRecord = {
         socket,
         descriptor: createCliDescriptor(cliId, payload),
+        disconnectedAt: null,
         runtimes: Object.fromEntries(
           normalizeSupportedProviders(payload).map((providerId) => [
             providerId,
-            createProviderRuntimeRecord(payload, providerId, previous ? getProviderRecord(previous, providerId) : null)
+            createProviderRuntimeRecord(previous ? getProviderRecord(previous, providerId) : null)
           ])
         )
       };
@@ -989,6 +1087,7 @@ export async function startSocketServer(): Promise<void> {
       }
 
       record.descriptor.connected = true;
+      record.disconnectedAt = null;
       providerRecord.snapshot = cloneValue(payload.snapshot);
       updateDescriptorFromSnapshot(record, payload.providerId);
       const snapshotPayload = {
@@ -1012,6 +1111,7 @@ export async function startSocketServer(): Promise<void> {
       }
 
       record.descriptor.connected = true;
+      record.disconnectedAt = null;
       record.descriptor.lastSeenAt = new Date().toISOString();
       const basePayload = {
         ...cloneValue(payload),
@@ -1043,6 +1143,7 @@ export async function startSocketServer(): Promise<void> {
       }
 
       record.descriptor.connected = true;
+      record.disconnectedAt = null;
       record.descriptor.lastSeenAt = new Date().toISOString();
       if (!appendTerminalFramePatch(providerRecord, payload.patch, payload.conversationKey ?? null)) {
         return;
@@ -1069,6 +1170,7 @@ export async function startSocketServer(): Promise<void> {
       }
 
       deleteTerminalSessionCache(providerRecord, payload.sessionId);
+      record.disconnectedAt = null;
       record.descriptor.lastSeenAt = new Date().toISOString();
     });
 
@@ -1098,6 +1200,7 @@ export async function startSocketServer(): Promise<void> {
         ),
         lastSeenAt: new Date().toISOString()
       };
+      record.disconnectedAt = Date.now();
       emitCliStatus(io);
     });
   });
@@ -1158,8 +1261,14 @@ export async function startSocketServer(): Promise<void> {
 
     socket.on('disconnect', () => {
       webRuntimeSubscriptions.delete(socket.id);
+      pruneRelayState(io);
     });
   });
+
+  const relayGcTimer = setInterval(() => {
+    pruneRelayState(io);
+  }, relayConfig.cacheGcIntervalMs);
+  relayGcTimer.unref();
 
   await new Promise<void>((resolve) => {
     httpServer!.listen(PORT, HOST, () => {

@@ -27,9 +27,6 @@ export function createCodexProviderRuntime(
     dispatchMessage(content: string) {
       return manager.dispatchMessage(content);
     },
-    getOlderMessages(beforeMessageId?: string, maxMessages?: number) {
-      return manager.getOlderMessages(beforeMessageId, maxMessages);
-    },
     getRegistrationPayload() {
       return manager.getRegistrationPayload();
     },

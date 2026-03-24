@@ -3,9 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 export interface RelayConfig {
+  cacheGcIntervalMs: number;
+  disconnectedCliTtlMs: number;
   host: string;
   port: number;
   replayBufferSize: number;
+  replayBufferKeysMax: number;
+  replayBufferTtlMs: number;
   snapshotCacheMax: number;
   snapshotMaxBytes: number;
   socketMaxHttpBufferSize: number;
@@ -16,9 +20,13 @@ const USER_CONFIG_DIR = path.join(os.homedir(), '.pty-remote');
 const USER_CONFIG_PATH = path.join(USER_CONFIG_DIR, 'relay.conf');
 const MIN_SOCKET_MAX_HTTP_BUFFER_SIZE = 1024 * 1024;
 const DEFAULTS: RelayConfig = {
+  cacheGcIntervalMs: 60_000,
+  disconnectedCliTtlMs: 30 * 60 * 1000,
   host: '127.0.0.1',
   port: 3001,
   replayBufferSize: 200,
+  replayBufferKeysMax: 512,
+  replayBufferTtlMs: 30 * 60 * 1000,
   snapshotCacheMax: 50,
   snapshotMaxBytes: 200_000,
   socketMaxHttpBufferSize: 8 * 1024 * 1024,
@@ -88,9 +96,13 @@ export function loadRelayConfig(rootDir: string): RelayConfig {
   }
 
   return {
+    cacheGcIntervalMs: parseNumber(entries.RELAY_CACHE_GC_INTERVAL_MS, DEFAULTS.cacheGcIntervalMs),
+    disconnectedCliTtlMs: parseNumber(entries.RELAY_DISCONNECTED_CLI_TTL_MS, DEFAULTS.disconnectedCliTtlMs),
     host: parseString(entries.HOST, DEFAULTS.host),
     port: parseNumber(entries.PORT, DEFAULTS.port),
     replayBufferSize: parseNumber(entries.RELAY_REPLAY_BUFFER_SIZE, DEFAULTS.replayBufferSize),
+    replayBufferKeysMax: parseNumber(entries.RELAY_REPLAY_BUFFER_KEYS_MAX, DEFAULTS.replayBufferKeysMax),
+    replayBufferTtlMs: parseNumber(entries.RELAY_REPLAY_BUFFER_TTL_MS, DEFAULTS.replayBufferTtlMs),
     snapshotCacheMax: parseNumber(entries.RELAY_SNAPSHOT_CACHE_MAX, DEFAULTS.snapshotCacheMax),
     snapshotMaxBytes: parseNumber(entries.RELAY_SNAPSHOT_MAX_BYTES, DEFAULTS.snapshotMaxBytes),
     socketMaxHttpBufferSize: Math.max(

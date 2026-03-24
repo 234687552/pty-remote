@@ -32,6 +32,9 @@ export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChang
       onDeleteConversation={(project, providerId, conversation) =>
         controller.deleteConversation(project, providerId, conversation)
       }
+      onRefreshConversation={(project, providerId, conversation) =>
+        controller.refreshConversation(project, providerId, conversation)
+      }
       onImportConversationFromSession={controller.importConversationFromSession}
       onListManagedPtyHandles={controller.listManagedPtyHandles}
       onPickProjectDirectory={controller.pickProjectDirectory}

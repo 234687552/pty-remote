@@ -18,7 +18,7 @@ import {
 } from '@lzdi/pty-remote-protocol/terminal-frame.ts';
 import type { ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
-import { MOBILE_TERMINAL_BREAKPOINT, MOBILE_TERMINAL_MIN_COLS } from '@/lib/runtime.ts';
+import { MOBILE_TERMINAL_BREAKPOINT } from '@/lib/runtime.ts';
 
 interface UseTerminalBridgeOptions {
   activeCliId: string | null;
@@ -177,20 +177,14 @@ export function useTerminalBridge({
     const viewportHeight = terminalViewport.clientHeight;
     const proposedCols = Math.max(1, Math.floor(viewportWidth / cellWidth));
     const proposedRows = Math.max(1, Math.floor(viewportHeight / cellHeight));
-    const shouldAllowHorizontalScroll = viewportWidth > 0 && viewportWidth < MOBILE_TERMINAL_BREAKPOINT;
+    const isMobileViewport = viewportWidth > 0 && viewportWidth < MOBILE_TERMINAL_BREAKPOINT;
     const nextSize = {
-      cols: Math.max(shouldAllowHorizontalScroll ? MOBILE_TERMINAL_MIN_COLS : 20, proposedCols),
+      cols: Math.max(20, proposedCols),
       rows: Math.max(8, proposedRows)
     };
 
-    if (shouldAllowHorizontalScroll) {
-      const targetWidth = Math.ceil(cellWidth * nextSize.cols);
-      terminalHost.style.width = `${targetWidth}px`;
-      terminalHost.style.minWidth = `${targetWidth}px`;
-    } else {
-      terminalHost.style.width = '100%';
-      terminalHost.style.minWidth = '100%';
-    }
+    terminalHost.style.width = '100%';
+    terminalHost.style.minWidth = isMobileViewport ? '0' : '100%';
 
     if (lastTerminalSizeRef.current?.cols === nextSize.cols && lastTerminalSizeRef.current?.rows === nextSize.rows) {
       return;

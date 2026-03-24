@@ -1,11 +1,10 @@
-import { PROVIDER_LABELS, type ChatMessage, type ChatMessageBlock, type CliDescriptor, type ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import type { ChatMessage, ChatMessageBlock, CliDescriptor, ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import {
-  createEmptySnapshot,
   getRuntimeStatusLabel,
   isBusyStatus,
   isCliOfflineMessage,
-  mergeChronologicalMessages
+  mergeChronologicalMessages,
 } from '@/lib/runtime.ts';
 import {
   compactPreview,
@@ -89,7 +88,7 @@ export function selectActiveConversation(
 }
 
 export function selectVisibleMessages(store: WorkspaceStore): ChatMessage[] {
-  return mergeChronologicalMessages(store.olderMessages, store.snapshot.messages);
+  return store.snapshot.messages;
 }
 
 function getUserMessageText(message: ChatMessage): string {
@@ -244,11 +243,6 @@ export function selectHeaderSummary(store: WorkspaceStore, clis: CliDescriptor[]
   ];
 }
 
-export function selectMobileHeaderTitle(store: WorkspaceStore, clis: CliDescriptor[]): string {
-  const { activeCli, activeProject, activeConversation } = selectWorkspaceDerivedState(store, clis, true);
-  return compactPreview(activeConversation?.title ?? activeProject?.label ?? activeCli?.label ?? 'pty-remote', 36);
-}
-
 export function selectMobileProjectTitle(store: WorkspaceStore, clis: CliDescriptor[]): string {
   const { activeProject } = selectWorkspaceDerivedState(store, clis, true);
   return compactPreview(activeProject?.label ?? 'pty-remote', 28);
@@ -265,11 +259,9 @@ export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescript
     canAttach,
     canCompose,
     canSend,
-    canStop,
-    connected
+    canStop
   } =
     selectWorkspaceDerivedState(store, clis, socketConnected);
-  const providerLabel = activeProviderId ? PROVIDER_LABELS[activeProviderId] : 'provider';
   const hasCliCommandTimeout =
     isCliCommandTimeoutMessage(store.error) || isCliCommandTimeoutMessage(store.snapshot.lastError);
 
@@ -343,8 +335,4 @@ export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescript
 
 function isCliCommandTimeoutMessage(message: string | null | undefined): boolean {
   return (message ?? '').trim().toLowerCase() === 'cli command timeout';
-}
-
-export function selectSnapshotOrEmpty(snapshot = createEmptySnapshot()) {
-  return snapshot;
 }
