@@ -1633,7 +1633,7 @@ export function ChatPane({
         <div
           ref={messagesRef}
           onScroll={handleMessagesScroll}
-          className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-3 py-4 sm:px-3 lg:px-4"
+          className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
         >
           {displayItems.length === 0
             ? null

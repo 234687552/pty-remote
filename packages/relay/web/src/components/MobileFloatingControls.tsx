@@ -150,6 +150,7 @@ export function MobileFloatingControls({
   const isTerminalPane = mobilePane === 'terminal';
   const canJumpUp = jumpControls?.canJumpUp ?? false;
   const canJumpDown = jumpControls?.canJumpDown ?? false;
+  const dockOffsetBottom = Math.max(0.75 * 16, composerDockHeight - 28);
 
   useEffect(() => {
     if (!expanded) {
@@ -201,7 +202,7 @@ export function MobileFloatingControls({
       className="pointer-events-none fixed right-0 bottom-0 z-30 lg:hidden"
       style={{
         right: 'max(env(safe-area-inset-right), 0.75rem)',
-        bottom: `calc(max(env(safe-area-inset-bottom), 0px) + ${composerDockHeight}px + 0.75rem)`
+        bottom: `calc(max(env(safe-area-inset-bottom), 0px) + ${dockOffsetBottom}px)`
       }}
     >
       <div className="pointer-events-auto flex items-center justify-end">

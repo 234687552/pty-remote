@@ -158,7 +158,7 @@ export function TerminalPane({
         >
           <div
             ref={hostRef}
-            className="terminal-frame min-h-full min-w-full bg-transparent px-3 py-3 text-[12px] leading-[1.2] text-zinc-900 sm:px-4 lg:rounded-2xl lg:bg-white lg:px-5 lg:py-4"
+            className="terminal-frame min-h-full min-w-full bg-transparent px-3 pt-3 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] text-[12px] leading-[1.2] text-zinc-900 sm:px-4 lg:rounded-2xl lg:bg-white lg:px-5 lg:py-4"
           >
             <span
               aria-hidden="true"
