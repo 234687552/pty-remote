@@ -95,7 +95,6 @@ let shutdownPromise: Promise<void> | null = null;
 const attachmentManager = new AttachmentManager();
 
 const runtimeOptions: PtyManagerOptions = {
-  claudeBin: getConfigValue('CLAUDE_BIN') ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/claude' : 'claude'),
   permissionMode: CLAUDE_PERMISSION_MODE,
   defaultCwd: DEFAULT_ROOT_DIR,
   terminalCols: TERMINAL_COLS,
@@ -115,7 +114,6 @@ const runtimeOptions: PtyManagerOptions = {
 };
 
 const codexRuntimeOptions: CodexProviderRuntimeOptions = {
-  codexBin: getConfigValue('CODEX_BIN') ?? (process.platform === 'darwin' ? '/opt/homebrew/bin/codex' : 'codex'),
   defaultCwd: DEFAULT_ROOT_DIR,
   terminalCols: TERMINAL_COLS,
   terminalRows: TERMINAL_ROWS,

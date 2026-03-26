@@ -1,4 +1,5 @@
 import { spawn as spawnPty, type IPty } from 'node-pty';
+import { createCodexShellExecConfig } from './codex-shell.ts';
 
 export interface CodexPtySession {
   pty: IPty;
@@ -9,7 +10,6 @@ export interface CodexPtySession {
 export type CodexPtyLifecycle = 'not_ready' | 'idle' | 'running';
 
 interface StartCodexPtySessionOptions {
-  codexBin: string;
   cols: number;
   cwd: string;
   env: NodeJS.ProcessEnv;
@@ -20,7 +20,7 @@ interface StartCodexPtySessionOptions {
 }
 
 export function createCodexLaunchConfig(
-  codexBin: string,
+  env: NodeJS.ProcessEnv,
   cwd: string,
   resumeSessionId?: string | null
 ): {
@@ -31,15 +31,11 @@ export function createCodexLaunchConfig(
   if (resumeSessionId) {
     args.push('resume', resumeSessionId);
   }
-
-  return {
-    command: codexBin,
-    args
-  };
+  return createCodexShellExecConfig(args, env);
 }
 
 export function startCodexPtySession(options: StartCodexPtySessionOptions): CodexPtySession {
-  const launch = createCodexLaunchConfig(options.codexBin, options.cwd, options.resumeSessionId);
+  const launch = createCodexLaunchConfig(options.env, options.cwd, options.resumeSessionId);
   const pty = spawnPty(launch.command, launch.args, {
     cols: options.cols,
     rows: options.rows,

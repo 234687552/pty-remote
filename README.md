@@ -171,6 +171,13 @@ SOCKET_URL=http://127.0.0.1:3001 npx -y @lzdi/pty-remote-cli
 - cli: `SOCKET_URL`, `PTY_REMOTE_PROVIDERS`, `PTY_REMOTE_PROVIDER`, `PTY_REMOTE_CLI_ID`
 - web: `VITE_SOCKET_URL`
 
+Claude / Codex PTY 默认通过当前用户的登录交互 shell 启动，因此会尽量复用 `~/.zshrc`、`alias claude=...`、`alias codex=...`、shell function 和代理环境。
+
+要求：
+
+- 启动 `pty-remote-cli` 的环境里必须存在 `SHELL`
+- 你的 shell 配置需要能在登录交互模式下解析 `claude` / `codex`
+
 ```bash
 curl http://127.0.0.1:3001/healthz
 ```

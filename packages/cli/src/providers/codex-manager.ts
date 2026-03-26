@@ -33,7 +33,6 @@ import { findCodexSessionFile, findLatestCodexSessionForCwdSince, type CodexHist
 import { HeadlessTerminalFrameState } from '../terminal/frame-state.ts';
 
 export interface CodexManagerOptions extends CodexHistoryOptions {
-  codexBin: string;
   defaultCwd: string;
   terminalCols: number;
   terminalRows: number;
@@ -1191,7 +1190,6 @@ export class CodexManager {
       token
     });
     const started = startCodexPtySession({
-      codexBin: this.options.codexBin,
       cols: this.terminalSize.cols,
       cwd: handle.cwd,
       env: {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { spawn as spawnPty, type IPty } from 'node-pty';
+import { createClaudeShellExecConfig } from './claude-shell.ts';
 
 export interface ClaudePtySession {
   pty: IPty;
@@ -10,7 +11,6 @@ export interface ClaudePtySession {
 export type ClaudePtyLifecycle = 'not_ready' | 'idle' | 'running';
 
 interface StartClaudePtySessionOptions {
-  claudeBin: string;
   cols: number;
   cwd: string;
   env: NodeJS.ProcessEnv;
@@ -22,7 +22,7 @@ interface StartClaudePtySessionOptions {
 }
 
 export function createClaudeLaunchConfig(
-  claudeBin: string,
+  env: NodeJS.ProcessEnv,
   permissionMode: string,
   resumeSessionId?: string | null
 ): {
@@ -31,17 +31,17 @@ export function createClaudeLaunchConfig(
   sessionId: string;
 } {
   if (resumeSessionId) {
+    const args = ['--permission-mode', permissionMode, '--resume', resumeSessionId];
     return {
-      command: claudeBin,
-      args: ['--permission-mode', permissionMode, '--resume', resumeSessionId],
+      ...createClaudeShellExecConfig(args, env),
       sessionId: resumeSessionId
     };
   }
 
   const sessionId = randomUUID();
+  const args = ['--permission-mode', permissionMode, '--session-id', sessionId];
   return {
-    command: claudeBin,
-    args: ['--permission-mode', permissionMode, '--session-id', sessionId],
+    ...createClaudeShellExecConfig(args, env),
     sessionId
   };
 }
@@ -50,7 +50,7 @@ export function startClaudePtySession(options: StartClaudePtySessionOptions): {
   session: ClaudePtySession;
   sessionId: string;
 } {
-  const launch = createClaudeLaunchConfig(options.claudeBin, options.permissionMode, options.resumeSessionId);
+  const launch = createClaudeLaunchConfig(options.env, options.permissionMode, options.resumeSessionId);
   const pty = spawnPty(launch.command, launch.args, {
     cols: options.cols,
     rows: options.rows,

@@ -29,7 +29,6 @@ import {
 import { HeadlessTerminalFrameState } from '../terminal/frame-state.ts';
 
 export interface PtyManagerOptions {
-  claudeBin: string;
   permissionMode: string;
   defaultCwd: string;
   terminalCols: number;
@@ -1161,7 +1160,6 @@ export class PtyManager {
       token
     });
     const started = startClaudePtySession({
-      claudeBin: this.options.claudeBin,
       cols: this.terminalSize.cols,
       cwd: handle.cwd,
       env: {

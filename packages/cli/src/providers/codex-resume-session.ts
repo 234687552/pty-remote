@@ -6,14 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import { resolveCodexHistoryPaths, type CodexHistoryOptions } from './codex-history.ts';
+import { createCodexShellExecConfig } from './codex-shell.ts';
 
 const execFileAsync = promisify(execFile);
 const TEMPLATE_FILE_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../codex_template.jsonl');
 const PLACEHOLDER_PATTERN = /^\{\{([a-z0-9_.]+)\}\}$/i;
-
-interface CodexResumeSessionOptions extends CodexHistoryOptions {
-  codexBin?: string;
-}
 
 interface SessionMetaTemplateRecord {
   timestamp?: string;
@@ -180,9 +177,10 @@ async function readGitMetadata(cwd: string): Promise<GitMetadataPayload | null> 
   return Object.keys(metadata).length > 0 ? metadata : null;
 }
 
-async function readCodexCliVersion(codexBin = 'codex'): Promise<string | null> {
+async function readCodexCliVersion(): Promise<string | null> {
   try {
-    const result = await execFileAsync(codexBin, ['--version'], { encoding: 'utf8' });
+    const launch = createCodexShellExecConfig(['--version'], process.env);
+    const result = await execFileAsync(launch.command, launch.args, { encoding: 'utf8' });
     const version = result.stdout.trim();
     return version || null;
   } catch {
@@ -220,7 +218,7 @@ function buildSessionMetaRecord(
 
 export async function prepareCodexResumeSession(
   cwd: string,
-  options: CodexResumeSessionOptions = {}
+  options: CodexHistoryOptions = {}
 ): Promise<PreparedCodexResumeSession> {
   const resolvedCwd = path.resolve(cwd);
   const { sessionsRootPath } = resolveCodexHistoryPaths(options);
@@ -228,7 +226,7 @@ export async function prepareCodexResumeSession(
   const sessionId = randomUUID();
   const now = new Date();
   const timestamp = now.toISOString();
-  const cliVersion = (await readCodexCliVersion(options.codexBin)) ?? 'unknown';
+  const cliVersion = (await readCodexCliVersion()) ?? 'unknown';
   const gitMetadata = await readGitMetadata(resolvedCwd);
   const nextRecord = buildSessionMetaRecord(
     template,
