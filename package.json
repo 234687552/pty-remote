@@ -18,6 +18,8 @@
     "start:cli": "npm run start --workspace @lzdi/pty-remote-cli",
     "start:cli:claude": "npm run start:claude --workspace @lzdi/pty-remote-cli",
     "start:cli:codex": "npm run start:codex --workspace @lzdi/pty-remote-cli",
+    "release:prepare": "node scripts/prepare-release.mjs",
+    "release": "node scripts/create-release.mjs",
     "release:publish": "node scripts/publish-workspaces.mjs",
     "threads": "npm run threads --workspace @lzdi/pty-remote-cli"
   },

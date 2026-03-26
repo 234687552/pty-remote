@@ -187,9 +187,18 @@ curl http://127.0.0.1:3001/healthz
 仓库内置了 GitHub Actions 工作流：
 
 - workflow: `.github/workflows/publish-npm.yml`
-- 触发方式：
-  - 手动 `workflow_dispatch`
-  - 推送 tag：`v*`
+
+推荐发布流程：
+
+1. 把要发布的代码合到本地 `main`
+2. 运行 `npm run release -- 0.1.6`
+3. 脚本会自动拉取 `origin/main` 最新代码、更新 workspace 版本、刷新 `package-lock.json`、提交 `Release vX.Y.Z`、创建 tag `vX.Y.Z`
+4. 脚本会用 `git push --atomic` 一次性推送最新 commit 和 tag
+5. tag 推送后，`Publish to npm` 会自动触发并发布所有公开 workspace
+
+触发方式：
+
+- `Publish to npm`：推送 tag `v*`
 
 发布行为：
 
@@ -202,8 +211,9 @@ curl http://127.0.0.1:3001/healthz
 
 - `NPM_TOKEN`
 
-如果只是本地预演发布顺序，可以运行：
+如果只是本地预演：
 
 ```bash
+npm run release:prepare -- 0.1.6
 DRY_RUN=1 npm run release:publish
 ```
