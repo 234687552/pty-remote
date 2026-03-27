@@ -4,6 +4,8 @@ import { createCodexShellExecConfig } from './codex-shell.ts';
 export interface CodexPtySession {
   pty: IPty;
   recentOutput: string;
+  startupDirectoryTrustPromptHandled: boolean;
+  startupModelChoicePromptHandled: boolean;
   startupUpdatePromptHandled: boolean;
 }
 
@@ -47,6 +49,8 @@ export function startCodexPtySession(options: StartCodexPtySessionOptions): Code
   const session: CodexPtySession = {
     pty,
     recentOutput: '',
+    startupDirectoryTrustPromptHandled: false,
+    startupModelChoicePromptHandled: false,
     startupUpdatePromptHandled: false
   };
 
@@ -90,8 +94,22 @@ export function appendRecentOutput(session: CodexPtySession, chunk: string, maxC
   return session.recentOutput;
 }
 
+function stripAnsi(text: string): string {
+  return text
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/gu, '')
+    .replace(/\u001b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/gu, '');
+}
+
 function normalizeOutput(text: string): string {
-  return text.replace(/\r/g, '\n');
+  return stripAnsi(text).replace(/\r/g, '\n');
+}
+
+function compactKeywordText(text: string): string {
+  return normalizeOutput(text).toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+function includesAllKeywords(text: string, keywords: string[]): boolean {
+  return keywords.every((keyword) => text.includes(keyword));
 }
 
 function tailOutput(text: string, maxChars = 8_000): string {
@@ -103,6 +121,15 @@ const PROMPT_LINE_PATTERN = /(^|\n)\s*[›>]\s*[^\n]*$/gimu;
 const DIRECTORY_TRUST_PROMPT_PATTERN = /Do you trust the contents of this directory\?/i;
 const UPDATE_AVAILABLE_PROMPT_PATTERN = /Update\s+available!?/i;
 const UPDATE_SKIP_OPTION_PATTERN = /(^|\n)\s*2\.\s*Skip(?:\s|$)/im;
+const UPDATE_SKIP_UNTIL_NEXT_VERSION_PATTERN = /(^|\n)\s*3\.\s*Skip until next version(?:\s|$)/im;
+const UPDATE_CONTINUE_PATTERN = /Press enter to continue/i;
+const MODEL_CHOICE_HEADER_PATTERN = /Choose how you'd like Codex to proceed\./i;
+const MODEL_TRY_NEW_OPTION_PATTERN = /(^|\n)\s*1\.\s*Try new model(?:\s|$)/im;
+const MODEL_USE_EXISTING_OPTION_PATTERN = /(^|\n)\s*2\.\s*Use existing model(?:\s|$)/im;
+const MODEL_CONFIRM_FOOTER_PATTERN = /Use\s+↑\/↓\s+to move,\s+press enter to confirm/i;
+const DIRECTORY_TRUST_KEYWORDS = ['trust', 'directory', 'yes', 'continue'];
+const MODEL_CHOICE_KEYWORDS = ['choose', 'codex', 'proceed', 'try', 'new', 'model', 'use', 'existing'];
+const UPDATE_PROMPT_KEYWORDS = ['update', 'available', 'skip', 'continue'];
 const STARTER_PROMPT_PATTERN =
   /Use \/skills to list available skills|Improve documentation in @filename|To get started, describe a task|Implement\s+\{feature\}|Implement\s+<feature>/i;
 
@@ -127,12 +154,31 @@ export function looksReadyForInput(output: string): boolean {
 }
 
 export function looksLikeDirectoryTrustPrompt(output: string): boolean {
-  return DIRECTORY_TRUST_PROMPT_PATTERN.test(tailOutput(output));
+  const tail = tailOutput(output);
+  return (
+    DIRECTORY_TRUST_PROMPT_PATTERN.test(tail) ||
+    includesAllKeywords(compactKeywordText(tail), DIRECTORY_TRUST_KEYWORDS)
+  );
+}
+
+export function looksLikeModelChoicePrompt(output: string): boolean {
+  const tail = tailOutput(output);
+  const hasHeader = MODEL_CHOICE_HEADER_PATTERN.test(tail);
+  const hasChoices =
+    MODEL_TRY_NEW_OPTION_PATTERN.test(tail) && MODEL_USE_EXISTING_OPTION_PATTERN.test(tail);
+  const hasFooter = MODEL_CONFIRM_FOOTER_PATTERN.test(tail);
+  const hasKeywordShape = includesAllKeywords(compactKeywordText(tail), MODEL_CHOICE_KEYWORDS);
+  return (hasHeader && hasChoices) || (hasChoices && hasFooter) || hasKeywordShape;
 }
 
 export function looksLikeUpdatePrompt(output: string): boolean {
   const tail = tailOutput(output);
-  return UPDATE_AVAILABLE_PROMPT_PATTERN.test(tail) && UPDATE_SKIP_OPTION_PATTERN.test(tail);
+  const hasHeader = UPDATE_AVAILABLE_PROMPT_PATTERN.test(tail);
+  const hasSkipChoice =
+    UPDATE_SKIP_OPTION_PATTERN.test(tail) || UPDATE_SKIP_UNTIL_NEXT_VERSION_PATTERN.test(tail);
+  const hasFooter = UPDATE_CONTINUE_PATTERN.test(tail);
+  const hasKeywordShape = includesAllKeywords(compactKeywordText(tail), UPDATE_PROMPT_KEYWORDS);
+  return (hasHeader && (hasSkipChoice || hasFooter)) || hasKeywordShape;
 }
 
 export function showsStarterPrompt(output: string): boolean {

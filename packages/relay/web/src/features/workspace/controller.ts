@@ -84,6 +84,7 @@ const MAX_IMAGE_UPLOAD_BYTES = 4 * 1024 * 1024;
 const IMAGE_COMPRESSION_THRESHOLD_BYTES = 1024 * 1024;
 const IMAGE_MAX_DIMENSION = 1600;
 const IMAGE_JPEG_QUALITY = 0.82;
+const ALL_PROVIDERS: ProviderId[] = ['claude', 'codex'];
 
 function createAttachmentPreviewUrl(file: File): string {
   return URL.createObjectURL(file);
@@ -215,6 +216,29 @@ function getConnectedCliForProvider(
   }
 
   return candidates.find((cli) => cli.cliId === preferredCliId) ?? candidates[0] ?? null;
+}
+
+function getProjectPreferredConversation(
+  projectConversationsByKey: Record<string, ProjectConversationEntry[]>,
+  projectId: string,
+  preferredProviderId: ProviderId | null
+): { providerId: ProviderId; conversation: ProjectConversationEntry } | null {
+  const providerOrder = preferredProviderId
+    ? [preferredProviderId, ...ALL_PROVIDERS.filter((providerId) => providerId !== preferredProviderId)]
+    : ALL_PROVIDERS;
+
+  for (const providerId of providerOrder) {
+    const conversations = projectConversationsByKey[getProjectProviderKey(projectId, providerId)] ?? [];
+    const conversation = conversations[0] ?? null;
+    if (conversation) {
+      return {
+        providerId,
+        conversation
+      };
+    }
+  }
+
+  return null;
 }
 
 export function useWorkspaceController({
@@ -1156,7 +1180,7 @@ export function useWorkspaceController({
     try {
       store.setError('');
       const deletingActiveProject = store.workspaceState.activeProjectId === project.id;
-      const providerIds = new Set<ProviderId>(['claude', 'codex']);
+      const providerIds = new Set<ProviderId>(ALL_PROVIDERS);
 
       for (const storageKey of Object.keys(store.projectConversationsByKey)) {
         if (!storageKey.startsWith(`${project.id}:`)) {
@@ -1184,6 +1208,18 @@ export function useWorkspaceController({
         store.setProjectConversations(project.id, providerId, () => []);
       }
 
+      const fallbackProject = deletingActiveProject
+        ? sortProjects(store.workspaceState.projects.filter((entry) => entry.id !== project.id))[0] ?? null
+        : null;
+      const fallbackSelection =
+        fallbackProject && deletingActiveProject
+          ? getProjectPreferredConversation(
+              store.projectConversationsByKey,
+              fallbackProject.id,
+              store.workspaceState.activeProviderId
+            )
+          : null;
+
       store.patchWorkspace((current) => {
         const nextProjects = sortProjects(current.projects.filter((entry) => entry.id !== project.id));
         if (current.activeProjectId !== project.id) {
@@ -1198,8 +1234,8 @@ export function useWorkspaceController({
           ...current,
           projects: nextProjects,
           activeProjectId: fallbackProject?.id ?? null,
-          activeProviderId: fallbackProject ? current.activeProviderId : null,
-          activeConversationId: null
+          activeProviderId: fallbackProject ? fallbackSelection?.providerId ?? current.activeProviderId : null,
+          activeConversationId: fallbackSelection?.conversation.id ?? null
         };
       });
 

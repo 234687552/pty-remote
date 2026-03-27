@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import type React from 'react';
 
 import type { ComposerAttachment } from '@/features/workspace/types.ts';
+import { TerminalQuickKeys } from '@/components/TerminalQuickKeys.tsx';
 
 interface StatusBadge {
   className: string;
@@ -14,6 +16,7 @@ interface ComposerProps {
   canAttach: boolean;
   canCompose: boolean;
   canSend: boolean;
+  canSendTerminalInput: boolean;
   canStop: boolean;
   cliBadge: StatusBadge;
   conversationBadge: StatusBadge;
@@ -22,12 +25,14 @@ interface ComposerProps {
   prompt: string;
   slashCommands: string[];
   socketBadge: StatusBadge;
+  statusActions?: React.ReactNode;
   placeholder: string;
   onAddImages: (files: File[]) => void;
   onPromptChange: (value: string) => void;
   onRemoveAttachment: (localId: string) => void;
   onStop: () => void;
   onSubmit: (event: React.FormEvent) => void;
+  onTerminalInput: (input: string) => void;
 }
 
 const COMPOSER_TOOL_BUTTONS = [
@@ -88,6 +93,7 @@ export function Composer({
   canAttach,
   canCompose,
   canSend,
+  canSendTerminalInput,
   canStop,
   cliBadge,
   conversationBadge,
@@ -97,17 +103,20 @@ export function Composer({
   prompt,
   slashCommands,
   socketBadge,
+  statusActions,
   onAddImages,
   onPromptChange,
   onRemoveAttachment,
   onStop,
-  onSubmit
+  onSubmit,
+  onTerminalInput
 }: ComposerProps) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingSelectionRef = useRef<number | null>(null);
   const isPromptComposingRef = useRef(false);
+  const submitAfterCompositionRef = useRef(false);
   const [composerHeight, setComposerHeight] = useState(COMPOSER_MIN_HEIGHT_PX);
   const [promptScrollable, setPromptScrollable] = useState(false);
   const [selection, setSelection] = useState({ start: prompt.length, end: prompt.length });
@@ -278,6 +287,10 @@ export function Composer({
     return event.nativeEvent.isComposing || isPromptComposingRef.current || event.nativeEvent.keyCode === 229;
   }
 
+  function requestComposerSubmit(): void {
+    promptRef.current?.form?.requestSubmit();
+  }
+
   return (
     <form
       ref={formRef}
@@ -293,18 +306,29 @@ export function Composer({
         onChange={handleImageInputChange}
       />
 
-      <div className="mb-1 grid grid-cols-3 gap-0.5 px-1 text-[9px] font-medium md:mb-px md:flex md:flex-wrap md:gap-1.5 md:px-0 md:text-[11px]">
-        {[conversationBadge, socketBadge, cliBadge].map((badge) => (
-          <span
-            key={badge.label}
-            className={['truncate rounded-full px-1.5 py-0.5 text-center opacity-80 md:px-2.5 md:opacity-100', badge.className].join(' ')}
-          >
-            {badge.label}: {badge.value}
-          </span>
-        ))}
+      <div className="mb-0 px-1 text-[9px] font-medium md:mb-px md:px-0 md:text-[11px]">
+        <div className="hidden min-w-0 md:flex md:flex-wrap md:gap-1.5">
+          {[conversationBadge, socketBadge, cliBadge].map((badge) => (
+            <span
+              key={badge.label}
+              className={[
+                'min-w-0 truncate rounded-full px-1.5 py-0.5 text-center opacity-80 md:px-2.5 md:opacity-100',
+                badge.className
+              ].join(' ')}
+            >
+              {badge.label}: {badge.value}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <div className="mb-1 hidden justify-end px-1 md:flex">
+        <TerminalQuickKeys variant="desktop" disabled={!canSendTerminalInput} onInput={onTerminalInput} />
       </div>
 
       <div className="relative rounded-[1.5rem] border border-zinc-200/80 bg-zinc-100/90 shadow-[0_1px_0_rgba(255,255,255,0.55)_inset] md:bg-white md:shadow-none">
+        {statusActions ? <div className="border-b border-zinc-200/70 px-2 pt-0.5 pb-0.5 md:hidden">{statusActions}</div> : null}
+
         {canCompose && slashSuggestions.length > 0 ? (
           <div className="absolute inset-x-4 bottom-14 z-20 max-h-56 overflow-y-auto rounded-3xl border border-zinc-200 bg-white p-1 shadow-[0_20px_50px_rgba(15,23,42,0.12)] backdrop-blur">
             {slashSuggestions.map((command, index) => {
@@ -408,18 +432,50 @@ export function Composer({
               }
             }
 
-            if (event.key !== 'Enter' || event.shiftKey || isComposing) {
+            if (event.key !== 'Enter' || event.shiftKey) {
+              submitAfterCompositionRef.current = false;
+              return;
+            }
+
+            if (isComposing) {
+              submitAfterCompositionRef.current = slashSuggestions.length === 0;
+              event.preventDefault();
+              return;
+            }
+
+            submitAfterCompositionRef.current = false;
+            event.preventDefault();
+            requestComposerSubmit();
+          }}
+          onBeforeInput={(event) => {
+            const nativeEvent = event.nativeEvent as InputEvent;
+            if (nativeEvent.inputType !== 'insertLineBreak') {
               return;
             }
 
             event.preventDefault();
-            event.currentTarget.form?.requestSubmit();
+            if (isPromptComposingRef.current) {
+              submitAfterCompositionRef.current = slashSuggestions.length === 0;
+              return;
+            }
+
+            submitAfterCompositionRef.current = false;
+            requestComposerSubmit();
           }}
           onCompositionStart={() => {
             isPromptComposingRef.current = true;
+            submitAfterCompositionRef.current = false;
           }}
           onCompositionEnd={() => {
             isPromptComposingRef.current = false;
+            if (!submitAfterCompositionRef.current) {
+              return;
+            }
+
+            submitAfterCompositionRef.current = false;
+            requestAnimationFrame(() => {
+              requestComposerSubmit();
+            });
           }}
           onPaste={(event) => {
             const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'));
@@ -450,6 +506,7 @@ export function Composer({
           }}
           rows={1}
           placeholder={placeholder}
+          enterKeyHint="send"
           className={[
             'w-full rounded-[1.5rem] border border-transparent bg-transparent px-6 pt-4 pr-24 pb-10 text-[16px] leading-6 text-zinc-800 outline-none ring-0 placeholder:text-zinc-500 focus:border-transparent',
             'resize-none',

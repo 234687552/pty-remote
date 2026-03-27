@@ -210,6 +210,12 @@ export interface TerminalResizePayload {
   rows: number;
 }
 
+export interface TerminalInputPayload {
+  targetCliId: string | null;
+  targetProviderId: ProviderId | null;
+  input: string;
+}
+
 export interface TerminalFrameSyncResultPayload {
   ok: boolean;
   error?: string;

@@ -51,6 +51,9 @@ export function createCodexProviderRuntime(
     resetActiveConversation() {
       return manager.resetActiveThread();
     },
+    sendTerminalInput(input: string) {
+      return manager.sendTerminalInput(input);
+    },
     shutdown() {
       return manager.shutdown();
     },

@@ -423,6 +423,25 @@ export class PtyManager {
     this.emitSnapshotNow();
   }
 
+  async sendTerminalInput(input: string): Promise<void> {
+    const handle = this.getActiveHandle();
+    if (!handle) {
+      throw new Error('No active thread selected');
+    }
+
+    if (!input) {
+      return;
+    }
+
+    await this.ensureHandleSession(handle);
+    if (!handle.pty) {
+      throw new Error('Claude PTY session is not running');
+    }
+
+    handle.lastUserInputAt = Date.now();
+    handle.pty.pty.write(input);
+  }
+
   async cleanupProject(cwd: string): Promise<void> {
     const normalizedCwd = await this.normalizeProjectCwd(cwd);
     const targets = [...this.handles.values()].filter((handle) => handle.cwd === normalizedCwd);

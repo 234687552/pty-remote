@@ -17,7 +17,6 @@ import { applyCachedMessagesUpsert, readCachedLastSeq, updateCachedLastSeq, writ
 import type { MobileJumpControls } from '@/features/workspace/types.ts';
 export function App() {
   const store = useWorkspaceStore();
-  const [mobileComposerDockHeight, setMobileComposerDockHeight] = useState(104);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [mobileJumpControls, setMobileJumpControls] = useState<MobileJumpControls | null>(null);
   const [mobilePaneScrollRequests, setMobilePaneScrollRequests] = useState({
@@ -191,13 +190,7 @@ export function App() {
       renderHeader={() => (
         <HeaderFeature
           clis={clis}
-          composerDockHeight={mobileComposerDockHeight}
-          jumpControls={mobileJumpControls}
-          mobilePane={store.mobilePane}
-          onMobilePaneChange={store.setMobilePane}
-          onSidebarOpen={handleMobileSidebarOpen}
           onSidebarToggle={handleDesktopSidebarToggle}
-          mobileSidebarOpen={mobileSidebarOpen}
           sidebarCollapsed={store.workspaceState.sidebarCollapsed}
           store={store}
         />
@@ -224,9 +217,14 @@ export function App() {
         <ComposerFeature
           clis={clis}
           controller={controller}
-          onComposerHeightChange={setMobileComposerDockHeight}
+          jumpControls={mobileJumpControls}
+          mobilePane={store.mobilePane}
+          mobileSidebarOpen={mobileSidebarOpen}
+          onMobilePaneChange={store.setMobilePane}
+          onSidebarOpen={handleMobileSidebarOpen}
           socketConnected={socketConnected}
           store={store}
+          terminal={terminal}
         />
       }
     />

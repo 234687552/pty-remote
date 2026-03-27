@@ -1,19 +1,8 @@
 import type { SetStateAction } from 'react';
 import { PROVIDER_LABELS, type ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
-import { MobileFloatingControls } from '@/components/MobileFloatingControls.tsx';
-import type { MobileJumpControls, WorkspacePane } from '@/features/workspace/types.ts';
-
 interface AppHeaderProps {
   activeProviderId: ProviderId | null;
-  composerDockHeight: number;
-  jumpControls: MobileJumpControls | null;
-  mobileAgentLabel: string;
-  mobilePane: WorkspacePane;
-  mobileProjectTitle: string;
-  mobileSidebarOpen: boolean;
-  onMobilePaneChange: (pane: WorkspacePane) => void;
-  onSidebarOpen: () => void;
   onSidebarToggle: () => void;
   onSidebarToggleTopChange: (value: SetStateAction<number>) => void;
   onSidebarToggleTopCommit: (value: number) => void;
@@ -43,37 +32,15 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
 
 export function AppHeader({
   activeProviderId,
-  composerDockHeight,
-  jumpControls,
-  mobileAgentLabel,
-  mobilePane,
-  mobileProjectTitle,
-  mobileSidebarOpen,
-  onMobilePaneChange,
-  onSidebarOpen,
   onSidebarToggle,
-  onSidebarToggleTopChange,
-  onSidebarToggleTopCommit,
+  onSidebarToggleTopChange: _onSidebarToggleTopChange,
+  onSidebarToggleTopCommit: _onSidebarToggleTopCommit,
   sidebarCollapsed,
-  sidebarToggleTop,
+  sidebarToggleTop: _sidebarToggleTop,
   summary
 }: AppHeaderProps) {
   return (
     <header className="sticky top-0 z-20 -mb-3 h-0 pointer-events-none lg:static lg:mb-0 lg:h-auto lg:pointer-events-auto">
-      <MobileFloatingControls
-        composerDockHeight={composerDockHeight}
-        jumpControls={jumpControls}
-        mobileAgentLabel={mobileAgentLabel}
-        mobilePane={mobilePane}
-        mobileProjectTitle={mobileProjectTitle}
-        mobileSidebarOpen={mobileSidebarOpen}
-        onMobilePaneChange={onMobilePaneChange}
-        onSidebarOpen={onSidebarOpen}
-        onSidebarToggleTopChange={onSidebarToggleTopChange}
-        onSidebarToggleTopCommit={onSidebarToggleTopCommit}
-        sidebarToggleTop={sidebarToggleTop}
-      />
-
       <div className="mx-0 hidden rounded-3xl border border-zinc-200 bg-white px-4 py-3 shadow-sm lg:block">
         <div className="flex items-center gap-3">
           <button

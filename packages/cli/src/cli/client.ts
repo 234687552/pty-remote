@@ -19,6 +19,7 @@ import type {
   UploadAttachmentResultPayload,
   RuntimeSnapshotPayload,
   TerminalFramePatchPayload,
+  TerminalInputPayload,
   TerminalSessionEvictedPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
@@ -584,6 +585,25 @@ function connectSocketClient(): void {
     }
     getRuntime(providerId).updateTerminalSize(payload.cols, payload.rows);
   });
+
+  socket.on(
+    'cli:terminal-input',
+    async (payload: Omit<TerminalInputPayload, 'targetCliId'>, callback?: (result: { ok: boolean; error?: string }) => void) => {
+      try {
+        const providerId = payload.targetProviderId ?? null;
+        if (!providerId) {
+          throw new Error('Provider is not selected');
+        }
+        await getRuntime(providerId).sendTerminalInput(payload.input);
+        callback?.({ ok: true });
+      } catch (error) {
+        callback?.({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Failed to send terminal input'
+        });
+      }
+    }
+  );
 
   socket.on(
     'cli:terminal-frame-prime',

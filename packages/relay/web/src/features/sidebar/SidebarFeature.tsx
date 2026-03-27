@@ -32,6 +32,7 @@ export function SidebarFeature({ clis, controller, mobileOpen, onMobileOpenChang
       onDeleteConversation={(project, providerId, conversation) =>
         controller.deleteConversation(project, providerId, conversation)
       }
+      onDeleteProject={controller.deleteProject}
       onRefreshConversation={(project, providerId, conversation) =>
         controller.refreshConversation(project, providerId, conversation)
       }

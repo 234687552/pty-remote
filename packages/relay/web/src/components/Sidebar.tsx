@@ -23,6 +23,7 @@ interface SidebarProps {
   onActivateConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => void;
   onCreateConversation: (project: ProjectEntry, providerId: ProviderId) => Promise<void>;
   onDeleteConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
+  onDeleteProject: (project: ProjectEntry) => Promise<void>;
   onRefreshConversation: (project: ProjectEntry, providerId: ProviderId, conversation: ProjectConversationEntry) => Promise<void>;
   onImportConversationFromSession: (
     providerId: ProviderId,
@@ -141,6 +142,7 @@ export function Sidebar({
   onActivateConversation,
   onCreateConversation,
   onDeleteConversation,
+  onDeleteProject,
   onRefreshConversation,
   onImportConversationFromSession,
   onListManagedPtyHandles,
@@ -160,6 +162,7 @@ export function Sidebar({
   const [createProjectSubmitting, setCreateProjectSubmitting] = useState(false);
   const [createProjectPickingDirectory, setCreateProjectPickingDirectory] = useState(false);
   const [createProjectError, setCreateProjectError] = useState('');
+  const [deleteProjectDialogProject, setDeleteProjectDialogProject] = useState<ProjectEntry | null>(null);
   const [historyDialogOpen, setHistoryDialogOpen] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyImportingSessionKey, setHistoryImportingSessionKey] = useState<string | null>(null);
@@ -185,6 +188,7 @@ export function Sidebar({
     }[]
   >([]);
   const [deleteConversationPendingId, setDeleteConversationPendingId] = useState<string | null>(null);
+  const [deleteProjectPendingId, setDeleteProjectPendingId] = useState<string | null>(null);
   const [refreshConversationPendingId, setRefreshConversationPendingId] = useState<string | null>(null);
   const [swipeOffsets, setSwipeOffsets] = useState<Record<string, number>>({});
   const [openSwipeRowKey, setOpenSwipeRowKey] = useState<string | null>(null);
@@ -292,6 +296,23 @@ export function Sidebar({
       document.removeEventListener('keydown', handleKeyDown);
     };
   }, [createProjectDialogOpen, createProjectPickingDirectory, createProjectSubmitting]);
+
+  useEffect(() => {
+    if (!deleteProjectDialogProject) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !deleteProjectPendingId) {
+        closeDeleteProjectDialog();
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [deleteProjectDialogProject, deleteProjectPendingId]);
 
   useEffect(
     () => () => {
@@ -788,6 +809,39 @@ export function Sidebar({
     }
   }
 
+  function openDeleteProjectDialog(project: ProjectEntry): void {
+    if (deleteProjectPendingId) {
+      return;
+    }
+
+    closeAllSwipeRows();
+    setDeleteProjectDialogProject(project);
+  }
+
+  function closeDeleteProjectDialog(): void {
+    if (deleteProjectPendingId) {
+      return;
+    }
+
+    setDeleteProjectDialogProject(null);
+  }
+
+  async function handleDeleteProject(): Promise<void> {
+    if (!deleteProjectDialogProject || deleteProjectPendingId) {
+      return;
+    }
+
+    const project = deleteProjectDialogProject;
+    setDeleteProjectPendingId(project.id);
+    try {
+      await onDeleteProject(project);
+      setDeleteProjectDialogProject(null);
+      closeMobileSidebar();
+    } finally {
+      setDeleteProjectPendingId((current) => (current === project.id ? null : current));
+    }
+  }
+
   const sidebarContent = (
     <>
       <div className="border-b border-zinc-200/80 bg-white/90 px-3 py-2 backdrop-blur-sm">
@@ -805,6 +859,7 @@ export function Sidebar({
         ) : (
           projects.map((project) => {
             const isActiveProject = project.id === activeProjectId;
+            const projectDeletePending = deleteProjectPendingId === project.id;
             const conversations = sortConversationEntries(
               ALL_PROVIDERS.flatMap(
                 (providerId) => projectConversationsByKey[getProjectProviderKey(project.id, providerId)] ?? []
@@ -825,10 +880,12 @@ export function Sidebar({
                   <div className="flex items-start gap-2">
                     <button
                       type="button"
+                      disabled={projectDeletePending}
                       onClick={() => handleProjectSelect(project)}
                       className={[
                         'min-w-0 flex-1 rounded-xl px-1 py-1 text-left transition',
-                        isActiveProject ? 'hover:bg-white/70' : 'hover:bg-zinc-100'
+                        isActiveProject ? 'hover:bg-white/70' : 'hover:bg-zinc-100',
+                        projectDeletePending ? 'cursor-not-allowed opacity-60' : ''
                       ].join(' ')}
                     >
                       <div className="truncate text-[13px] font-semibold">{project.label}</div>
@@ -841,28 +898,64 @@ export function Sidebar({
                         {project.cwd}
                       </div>
                     </button>
-                    <button
-                      type="button"
-                      onPointerDown={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onMouseDown={(event) => {
-                        event.stopPropagation();
-                      }}
-                      onClick={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        openCreateConversationDialog(project);
-                      }}
-                      disabled={connectedProviderIds.length === 0 || createConversationDialogSubmitting}
-                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-zinc-300 bg-white/80 text-zinc-700 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-                      aria-label={`在 ${project.label} 新建会话`}
-                      title={`在 ${project.label} 新建会话`}
-                    >
-                      <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
-                        <path d="M10 4.5v11M4.5 10h11" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-                      </svg>
-                    </button>
+                    <div className="flex shrink-0 items-center gap-1.5">
+                      <button
+                        type="button"
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                        }}
+                        onMouseDown={(event) => {
+                          event.stopPropagation();
+                        }}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          openCreateConversationDialog(project);
+                        }}
+                        disabled={connectedProviderIds.length === 0 || createConversationDialogSubmitting || projectDeletePending}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-zinc-300 bg-white/80 text-zinc-700 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                        aria-label={`在 ${project.label} 新建会话`}
+                        title={`在 ${project.label} 新建会话`}
+                      >
+                        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4 w-4">
+                          <path d="M10 4.5v11M4.5 10h11" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                        }}
+                        onMouseDown={(event) => {
+                          event.stopPropagation();
+                        }}
+                        onClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          openDeleteProjectDialog(project);
+                        }}
+                        disabled={Boolean(deleteProjectPendingId)}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 transition hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                        aria-label={projectDeletePending ? `删除 ${project.label} 中` : `删除 ${project.label} 并清理项目 PTY`}
+                        title={projectDeletePending ? `删除 ${project.label} 中` : `删除 ${project.label} 并清理项目 PTY`}
+                      >
+                        <svg
+                          viewBox="0 0 20 20"
+                          fill="none"
+                          aria-hidden="true"
+                          className={['h-4 w-4', projectDeletePending ? 'animate-pulse' : ''].join(' ')}
+                        >
+                          <path
+                            d="M5.8 6.3h8.4M8 6.3V5a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1.3m-5.7 0 0.55 8.1a1 1 0 0 0 1 .94h4.24a1 1 0 0 0 1-.94l0.55-8.1"
+                            stroke="currentColor"
+                            strokeWidth="1.7"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                          <path d="M8.8 9.1v4.2M11.2 9.1v4.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
                 </div>
 
@@ -883,13 +976,16 @@ export function Sidebar({
                       const conversationDeleteVisible =
                         conversationSwipeOffset > 0 ||
                         deleteConversationPendingId === conversation.id ||
-                        refreshConversationPendingId === conversation.id;
+                        refreshConversationPendingId === conversation.id ||
+                        projectDeletePending;
                       const isActiveConversation =
                         isActiveProject &&
                         conversation.providerId === activeProviderId &&
                         conversation.id === activeConversationId;
                       const conversationActionPending =
-                        deleteConversationPendingId === conversation.id || refreshConversationPendingId === conversation.id;
+                        deleteConversationPendingId === conversation.id ||
+                        refreshConversationPendingId === conversation.id ||
+                        projectDeletePending;
                       return (
                         <div
                           key={conversation.id}
@@ -973,6 +1069,7 @@ export function Sidebar({
                           >
                             <button
                               type="button"
+                              disabled={conversationActionPending}
                               onPointerDown={(event) => handleLongPressPointerDown(conversationSwipeRowKey, event)}
                               onPointerMove={(event) => handleLongPressPointerMove(conversationSwipeRowKey, event)}
                               onPointerUp={(event) => handleLongPressPointerUp(conversationSwipeRowKey, event)}
@@ -997,7 +1094,8 @@ export function Sidebar({
                                     : 'border-sky-200 bg-sky-100 text-zinc-950'
                                   : isActiveProject
                                     ? 'border-transparent bg-transparent text-zinc-800 hover:bg-white/70'
-                                    : 'border-transparent bg-transparent text-zinc-800 hover:bg-zinc-100'
+                                    : 'border-transparent bg-transparent text-zinc-800 hover:bg-zinc-100',
+                                conversationActionPending ? 'cursor-not-allowed opacity-70' : ''
                               ].join(' ')}
                             >
                               <div className="flex items-center justify-between gap-3">
@@ -1442,6 +1540,56 @@ export function Sidebar({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      ) : null}
+
+      {deleteProjectDialogProject ? (
+        <div className="fixed inset-0 z-50 bg-zinc-950/40 backdrop-blur-sm" onClick={closeDeleteProjectDialog}>
+          <div
+            className="flex h-full w-full items-end justify-center px-3 pb-3 sm:items-center sm:px-6 sm:pb-6"
+            style={{
+              paddingTop: 'max(0.75rem, env(safe-area-inset-top))',
+              paddingRight: 'max(0.75rem, env(safe-area-inset-right))',
+              paddingBottom: 'max(0.75rem, env(safe-area-inset-bottom))',
+              paddingLeft: 'max(0.75rem, env(safe-area-inset-left))'
+            }}
+          >
+            <div
+              className="flex w-full max-w-lg flex-col rounded-3xl border border-zinc-200 bg-white p-5 shadow-[0_24px_90px_rgba(15,23,42,0.22)]"
+              onClick={(event) => {
+                event.stopPropagation();
+              }}
+            >
+              <div className="mb-1 text-base font-semibold text-zinc-900">确认删除项目</div>
+              <div className="mb-1 truncate text-sm font-medium text-zinc-700">{deleteProjectDialogProject.label}</div>
+              <div className="mb-4 line-clamp-2 text-sm text-zinc-500">{deleteProjectDialogProject.cwd}</div>
+
+              <div className="mb-4 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                会清理这个项目下所有会话 PTY。当前项目如果正在使用，也会一起删除。
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={closeDeleteProjectDialog}
+                  disabled={Boolean(deleteProjectPendingId)}
+                  className="rounded-xl border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleDeleteProject();
+                  }}
+                  disabled={Boolean(deleteProjectPendingId)}
+                  className="rounded-xl bg-red-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {deleteProjectPendingId === deleteProjectDialogProject.id ? '删除中...' : '确认删除'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       ) : null}

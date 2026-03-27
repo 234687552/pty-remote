@@ -7,6 +7,7 @@ import type {
   TerminalFramePatchPayload,
   TerminalFrameSyncRequestPayload,
   TerminalFrameSyncResultPayload,
+  TerminalInputPayload,
   TerminalResizePayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import {
@@ -44,6 +45,7 @@ export interface TerminalBridge {
   prepareForResume: () => void;
   resumeSession: (targetSessionId: string | null, options?: ResumeOptions) => Promise<void>;
   scheduleResize: () => void;
+  sendInput: (input: string) => void;
 }
 
 type TerminalBridgeMethods = Omit<TerminalBridge, 'frameSnapshot' | 'terminalHostRef' | 'terminalViewportRef'>;
@@ -164,7 +166,7 @@ export function useTerminalBridge({
     const socket = socketRef.current;
     const terminalHost = terminalHostRef.current;
     const terminalViewport = terminalViewportRef.current;
-    if (!socket?.connected || !terminalHost || !terminalViewport) {
+    if (!terminalVisible || !socket?.connected || !terminalHost || !terminalViewport) {
       return;
     }
 
@@ -175,6 +177,9 @@ export function useTerminalBridge({
 
     const viewportWidth = terminalViewport.clientWidth;
     const viewportHeight = terminalViewport.clientHeight;
+    if (viewportWidth <= 0 || viewportHeight <= 0) {
+      return;
+    }
     const proposedCols = Math.max(1, Math.floor(viewportWidth / cellWidth));
     const proposedRows = Math.max(1, Math.floor(viewportHeight / cellHeight));
     const isMobileViewport = viewportWidth > 0 && viewportWidth < MOBILE_TERMINAL_BREAKPOINT;
@@ -395,6 +400,27 @@ export function useTerminalBridge({
     viewport.scrollTop = viewport.scrollHeight;
   }
 
+  function sendInput(input: string): void {
+    const socket = socketRef.current;
+    if (!socket?.connected || !activeCliId || !activeProviderId || !input) {
+      return;
+    }
+
+    socket.emit('web:terminal-input', {
+      targetCliId: activeCliId,
+      targetProviderId: activeProviderId,
+      input
+    } satisfies TerminalInputPayload);
+  }
+
+  useEffect(() => {
+    if (!terminalVisible) {
+      return;
+    }
+
+    scheduleResize();
+  }, [terminalVisible]);
+
   useEffect(() => {
     const terminalHost = terminalHostRef.current;
     const terminalViewport = terminalViewportRef.current;
@@ -441,7 +467,8 @@ export function useTerminalBridge({
     jumpToEdge,
     prepareForResume,
     resumeSession,
-    scheduleResize
+    scheduleResize,
+    sendInput
   };
 
   if (!terminalBridgeRef.current) {
@@ -472,6 +499,9 @@ export function useTerminalBridge({
       },
       scheduleResize: () => {
         terminalMethodsRef.current?.scheduleResize();
+      },
+      sendInput: (input) => {
+        terminalMethodsRef.current?.sendInput(input);
       }
     };
   }

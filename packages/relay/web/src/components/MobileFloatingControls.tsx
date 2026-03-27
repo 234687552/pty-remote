@@ -1,31 +1,36 @@
 import { useEffect, useRef, useState } from 'react';
-import type { SetStateAction } from 'react';
 
 import type { MobileJumpControls, WorkspacePane } from '@/features/workspace/types.ts';
+import { TerminalQuickKeys } from '@/components/TerminalQuickKeys.tsx';
+
+interface MobileStatusBadge {
+  className: string;
+  label: string;
+  value: string;
+}
 
 interface MobileFloatingControlsProps {
-  composerDockHeight: number;
+  canSendTerminalInput: boolean;
   jumpControls: MobileJumpControls | null;
   mobileAgentLabel: string;
   mobilePane: WorkspacePane;
   mobileProjectTitle: string;
   mobileSidebarOpen: boolean;
+  statusBadges: MobileStatusBadge[];
   onMobilePaneChange: (pane: WorkspacePane) => void;
   onSidebarOpen: () => void;
-  onSidebarToggleTopChange: (value: SetStateAction<number>) => void;
-  onSidebarToggleTopCommit: (value: number) => void;
-  sidebarToggleTop: number;
+  onTerminalInput: (input: string) => void;
 }
 
-function MenuLauncherIcon() {
+function ExpandControlsIcon({ expanded }: { expanded: boolean }) {
   return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4.5 w-4.5">
-      <path d="M6 6h8" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-      <path d="M6 10h8" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-      <path d="M6 14h5" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-      <circle cx="4.25" cy="6" r="1" fill="currentColor" />
-      <circle cx="4.25" cy="10" r="1" fill="currentColor" />
-      <circle cx="4.25" cy="14" r="1" fill="currentColor" />
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      aria-hidden="true"
+      className={['h-3.5 w-3.5 transition-transform duration-200', expanded ? 'rotate-180' : 'rotate-0'].join(' ')}
+    >
+      <path d="m5.5 12.5 4.5-5 4.5 5" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -73,6 +78,80 @@ function ConversationListIcon() {
       <circle cx="4.25" cy="14" r="1" fill="currentColor" />
     </svg>
   );
+}
+
+function KeyboardIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4.5 w-4.5">
+      <rect x="3.25" y="5" width="13.5" height="9.5" rx="2.2" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M5.75 8.2h.01M8.35 8.2h.01M10.95 8.2h.01M13.55 8.2h.01M5.75 10.8h.01M8.35 10.8h.01M10.95 10.8h.01M13.55 10.8h.01M7 13.1h6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function StatusTextBadge({
+  className,
+  label,
+  value
+}: {
+  className: string;
+  label: string;
+  value: string;
+}) {
+  const compactLabel = label === 'status' ? '状态' : label === 'socket' ? '连线' : label === 'cli' ? 'CLI' : label;
+  const compactValue =
+    value === 'online'
+      ? '在线'
+      : value === 'offline'
+        ? '离线'
+        : value === 'unselected'
+          ? '未选'
+          : value === 'running'
+            ? '执行中'
+            : value === 'starting'
+              ? '启动中'
+              : value === 'idle'
+                ? '空闲'
+                : value === 'timeout'
+                  ? '超时'
+                  : value === 'error'
+                    ? '异常'
+                    : value;
+  const toneClass = resolveStatusTextTone(className);
+
+  return (
+    <span
+      className={[
+        'inline-flex h-5 max-w-[4rem] min-w-0 shrink-0 items-center px-1 text-[7px] font-semibold leading-none',
+        toneClass
+      ].join(' ')}
+      title={`${compactLabel}: ${compactValue}`}
+      aria-label={`${compactLabel}: ${compactValue}`}
+    >
+      <span className="truncate">{compactLabel}</span>
+      <span className="mx-0.5 opacity-40">·</span>
+      <span className="truncate">{compactValue}</span>
+    </span>
+  );
+}
+
+function resolveStatusTextTone(className: string): string {
+  if (className.includes('text-red-')) {
+    return 'text-red-700';
+  }
+  if (className.includes('text-emerald-')) {
+    return 'text-emerald-700';
+  }
+  if (className.includes('text-amber-')) {
+    return 'text-amber-700';
+  }
+  if (className.includes('text-white')) {
+    return 'text-zinc-900';
+  }
+  if (className.includes('text-zinc-600')) {
+    return 'text-zinc-600';
+  }
+  return 'text-zinc-700';
 }
 
 function PaneSwitchIcon({ targetPane }: { targetPane: WorkspacePane }) {
@@ -132,28 +211,28 @@ function ActionButton({
 }
 
 export function MobileFloatingControls({
-  composerDockHeight,
+  canSendTerminalInput,
   jumpControls,
   mobileAgentLabel: _mobileAgentLabel,
   mobilePane,
   mobileProjectTitle,
   mobileSidebarOpen,
+  statusBadges,
   onMobilePaneChange,
   onSidebarOpen,
-  onSidebarToggleTopChange: _onSidebarToggleTopChange,
-  onSidebarToggleTopCommit: _onSidebarToggleTopCommit,
-  sidebarToggleTop: _sidebarToggleTop
+  onTerminalInput
 }: MobileFloatingControlsProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [openPanel, setOpenPanel] = useState<'none' | 'actions' | 'keyboard'>('none');
   const controlsRef = useRef<HTMLDivElement | null>(null);
   const targetPane: WorkspacePane = mobilePane === 'chat' ? 'terminal' : 'chat';
   const isTerminalPane = mobilePane === 'terminal';
   const canJumpUp = jumpControls?.canJumpUp ?? false;
   const canJumpDown = jumpControls?.canJumpDown ?? false;
-  const dockOffsetBottom = Math.max(0.75 * 16, composerDockHeight - 28);
+  const actionsExpanded = openPanel === 'actions';
+  const keyboardExpanded = openPanel === 'keyboard';
 
   useEffect(() => {
-    if (!expanded) {
+    if (openPanel === 'none') {
       return;
     }
 
@@ -161,115 +240,162 @@ export function MobileFloatingControls({
       if (controlsRef.current?.contains(event.target as Node | null)) {
         return;
       }
-      setExpanded(false);
+      setOpenPanel('none');
     };
 
     document.addEventListener('pointerdown', handlePointerDown, true);
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown, true);
     };
-  }, [expanded]);
+  }, [openPanel]);
 
   useEffect(() => {
     if (mobileSidebarOpen) {
-      setExpanded(false);
+      setOpenPanel('none');
     }
   }, [mobileSidebarOpen]);
 
+  useEffect(() => {
+    if (!isTerminalPane && openPanel === 'keyboard') {
+      setOpenPanel('none');
+    }
+  }, [isTerminalPane, openPanel]);
+
   function handlePaneSwitch(): void {
     onMobilePaneChange(targetPane);
-    setExpanded(false);
+    setOpenPanel('none');
   }
 
   function handleConversationListOpen(): void {
     onSidebarOpen();
-    setExpanded(false);
+    setOpenPanel('none');
   }
 
   function handleJumpUp(): void {
     jumpControls?.onJumpUp();
-    setExpanded(false);
+    setOpenPanel('none');
   }
 
   function handleJumpDown(): void {
     jumpControls?.onJumpDown();
-    setExpanded(false);
+    setOpenPanel('none');
+  }
+
+  function handleExpandedToggle(): void {
+    setOpenPanel((current) => (current === 'actions' ? 'none' : 'actions'));
+  }
+
+  function handleKeyboardToggle(): void {
+    setOpenPanel((current) => (current === 'keyboard' ? 'none' : 'keyboard'));
   }
 
   return (
-    <div
-      ref={controlsRef}
-      className="pointer-events-none fixed right-0 bottom-0 z-30 lg:hidden"
-      style={{
-        right: 'max(env(safe-area-inset-right), 0.75rem)',
-        bottom: `calc(max(env(safe-area-inset-bottom), 0px) + ${dockOffsetBottom}px)`
-      }}
-    >
-      <div className="pointer-events-auto flex items-center justify-end">
-        <div
-          className={[
-            'inline-flex items-center overflow-hidden rounded-full transition-[max-width,padding,background-color,border-color,box-shadow] duration-200 ease-out',
-            expanded
-              ? 'max-w-[calc(100vw-1.5rem)] gap-1 border border-zinc-200/80 bg-white/92 px-1.5 py-1 shadow-[0_16px_40px_rgba(15,23,42,0.16)] backdrop-blur-xl'
-              : 'max-w-[2.5rem] bg-transparent p-0 shadow-none'
-          ].join(' ')}
-        >
-          {expanded ? (
-            <>
-            <div
-              className="flex h-10 max-w-[6.25rem] shrink-0 flex-col items-start justify-center rounded-2xl bg-zinc-100 px-2.5 text-left"
-              title={mobileProjectTitle}
-              aria-label={`当前项目 ${mobileProjectTitle}，Provider ${_mobileAgentLabel}`}
+    <div ref={controlsRef} className="relative flex w-full items-center justify-center lg:hidden">
+      {actionsExpanded ? (
+        <div className="absolute bottom-full left-1/2 z-30 mb-0.5 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-1 overflow-x-auto px-1 py-0.5">
+          <div
+            className="flex h-9 max-w-[6rem] shrink-0 flex-col items-start justify-center rounded-full bg-zinc-100 px-3 text-left shadow-[0_8px_18px_rgba(15,23,42,0.08)]"
+            title={mobileProjectTitle}
+            aria-label={`当前项目 ${mobileProjectTitle}，Provider ${_mobileAgentLabel}`}
+          >
+            <span className="w-full truncate text-[10px] font-semibold leading-none text-zinc-700">{mobileProjectTitle}</span>
+            <span
+              className={[
+                'mt-0.5 inline-flex items-center rounded-full px-1.5 py-0.5 text-[8px] font-semibold leading-none shadow-[inset_0_1px_0_rgba(255,255,255,0.35)]',
+                _mobileAgentLabel.toLowerCase() === 'claude'
+                  ? 'bg-orange-100 text-orange-700'
+                  : _mobileAgentLabel.toLowerCase() === 'codex'
+                    ? 'bg-emerald-100 text-emerald-700'
+                    : 'bg-zinc-200 text-zinc-600'
+              ].join(' ')}
             >
-              <span className="w-full truncate text-[11px] font-semibold leading-none text-zinc-700">{mobileProjectTitle}</span>
-              <span
-                className={[
-                  'mt-1 inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-semibold leading-none',
-                  _mobileAgentLabel === 'claude'
-                    ? 'bg-orange-100 text-orange-700'
-                    : _mobileAgentLabel === 'codex'
-                      ? 'bg-emerald-100 text-emerald-700'
-                      : 'bg-zinc-200 text-zinc-600'
-                ].join(' ')}
-              >
-                {_mobileAgentLabel}
-              </span>
-            </div>
+              {_mobileAgentLabel}
+            </span>
+          </div>
 
-            <ActionButton disabled={!canJumpUp} label={jumpControls?.upLabel ?? '上一问'} onClick={handleJumpUp}>
-              {isTerminalPane ? <JumpToTopIcon /> : <PrevQuestionIcon />}
-            </ActionButton>
+          <ActionButton label="会话列表" onClick={handleConversationListOpen}>
+            <ConversationListIcon />
+          </ActionButton>
 
-            <ActionButton disabled={!canJumpDown} label={jumpControls?.downLabel ?? '下一问'} onClick={handleJumpDown}>
-              {isTerminalPane ? <JumpToBottomIcon /> : <NextQuestionIcon />}
-            </ActionButton>
+          <ActionButton disabled={!canJumpUp} label={jumpControls?.upLabel ?? '上一问'} onClick={handleJumpUp}>
+            {isTerminalPane ? <JumpToTopIcon /> : <PrevQuestionIcon />}
+          </ActionButton>
 
-            <ActionButton
-              active
-              label={targetPane === 'terminal' ? '切到终端' : '切到会话'}
-              onClick={handlePaneSwitch}
-            >
-              <PaneSwitchIcon targetPane={targetPane} />
-            </ActionButton>
+          <ActionButton disabled={!canJumpDown} label={jumpControls?.downLabel ?? '下一问'} onClick={handleJumpDown}>
+            {isTerminalPane ? <JumpToBottomIcon /> : <NextQuestionIcon />}
+          </ActionButton>
 
-            <ActionButton label="会话列表" onClick={handleConversationListOpen}>
-              <ConversationListIcon />
-            </ActionButton>
-            </>
-          ) : null}
+          <ActionButton
+            active
+            label={targetPane === 'terminal' ? '切到终端' : '切到会话'}
+            onClick={handlePaneSwitch}
+          >
+            <PaneSwitchIcon targetPane={targetPane} />
+          </ActionButton>
+        </div>
+      ) : null}
 
-          {!expanded ? (
+      {isTerminalPane && keyboardExpanded ? (
+        <div className="absolute bottom-full left-1/2 z-40 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-1 overflow-x-auto px-1 py-0.5">
+          <TerminalQuickKeys variant="mobile-action" disabled={!canSendTerminalInput} onInput={onTerminalInput} />
+        </div>
+      ) : null}
+
+      <div className="relative h-6 w-full transition">
+        <div className="absolute inset-y-0 left-0 flex min-w-0 max-w-[calc(50%-2.6rem)] items-center gap-1 overflow-hidden">
+          {statusBadges
+            .filter((badge) => badge.label === 'status')
+            .map((badge) => (
+              <StatusTextBadge key={badge.label} className={badge.className} label={badge.label} value={badge.value} />
+            ))}
+        </div>
+
+        <div className="absolute top-0 left-1/2 flex -translate-x-1/2 items-center">
+          <button
+            type="button"
+            onClick={handleExpandedToggle}
+            className={[
+              'flex h-6 w-10 items-center justify-center text-zinc-700 transition',
+              actionsExpanded
+                ? 'text-sky-700'
+                : 'hover:text-zinc-950'
+            ].join(' ')}
+            aria-label={actionsExpanded ? '收起快捷操作' : '展开快捷操作'}
+            title={actionsExpanded ? '收起快捷操作' : '展开快捷操作'}
+            aria-expanded={actionsExpanded}
+          >
+            <span className="pointer-events-none flex items-center gap-1">
+              <span className="h-px w-3 rounded-full bg-current/65" />
+              <ExpandControlsIcon expanded={actionsExpanded} />
+              <span className="h-px w-3 rounded-full bg-current/65" />
+            </span>
+          </button>
+
+          {isTerminalPane ? (
             <button
               type="button"
-              onClick={() => setExpanded(true)}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full border border-zinc-200/80 bg-white text-zinc-700 transition hover:border-zinc-300 hover:bg-zinc-50 hover:text-zinc-950"
-              aria-label="展开快捷操作"
-              title="展开快捷操作"
-              aria-pressed={false}
+              onClick={handleKeyboardToggle}
+              disabled={!canSendTerminalInput}
+              className={[
+                'ml-1 flex h-6 w-6 items-center justify-center text-zinc-700 transition',
+                keyboardExpanded ? 'text-sky-700' : 'hover:text-zinc-950',
+                !canSendTerminalInput ? 'cursor-not-allowed opacity-40' : ''
+              ].join(' ')}
+              aria-label={keyboardExpanded ? '收起终端按键' : '展开终端按键'}
+              title={keyboardExpanded ? '收起终端按键' : '展开终端按键'}
+              aria-pressed={keyboardExpanded}
             >
-              <MenuLauncherIcon />
+              <KeyboardIcon />
             </button>
           ) : null}
+        </div>
+
+        <div className="absolute inset-y-0 right-0 flex min-w-0 max-w-[calc(50%-2.6rem)] items-center justify-end gap-1 overflow-hidden">
+          {statusBadges
+            .filter((badge) => badge.label === 'socket' || badge.label === 'cli')
+            .map((badge) => (
+              <StatusTextBadge key={badge.label} className={badge.className} label={badge.label} value={badge.value} />
+            ))}
         </div>
       </div>
     </div>

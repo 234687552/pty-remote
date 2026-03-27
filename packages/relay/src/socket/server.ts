@@ -17,6 +17,7 @@ import type {
   TerminalFramePatchPayload,
   TerminalFrameSyncRequestPayload,
   TerminalFrameSyncResultPayload,
+  TerminalInputPayload,
   TerminalSessionEvictedPayload,
   TerminalResizePayload,
   WebCommandEnvelope,
@@ -1257,6 +1258,25 @@ export async function startSocketServer(): Promise<void> {
         cols: payload.cols,
         rows: payload.rows
       } satisfies Omit<TerminalResizePayload, 'targetCliId'>);
+    });
+
+    socket.on('web:terminal-input', (payload: TerminalInputPayload, callback?: (result: { ok: boolean; error?: string }) => void) => {
+      const record = getConnectedCliRecord(payload.targetCliId);
+      if (!record) {
+        callback?.({ ok: false, error: 'CLI is not connected' });
+        return;
+      }
+
+      record.socket.emit(
+        'cli:terminal-input',
+        {
+          targetProviderId: payload.targetProviderId,
+          input: payload.input
+        } satisfies Omit<TerminalInputPayload, 'targetCliId'>,
+        (result?: { ok: boolean; error?: string }) => {
+          callback?.(result ?? { ok: false, error: 'No response from terminal input relay' });
+        }
+      );
     });
 
     socket.on('disconnect', () => {

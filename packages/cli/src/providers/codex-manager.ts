@@ -20,6 +20,7 @@ import {
 import {
   appendRecentOutput,
   looksLikeDirectoryTrustPrompt,
+  looksLikeModelChoicePrompt,
   looksLikeUpdatePrompt,
   looksReadyForInput,
   resizeCodexPtySession,
@@ -426,6 +427,25 @@ export class CodexManager {
     handle.detachedAt = null;
     handle.discoveryStartedAt = null;
     this.emitSnapshotNow();
+  }
+
+  async sendTerminalInput(input: string): Promise<void> {
+    const handle = this.getActiveHandle();
+    if (!handle) {
+      throw new Error('No active thread selected');
+    }
+
+    if (!input) {
+      return;
+    }
+
+    await this.ensureHandleSession(handle);
+    if (!handle.pty) {
+      throw new Error('Codex PTY session is not running');
+    }
+
+    handle.lastUserInputAt = Date.now();
+    handle.pty.pty.write(input);
   }
 
   async cleanupProject(cwd: string): Promise<void> {
@@ -1257,6 +1277,12 @@ export class CodexManager {
     void handle.terminalFrame
       .enqueueOutput(chunk)
       .then((patch) => {
+        void this.autoHandleVisibleTerminalPrompts(handle).catch((error) => {
+          this.log('warn', 'failed to auto-handle codex terminal prompt from visible frame', {
+            ...this.handleContext(handle),
+            error: errorMessage(error, 'Failed to auto-handle codex terminal prompt')
+          });
+        });
         if (patch) {
           this.emitTerminalFramePatch(handle, patch);
         }
@@ -1370,7 +1396,8 @@ export class CodexManager {
   }
 
   private async autoSkipUpdatePrompt(handle: CodexHandle, visibleText: string): Promise<boolean> {
-    if (!handle.pty || handle.pty.startupUpdatePromptHandled) {
+    const session = handle.pty;
+    if (!session || session.startupUpdatePromptHandled) {
       return false;
     }
 
@@ -1378,13 +1405,70 @@ export class CodexManager {
       return false;
     }
 
-    handle.pty.startupUpdatePromptHandled = true;
+    session.startupUpdatePromptHandled = true;
     this.log('info', 'auto-skipping codex update prompt', this.handleContext(handle));
-    handle.pty.pty.write('\x1b[B');
+    session.pty.write('\x1b[B');
     await sleep(120);
-    handle.pty.pty.write('\r');
+    if (handle.pty !== session) {
+      return true;
+    }
+    session.pty.write('\r');
     await sleep(350);
     return true;
+  }
+
+  private async autoSelectExistingModelPrompt(handle: CodexHandle, visibleText: string): Promise<boolean> {
+    const session = handle.pty;
+    if (!session || session.startupModelChoicePromptHandled) {
+      return false;
+    }
+
+    if (!looksLikeModelChoicePrompt(visibleText)) {
+      return false;
+    }
+
+    session.startupModelChoicePromptHandled = true;
+    this.log('info', 'auto-selecting existing codex model prompt option', this.handleContext(handle));
+    session.pty.write('\x1b[B');
+    await sleep(120);
+    if (handle.pty !== session) {
+      return true;
+    }
+    session.pty.write('\r');
+    await sleep(350);
+    return true;
+  }
+
+  private async autoAcceptDirectoryTrustPrompt(handle: CodexHandle, visibleText: string): Promise<boolean> {
+    const session = handle.pty;
+    if (!session || session.startupDirectoryTrustPromptHandled) {
+      return false;
+    }
+
+    if (!looksLikeDirectoryTrustPrompt(visibleText)) {
+      return false;
+    }
+
+    session.startupDirectoryTrustPromptHandled = true;
+    this.log('info', 'auto-accepting codex directory trust prompt', this.handleContext(handle));
+    session.pty.write('\r');
+    await sleep(350);
+    return true;
+  }
+
+  private async autoHandleVisibleTerminalPrompts(handle: CodexHandle): Promise<void> {
+    if (!handle.pty) {
+      return;
+    }
+
+    const { visibleText } = await this.getHandleTerminalView(handle);
+    if (await this.autoAcceptDirectoryTrustPrompt(handle, visibleText)) {
+      return;
+    }
+    if (await this.autoSelectExistingModelPrompt(handle, visibleText)) {
+      return;
+    }
+    await this.autoSkipUpdatePrompt(handle, visibleText);
   }
 
   private async waitForHandleReadyWithRetry(handle: CodexHandle): Promise<void> {
@@ -1413,13 +1497,15 @@ export class CodexManager {
       }
 
       const { bottomText, visibleText } = await this.getHandleTerminalView(handle);
-      if (await this.autoSkipUpdatePrompt(handle, visibleText)) {
+      if (await this.autoAcceptDirectoryTrustPrompt(handle, visibleText)) {
         continue;
       }
 
-      if (looksLikeDirectoryTrustPrompt(visibleText)) {
-        handle.pty.pty.write('\r');
-        await sleep(350);
+      if (await this.autoSelectExistingModelPrompt(handle, visibleText)) {
+        continue;
+      }
+
+      if (await this.autoSkipUpdatePrompt(handle, visibleText)) {
         continue;
       }
 

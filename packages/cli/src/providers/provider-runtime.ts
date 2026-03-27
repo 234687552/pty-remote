@@ -50,6 +50,7 @@ export interface ProviderRuntime {
   primeActiveTerminalFrame(): Promise<void>;
   refreshActiveState(): Promise<void>;
   resetActiveConversation(): Promise<void>;
+  sendTerminalInput(input: string): Promise<void>;
   shutdown(): Promise<void>;
   stopActiveRun(): Promise<void>;
   updateTerminalSize(cols: number, rows: number): void;
