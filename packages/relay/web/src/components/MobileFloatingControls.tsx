@@ -122,7 +122,7 @@ function StatusTextBadge({
   return (
     <span
       className={[
-        'inline-flex h-5 max-w-[4rem] min-w-0 shrink-0 items-center px-1 text-[7px] font-semibold leading-none',
+        'inline-flex h-5 max-w-[4.6rem] min-w-0 shrink-0 items-center px-1 text-[9px] font-semibold leading-[1]',
         toneClass
       ].join(' ')}
       title={`${compactLabel}: ${compactValue}`}

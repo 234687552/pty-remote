@@ -116,7 +116,6 @@ export function Composer({
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingSelectionRef = useRef<number | null>(null);
   const isPromptComposingRef = useRef(false);
-  const submitAfterCompositionRef = useRef(false);
   const [composerHeight, setComposerHeight] = useState(COMPOSER_MIN_HEIGHT_PX);
   const [promptScrollable, setPromptScrollable] = useState(false);
   const [selection, setSelection] = useState({ start: prompt.length, end: prompt.length });
@@ -433,17 +432,14 @@ export function Composer({
             }
 
             if (event.key !== 'Enter' || event.shiftKey) {
-              submitAfterCompositionRef.current = false;
               return;
             }
 
             if (isComposing) {
-              submitAfterCompositionRef.current = slashSuggestions.length === 0;
               event.preventDefault();
               return;
             }
 
-            submitAfterCompositionRef.current = false;
             event.preventDefault();
             requestComposerSubmit();
           }}
@@ -455,27 +451,16 @@ export function Composer({
 
             event.preventDefault();
             if (isPromptComposingRef.current) {
-              submitAfterCompositionRef.current = slashSuggestions.length === 0;
               return;
             }
 
-            submitAfterCompositionRef.current = false;
             requestComposerSubmit();
           }}
           onCompositionStart={() => {
             isPromptComposingRef.current = true;
-            submitAfterCompositionRef.current = false;
           }}
           onCompositionEnd={() => {
             isPromptComposingRef.current = false;
-            if (!submitAfterCompositionRef.current) {
-              return;
-            }
-
-            submitAfterCompositionRef.current = false;
-            requestAnimationFrame(() => {
-              requestComposerSubmit();
-            });
           }}
           onPaste={(event) => {
             const imageFiles = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith('image/'));

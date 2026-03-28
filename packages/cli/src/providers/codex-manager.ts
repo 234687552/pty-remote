@@ -88,6 +88,7 @@ interface CodexHandle {
   label: string;
   sessionId: string | null;
   sessionFilePath: string | null;
+  pendingNewSessionDiscoveryStartedAt: number | null;
   lifecycle: HandleLifecycle;
   pty: CodexPtySession | null;
   ptyToken: number;
@@ -155,9 +156,15 @@ function sleep(ms: number): Promise<void> {
 }
 
 const AWAITING_JSONL_TURN_STALE_MS = 4000;
+const NEW_SESSION_DISCOVERY_TIMEOUT_MS = 20_000;
 const READY_TIMEOUT_MAX_RETRIES = 2;
 const TERMINAL_READY_BOTTOM_LINES = 8;
 const INTERRUPT_READY_CHECK_DELAY_MS = 250;
+
+function isNewSessionSlashCommand(content: string): boolean {
+  const [firstLine = ''] = content.trim().split('\n', 1);
+  return firstLine === '/new' || firstLine.startsWith('/new ');
+}
 
 function materializeTerminalFrameLinesText(lines: TerminalFrameLine[]): string {
   return lines
@@ -380,9 +387,11 @@ export class CodexManager {
     }
 
     await this.ensureHandleSession(handle);
+    const pendingNewSessionDiscoveryStartedAt = isNewSessionSlashCommand(trimmedContent) ? Date.now() : null;
 
     try {
       await this.waitForHandleReadyWithRetry(handle);
+      handle.pendingNewSessionDiscoveryStartedAt = pendingNewSessionDiscoveryStartedAt;
       handle.awaitingJsonlTurn = true;
       handle.lastUserInputAt = Date.now();
       this.setStatus(handle, 'running', true);
@@ -394,6 +403,9 @@ export class CodexManager {
         error: errorMessage(error, 'Codex request failed'),
         promptLength: trimmedContent.length
       });
+      if (handle.pendingNewSessionDiscoveryStartedAt === pendingNewSessionDiscoveryStartedAt) {
+        handle.pendingNewSessionDiscoveryStartedAt = null;
+      }
       this.setStatus(handle, 'idle', true);
       this.setLastError(handle, error instanceof Error ? error.message : 'Codex request failed');
       throw error;
@@ -496,6 +508,7 @@ export class CodexManager {
       label: selection.label,
       sessionId: selection.sessionId,
       sessionFilePath: null,
+      pendingNewSessionDiscoveryStartedAt: null,
       lifecycle: 'exited',
       pty: null,
       ptyToken: 0,
@@ -637,6 +650,7 @@ export class CodexManager {
   private resetHandleRuntime(handle: CodexHandle, sessionId: string | null): void {
     handle.runtime = this.createFreshState(handle.threadKey, sessionId);
     handle.sessionId = sessionId;
+    handle.pendingNewSessionDiscoveryStartedAt = null;
     handle.awaitingJsonlTurn = false;
     handle.jsonlMissingSince = null;
     handle.lastJsonlActivityAt = null;
@@ -741,7 +755,12 @@ export class CodexManager {
       return false;
     }
 
-    return handle.awaitingJsonlTurn || handle.runtime.status === 'starting' || handle.runtime.status === 'running';
+    return (
+      handle.pendingNewSessionDiscoveryStartedAt !== null ||
+      handle.awaitingJsonlTurn ||
+      handle.runtime.status === 'starting' ||
+      handle.runtime.status === 'running'
+    );
   }
 
   private maybeClearStaleAwaitingTurn(handle: CodexHandle): void {
@@ -841,6 +860,50 @@ export class CodexManager {
     }
   }
 
+  private async discoverReplacementSessionForHandle(handle: CodexHandle): Promise<void> {
+    const startedAt = handle.pendingNewSessionDiscoveryStartedAt;
+    if (!startedAt) {
+      return;
+    }
+
+    const match = await findLatestCodexSessionForCwdSince(handle.cwd, startedAt, this.options);
+    if (!match) {
+      if (Date.now() - startedAt >= NEW_SESSION_DISCOVERY_TIMEOUT_MS) {
+        this.log('warn', 'timed out waiting for codex /new session discovery', {
+          ...this.handleContext(handle),
+          waitMs: Date.now() - startedAt
+        });
+        handle.pendingNewSessionDiscoveryStartedAt = null;
+      }
+      return;
+    }
+
+    if (match.sessionId === handle.sessionId) {
+      return;
+    }
+
+    handle.pendingNewSessionDiscoveryStartedAt = null;
+    handle.sessionId = match.sessionId;
+    handle.runtime.sessionId = match.sessionId;
+    handle.sessionFilePath = match.filePath;
+    handle.discoveryStartedAt = null;
+    handle.jsonlMissingSince = null;
+    handle.runtime.allMessages = [];
+    handle.runtime.messages = [];
+    handle.runtime.hasOlderMessages = false;
+    handle.runtime.lastError = null;
+    this.resetJsonlParsingState(handle, match.sessionId);
+
+    const terminalResetPatch = handle.terminalFrame.reset(match.sessionId);
+    if (this.isActiveHandle(handle)) {
+      this.emitTerminalFramePatch(handle, terminalResetPatch);
+      this.emitSnapshotNow();
+    }
+    if (this.isActiveHandle(handle) || handle.pty) {
+      this.ensureJsonlWatcher(handle, match.filePath);
+    }
+  }
+
   private async refreshActiveMessages(): Promise<void> {
     const handle = this.getActiveHandle();
     if (!handle) {
@@ -852,6 +915,7 @@ export class CodexManager {
 
   private async refreshMessagesFromJsonl(handle: CodexHandle): Promise<void> {
     await this.discoverSessionForHandle(handle);
+    await this.discoverReplacementSessionForHandle(handle);
 
     const sessionId = handle.sessionId;
     const previousMessages = handle.runtime.messages;

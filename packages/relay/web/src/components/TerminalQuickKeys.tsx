@@ -1,8 +1,8 @@
 const TERMINAL_QUICK_KEYS = [
-  { id: 'escape', input: '\u001b', label: 'ESC', title: '发送 Escape' },
-  { id: 'arrow-up', input: '\u001b[A', label: '↑', title: '发送上方向键' },
-  { id: 'arrow-down', input: '\u001b[B', label: '↓', title: '发送下方向键' },
-  { id: 'enter', input: '\r', label: 'Enter', title: '发送回车' }
+  { id: 'escape', input: '\u001b', label: 'ESC', mobileLabel: 'ESC', title: '发送 Escape' },
+  { id: 'arrow-up', input: '\u001b[A', label: '↑', mobileLabel: '↑', title: '发送上方向键' },
+  { id: 'arrow-down', input: '\u001b[B', label: '↓', mobileLabel: '↓', title: '发送下方向键' },
+  { id: 'enter', input: '\r', label: 'Enter', mobileLabel: '↵', title: '发送回车' }
 ] as const;
 
 interface TerminalQuickKeysProps {
@@ -24,7 +24,7 @@ export function TerminalQuickKeys({ disabled = false, variant = 'desktop', onInp
           disabled={disabled}
           className={[
             mobileActionStyle
-              ? 'flex h-8 min-w-[2.4rem] items-center justify-center rounded-full border border-zinc-200/80 bg-white/94 px-2 text-[11px] font-semibold text-zinc-700 shadow-[0_8px_20px_rgba(15,23,42,0.10)] backdrop-blur-md transition'
+              ? 'flex h-8 w-8 items-center justify-center rounded-full border border-zinc-200/80 bg-white/94 text-[11px] font-semibold text-zinc-700 shadow-[0_8px_20px_rgba(15,23,42,0.10)] backdrop-blur-md transition'
               : 'inline-flex h-7 min-w-[2.5rem] items-center justify-center rounded-xl border border-zinc-200 bg-white px-2.5 text-[11px] font-semibold text-zinc-700 transition',
             mobileActionStyle
               ? disabled
@@ -40,7 +40,7 @@ export function TerminalQuickKeys({ disabled = false, variant = 'desktop', onInp
           aria-label={key.title}
           title={key.title}
         >
-          {key.label}
+          {mobileActionStyle ? key.mobileLabel : key.label}
         </button>
       ))}
     </div>
