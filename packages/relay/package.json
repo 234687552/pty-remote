@@ -1,6 +1,6 @@
 {
   "name": "@lzdi/pty-remote-relay",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": false,
   "type": "module",
   "repository": {
@@ -20,7 +20,7 @@
     "start": "node bin/pty-remote-relay.js"
   },
   "dependencies": {
-    "@lzdi/pty-remote-protocol": "0.1.9",
+    "@lzdi/pty-remote-protocol": "0.1.10",
     "socket.io": "^4.8.3",
     "tsx": "^4.20.6"
   },
