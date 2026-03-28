@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 
 import { AppShell } from '@/app-shell/AppShell.tsx';
@@ -18,7 +18,13 @@ import type { MobileJumpControls } from '@/features/workspace/types.ts';
 export function App() {
   const store = useWorkspaceStore();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [mobileJumpControls, setMobileJumpControls] = useState<MobileJumpControls | null>(null);
+  const [mobileJumpControlsByPane, setMobileJumpControlsByPane] = useState<{
+    chat: MobileJumpControls | null;
+    terminal: MobileJumpControls | null;
+  }>({
+    chat: null,
+    terminal: null
+  });
   const [mobilePaneScrollRequests, setMobilePaneScrollRequests] = useState({
     chat: 0,
     terminal: 0
@@ -40,9 +46,24 @@ export function App() {
       : null;
   const activeConversationKey = activeConversation?.conversationKey ?? null;
   const activeSessionId = activeConversation?.sessionId ?? null;
+  const mobileJumpControls = mobileJumpControlsByPane[store.mobilePane];
   const terminalVisible = desktopTerminalVisible || store.mobilePane === 'terminal';
   const socketRef = useRef<Socket | null>(null);
   const lastTerminalSyncKeyRef = useRef<string | null>(null);
+
+  const handleChatMobileJumpControlsChange = useCallback((controls: MobileJumpControls | null) => {
+    setMobileJumpControlsByPane((current) => ({
+      ...current,
+      chat: controls
+    }));
+  }, []);
+
+  const handleTerminalMobileJumpControlsChange = useCallback((controls: MobileJumpControls | null) => {
+    setMobileJumpControlsByPane((current) => ({
+      ...current,
+      terminal: controls
+    }));
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -198,7 +219,7 @@ export function App() {
       chat={
         <ChatFeature
           clis={clis}
-          onMobileJumpControlsChange={setMobileJumpControls}
+          onMobileJumpControlsChange={handleChatMobileJumpControlsChange}
           paneVisible={desktopTerminalVisible || store.mobilePane === 'chat'}
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
           socketConnected={socketConnected}
@@ -207,7 +228,7 @@ export function App() {
       }
       terminal={
         <TerminalFeature
-          onMobileJumpControlsChange={setMobileJumpControls}
+          onMobileJumpControlsChange={handleTerminalMobileJumpControlsChange}
           scrollToBottomRequestKey={mobilePaneScrollRequests.terminal}
           store={store}
           terminal={terminal}
