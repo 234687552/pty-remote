@@ -505,7 +505,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
   return (
     <div
       className={[
-        'markdown-body space-y-3 leading-6',
+        'markdown-body max-w-full space-y-1.5 leading-[1.5]',
         isInverse ? 'text-zinc-950' : isMuted ? 'text-zinc-500 italic' : 'text-zinc-800'
       ].join(' ')}
     >
@@ -531,10 +531,10 @@ const MessageMarkdown = memo(function MessageMarkdown({
               {...props}
               className={
                 isInverse
-                  ? 'border-l-2 border-sky-300 pl-4 text-zinc-700'
+                  ? 'border-l-2 border-sky-300 pl-3 leading-[1.5] text-zinc-700'
                   : isMuted
-                    ? 'border-l-2 border-zinc-200 pl-4 text-zinc-500'
-                    : 'border-l-2 border-zinc-300 pl-4 text-zinc-600'
+                    ? 'border-l-2 border-zinc-200 pl-3 leading-[1.5] text-zinc-500'
+                    : 'border-l-2 border-zinc-300 pl-3 leading-[1.5] text-zinc-600'
               }
             />
           ),
@@ -576,17 +576,26 @@ const MessageMarkdown = memo(function MessageMarkdown({
             );
           },
           h1: ({ ...props }) => (
-            <h1 {...props} className={isMuted ? 'text-lg font-semibold text-zinc-600 italic' : 'text-lg font-semibold text-zinc-950'} />
+            <h1
+              {...props}
+              className={isMuted ? 'text-lg font-semibold leading-tight text-zinc-600 italic' : 'text-lg font-semibold leading-tight text-zinc-950'}
+            />
           ),
           h2: ({ ...props }) => (
-            <h2 {...props} className={isMuted ? 'text-base font-semibold text-zinc-600 italic' : 'text-base font-semibold text-zinc-950'} />
+            <h2
+              {...props}
+              className={isMuted ? 'text-base font-semibold leading-tight text-zinc-600 italic' : 'text-base font-semibold leading-tight text-zinc-950'}
+            />
           ),
           h3: ({ ...props }) => (
-            <h3 {...props} className={isMuted ? 'text-sm font-semibold text-zinc-600 italic' : 'text-sm font-semibold text-zinc-950'} />
+            <h3
+              {...props}
+              className={isMuted ? 'text-sm font-semibold leading-tight text-zinc-600 italic' : 'text-sm font-semibold leading-tight text-zinc-950'}
+            />
           ),
-          li: ({ ...props }) => <li {...props} className="ml-5 list-item" />,
-          ol: ({ ...props }) => <ol {...props} className="list-decimal space-y-1 pl-5" />,
-          p: ({ ...props }) => <p {...props} className="whitespace-pre-wrap break-words" />,
+          li: ({ ...props }) => <li {...props} className="ml-5 list-item leading-[1.45]" />,
+          ol: ({ ...props }) => <ol {...props} className="list-decimal space-y-0 pl-5" />,
+          p: ({ ...props }) => <p {...props} className="whitespace-pre-wrap break-words leading-[1.5]" />,
           pre: ({ children, node, ...props }) => {
             const mermaidDefinition = getMermaidDefinition(node as MarkdownNode | undefined);
             if (mermaidDefinition) {
@@ -608,7 +617,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
               </pre>
             );
           },
-          ul: ({ ...props }) => <ul {...props} className="list-disc space-y-1 pl-5" />
+          ul: ({ ...props }) => <ul {...props} className="list-disc space-y-0 pl-5" />
         }}
       >
         {content}
@@ -878,7 +887,7 @@ function MessageShell({ message, children }: { children: React.ReactNode; messag
       ? 'w-fit max-w-[85%] rounded-2xl bg-sky-200 px-3.5 py-2.5 text-sm break-words text-zinc-950 shadow-sm'
       : message.status === 'error'
         ? 'w-fit max-w-[85%] rounded-2xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm break-words text-zinc-900 shadow-sm'
-        : 'w-full py-2.5 text-sm break-words text-zinc-900';
+        : 'w-full max-w-[44rem] py-2.5 text-sm break-words text-zinc-900';
 
   return (
     <div className={wrapperClass}>

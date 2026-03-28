@@ -59,6 +59,7 @@ export interface ClaudeJsonlMessagesState {
   runtimePhase: ClaudeJsonlRuntimePhase;
   activityRevision: number;
   activeApiErrorMessageId: string | null;
+  nextMessageSequence: number;
   nextSyntheticMessageSequence: number;
 }
 
@@ -78,8 +79,25 @@ export function createClaudeJsonlMessagesState(): ClaudeJsonlMessagesState {
     runtimePhase: 'idle',
     activityRevision: 0,
     activeApiErrorMessageId: null,
+    nextMessageSequence: 1,
     nextSyntheticMessageSequence: 1
   };
+}
+
+function compareMessageChronology(left: ChatMessage, right: ChatMessage): number {
+  const leftTimestamp = new Date(left.createdAt).getTime();
+  const rightTimestamp = new Date(right.createdAt).getTime();
+  if (leftTimestamp !== rightTimestamp) {
+    return leftTimestamp - rightTimestamp;
+  }
+
+  const leftSequence = Number.isFinite(left.sequence) ? (left.sequence as number) : Number.MAX_SAFE_INTEGER;
+  const rightSequence = Number.isFinite(right.sequence) ? (right.sequence as number) : Number.MAX_SAFE_INTEGER;
+  if (leftSequence !== rightSequence) {
+    return leftSequence - rightSequence;
+  }
+
+  return left.id.localeCompare(right.id);
 }
 
 function isTextContentBlock(block: ClaudeContentBlock): block is ClaudeTextContentBlock {
@@ -309,7 +327,8 @@ function upsertMessage(orderedIds: string[], messagesById: Map<string, ChatMessa
     role: nextMessage.role,
     blocks,
     status: nextMessage.status === 'error' ? 'error' : deriveMessageStatus(blocks),
-    createdAt: existing?.createdAt || nextMessage.createdAt
+    createdAt: existing?.createdAt || nextMessage.createdAt,
+    sequence: existing?.sequence ?? nextMessage.sequence
   };
 
   if (!existing) {
@@ -437,7 +456,8 @@ export function applyClaudeJsonlLine(state: ClaudeJsonlMessagesState, line: stri
         role: 'assistant',
         blocks: [block],
         status: 'error',
-        createdAt: record.timestamp ?? new Date().toISOString()
+        createdAt: record.timestamp ?? new Date().toISOString(),
+        sequence: state.nextMessageSequence++
       });
       blocks = [block];
     }
@@ -456,7 +476,8 @@ export function applyClaudeJsonlLine(state: ClaudeJsonlMessagesState, line: stri
         role,
         blocks,
         status: record.isApiErrorMessage ? 'error' : deriveMessageStatus(blocks),
-        createdAt: record.timestamp ?? new Date().toISOString()
+        createdAt: record.timestamp ?? new Date().toISOString(),
+        sequence: state.nextMessageSequence++
       });
     }
   }
@@ -468,7 +489,9 @@ export function applyClaudeJsonlLine(state: ClaudeJsonlMessagesState, line: stri
 
 export function materializeClaudeJsonlMessages(state: ClaudeJsonlMessagesState): ChatMessage[] {
   return compactMessages(
-    state.orderedIds.map((messageId) => state.messagesById.get(messageId)).filter(Boolean) as ChatMessage[]
+    (state.orderedIds.map((messageId) => state.messagesById.get(messageId)).filter(Boolean) as ChatMessage[]).sort(
+      compareMessageChronology
+    )
   );
 }
 

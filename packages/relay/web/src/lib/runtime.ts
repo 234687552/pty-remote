@@ -47,13 +47,33 @@ export function getUtf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
-function compareMessageChronology(left: ChatMessage, right: ChatMessage): number {
-  const leftTimestamp = new Date(left.createdAt).getTime();
-  const rightTimestamp = new Date(right.createdAt).getTime();
+function getChronologyTimestamp(message: ChatMessage): number {
+  const parsed = new Date(message.createdAt).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getChronologySequence(message: ChatMessage): number {
+  return Number.isFinite(message.sequence) ? (message.sequence as number) : Number.MAX_SAFE_INTEGER;
+}
+
+export function compareMessageChronology(left: ChatMessage, right: ChatMessage): number {
+  const leftTimestamp = getChronologyTimestamp(left);
+  const rightTimestamp = getChronologyTimestamp(right);
   if (leftTimestamp !== rightTimestamp) {
     return leftTimestamp - rightTimestamp;
   }
+
+  const leftSequence = getChronologySequence(left);
+  const rightSequence = getChronologySequence(right);
+  if (leftSequence !== rightSequence) {
+    return leftSequence - rightSequence;
+  }
+
   return left.id.localeCompare(right.id);
+}
+
+export function sortChronologicalMessages(messages: ChatMessage[]): ChatMessage[] {
+  return messages.slice().sort(compareMessageChronology);
 }
 
 function createMessageSemanticKey(message: ChatMessage): string {
@@ -69,7 +89,7 @@ function createMessageSemanticKey(message: ChatMessage): string {
       return `tool_result:${block.toolCallId ?? ''}:${block.isError ? '1' : '0'}:${block.content.trim()}`;
     })
     .join('|');
-  return `${message.role}|${message.createdAt}|${metaSignature}|${blocksSignature}`;
+  return `${message.role}|${message.createdAt}|${message.sequence ?? ''}|${metaSignature}|${blocksSignature}`;
 }
 
 export function mergeChronologicalMessages(left: ChatMessage[], right: ChatMessage[]): ChatMessage[] {
@@ -82,5 +102,5 @@ export function mergeChronologicalMessages(left: ChatMessage[], right: ChatMessa
     bySemanticKey.set(createMessageSemanticKey(message), message);
   }
 
-  return [...bySemanticKey.values()].sort(compareMessageChronology);
+  return sortChronologicalMessages([...bySemanticKey.values()]);
 }

@@ -130,6 +130,7 @@ function messageEqual(left: ChatMessage | undefined, right: ChatMessage | undefi
     left.role === right.role &&
     left.status === right.status &&
     left.createdAt === right.createdAt &&
+    left.sequence === right.sequence &&
     JSON.stringify(left.blocks) === JSON.stringify(right.blocks)
   );
 }

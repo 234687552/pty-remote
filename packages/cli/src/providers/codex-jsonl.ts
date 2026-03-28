@@ -104,6 +104,22 @@ function createStableTextMessageId(kind: string, timestamp: string | undefined, 
   return `${kind}:seq:${sequence}:${digest}`;
 }
 
+function compareMessageChronology(left: ChatMessage, right: ChatMessage): number {
+  const leftTimestamp = new Date(left.createdAt).getTime();
+  const rightTimestamp = new Date(right.createdAt).getTime();
+  if (leftTimestamp !== rightTimestamp) {
+    return leftTimestamp - rightTimestamp;
+  }
+
+  const leftSequence = Number.isFinite(left.sequence) ? (left.sequence as number) : Number.MAX_SAFE_INTEGER;
+  const rightSequence = Number.isFinite(right.sequence) ? (right.sequence as number) : Number.MAX_SAFE_INTEGER;
+  if (leftSequence !== rightSequence) {
+    return leftSequence - rightSequence;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
 function rememberAssistantText(
   state: CodexJsonlMessagesState,
   timestamp: string | undefined,
@@ -367,7 +383,8 @@ function upsertMessage(state: CodexJsonlMessagesState, nextMessage: ChatMessage)
     blocks,
     meta: mergeMessageMeta(existing?.meta, nextMessage.meta),
     status: deriveMessageStatus(blocks, state.runtimePhase),
-    createdAt: existing?.createdAt ?? nextMessage.createdAt
+    createdAt: existing?.createdAt ?? nextMessage.createdAt,
+    sequence: existing?.sequence ?? nextMessage.sequence
   };
 
   if (!existing) {
@@ -428,7 +445,8 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
       blocks: [textBlock],
       meta: createMessageMeta(state),
       status: 'complete',
-      createdAt: normalizeCreatedAt(timestamp, sequence)
+      createdAt: normalizeCreatedAt(timestamp, sequence),
+      sequence
     });
     return;
   }
@@ -455,7 +473,8 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
       blocks: [textBlock],
       meta: createMessageMeta(state),
       status: 'complete',
-      createdAt: normalizeCreatedAt(timestamp, sequence)
+      createdAt: normalizeCreatedAt(timestamp, sequence),
+      sequence
     });
     return;
   }
@@ -482,7 +501,8 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
       blocks: [textBlock],
       meta: createMessageMeta(state, payload?.phase),
       status: 'complete',
-      createdAt: normalizeCreatedAt(timestamp, sequence)
+      createdAt: normalizeCreatedAt(timestamp, sequence),
+      sequence
     });
     return;
   }
@@ -563,7 +583,8 @@ function applyResponseItem(
       blocks: stableBlocks,
       meta: createMessageMeta(state, payload.phase),
       status: 'complete',
-      createdAt: normalizeCreatedAt(timestamp, sequence)
+      createdAt: normalizeCreatedAt(timestamp, sequence),
+      sequence
     });
     return;
   }
@@ -575,13 +596,15 @@ function applyResponseItem(
     }
 
     const rawInput = payloadType === 'custom_tool_call' ? payload.input : payload.arguments;
+    const sequence = state.messageSequence++;
     upsertMessage(state, {
       id: `tool:${callId}`,
       role: 'assistant',
       blocks: [createToolUseBlock(callId, payload.name ?? 'unknown', stringifyUnknown(rawInput))],
       meta: createMessageMeta(state),
       status: 'streaming',
-      createdAt: normalizeCreatedAt(timestamp, state.messageSequence++)
+      createdAt: normalizeCreatedAt(timestamp, sequence),
+      sequence
     });
     return;
   }
@@ -600,7 +623,8 @@ function applyResponseItem(
       blocks: [createToolUseBlock(callId, 'web_search', preview)],
       meta: createMessageMeta(state),
       status: 'complete',
-      createdAt: normalizeCreatedAt(timestamp, sequence)
+      createdAt: normalizeCreatedAt(timestamp, sequence),
+      sequence
     });
     return;
   }
@@ -613,13 +637,15 @@ function applyResponseItem(
 
     const normalizedStatus = payload.status?.trim().toLowerCase();
     const isError = normalizedStatus === 'error' || normalizedStatus === 'failed' || normalizedStatus === 'cancelled';
+    const sequence = state.messageSequence++;
     upsertMessage(state, {
       id: `tool:${callId}`,
       role: 'assistant',
       blocks: [createToolResultBlock(callId, stringifyUnknown(payload.output), isError)],
       meta: createMessageMeta(state),
       status: isError ? 'error' : 'complete',
-      createdAt: normalizeCreatedAt(timestamp, state.messageSequence++)
+      createdAt: normalizeCreatedAt(timestamp, sequence),
+      sequence
     });
   }
 }
@@ -658,7 +684,8 @@ export function applyCodexJsonlLine(state: CodexJsonlMessagesState, line: string
 export function materializeCodexJsonlMessages(state: CodexJsonlMessagesState): ChatMessage[] {
   return state.orderedIds
     .map((messageId) => state.messagesById.get(messageId))
-    .filter((message): message is ChatMessage => Boolean(message));
+    .filter((message): message is ChatMessage => Boolean(message))
+    .sort(compareMessageChronology);
 }
 
 export function parseCodexJsonlMessages(raw: string): {

@@ -4,7 +4,7 @@ import type { Dispatch, SetStateAction } from 'react';
 import type { MessagesUpsertPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ChatMessage, RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
-import { createEmptySnapshot } from '@/lib/runtime.ts';
+import { createEmptySnapshot, sortChronologicalMessages } from '@/lib/runtime.ts';
 import {
   getProjectProviderKey,
   loadProjectConversationsState,
@@ -161,9 +161,11 @@ function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPa
 
   return {
     ...baseSnapshot,
-    messages: payload.recentMessageIds
-      .map((messageId) => messagesById.get(messageId))
-      .filter(Boolean) as ChatMessage[],
+    messages: sortChronologicalMessages(
+      payload.recentMessageIds
+        .map((messageId) => messagesById.get(messageId))
+        .filter(Boolean) as ChatMessage[]
+    ),
     hasOlderMessages: payload.hasOlderMessages
   };
 }

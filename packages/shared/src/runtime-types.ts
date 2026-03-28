@@ -59,6 +59,7 @@ export interface ChatMessage {
   meta?: ChatMessageMeta;
   status: MessageStatus;
   createdAt: string;
+  sequence?: number;
 }
 
 export interface RuntimeSnapshot {

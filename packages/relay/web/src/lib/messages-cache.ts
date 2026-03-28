@@ -1,6 +1,6 @@
 import type { MessagesUpsertPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ChatMessage, ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
-import { getUtf8ByteLength } from '@/lib/runtime.ts';
+import { getUtf8ByteLength, sortChronologicalMessages } from '@/lib/runtime.ts';
 
 const STORAGE_KEY = 'pty-remote.messages-cache.v1';
 const MAX_CONVERSATIONS = 10;
@@ -187,9 +187,11 @@ export function applyCachedMessagesUpsert(payload: MessagesUpsertPayload): void 
     providerId: payload.providerId,
     conversationKey: payload.conversationKey,
     sessionId: payload.sessionId,
-    messages: payload.recentMessageIds
-      .map((messageId) => messagesById.get(messageId))
-      .filter(Boolean) as ChatMessage[],
+    messages: sortChronologicalMessages(
+      payload.recentMessageIds
+        .map((messageId) => messagesById.get(messageId))
+        .filter(Boolean) as ChatMessage[]
+    ),
     lastSeq: payload.seq ?? existing?.lastSeq ?? null,
     updatedAt: Date.now()
   };
