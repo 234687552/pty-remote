@@ -4,6 +4,7 @@ import path from 'node:path';
 import type {
   ManagedPtyHandleSummary,
   MessagesUpsertPayload,
+  RuntimeMetaPayload,
   SelectConversationResultPayload,
   TerminalFramePatchPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
@@ -42,7 +43,6 @@ export interface CodexManagerOptions extends CodexHistoryOptions {
   codexReadyTimeoutMs: number;
   promptSubmitDelayMs: number;
   jsonlRefreshDebounceMs: number;
-  snapshotEmitDebounceMs: number;
   snapshotMessagesMax: number;
   gcIntervalMs: number;
   detachedDraftTtlMs: number;
@@ -53,7 +53,7 @@ export interface CodexManagerOptions extends CodexHistoryOptions {
 
 interface CodexManagerCallbacks {
   emitMessagesUpsert(payload: Omit<MessagesUpsertPayload, 'cliId'>): void;
-  emitSnapshot(snapshot: RuntimeSnapshot): void;
+  emitRuntimeMeta(payload: Omit<RuntimeMetaPayload, 'cliId'>): void;
   emitTerminalFramePatch(payload: Omit<TerminalFramePatchPayload, 'cliId' | 'providerId'>): void;
   emitTerminalSessionEvicted(payload: {
     conversationKey: string | null;
@@ -211,8 +211,6 @@ export class CodexManager {
 
   private jsonlRefreshDueAt: number | null = null;
 
-  private snapshotEmitTimer: NodeJS.Timeout | null = null;
-
   private readonly gcTimer: NodeJS.Timeout;
 
   private terminalSize: { cols: number; rows: number };
@@ -260,23 +258,6 @@ export class CodexManager {
       sessionId: handle?.sessionId ?? null,
       conversationKey: handle?.threadKey ?? null
     };
-  }
-
-  getSnapshot(): RuntimeSnapshot {
-    return this.createRuntimeSnapshot(this.getActiveHandle());
-  }
-
-  async primeActiveTerminalFrame(): Promise<void> {
-    const handle = this.getActiveHandle();
-    if (!handle) {
-      throw new Error('No active terminal is selected');
-    }
-    this.emitActiveTerminalFrame(handle);
-  }
-
-  async refreshActiveState(): Promise<void> {
-    await this.refreshActiveMessages();
-    this.emitSnapshotNow();
   }
 
   updateTerminalSize(cols: number, rows: number): void {
@@ -359,7 +340,7 @@ export class CodexManager {
     }
 
     await this.refreshMessagesFromJsonl(handle);
-    this.emitSnapshotNow();
+    this.emitRuntimeMeta(handle);
 
     return {
       providerId: this.providerId,
@@ -394,7 +375,7 @@ export class CodexManager {
       handle.pendingNewSessionDiscoveryStartedAt = pendingNewSessionDiscoveryStartedAt;
       handle.awaitingJsonlTurn = true;
       handle.lastUserInputAt = Date.now();
-      this.setStatus(handle, 'running', true);
+      this.setStatus(handle, 'running');
       await this.sendPromptToHandle(handle, trimmedContent);
       this.scheduleJsonlRefresh(0, 'send-message');
     } catch (error) {
@@ -406,7 +387,7 @@ export class CodexManager {
       if (handle.pendingNewSessionDiscoveryStartedAt === pendingNewSessionDiscoveryStartedAt) {
         handle.pendingNewSessionDiscoveryStartedAt = null;
       }
-      this.setStatus(handle, 'idle', true);
+      this.setStatus(handle, 'idle');
       this.setLastError(handle, error instanceof Error ? error.message : 'Codex request failed');
       throw error;
     }
@@ -438,7 +419,7 @@ export class CodexManager {
     handle.lifecycle = 'attached';
     handle.detachedAt = null;
     handle.discoveryStartedAt = null;
-    this.emitSnapshotNow();
+    this.emitRuntimeMeta(handle);
   }
 
   async sendTerminalInput(input: string): Promise<void> {
@@ -489,11 +470,6 @@ export class CodexManager {
       clearTimeout(this.jsonlRefreshTimer);
       this.jsonlRefreshTimer = null;
     }
-    if (this.snapshotEmitTimer) {
-      clearTimeout(this.snapshotEmitTimer);
-      this.snapshotEmitTimer = null;
-    }
-
     clearInterval(this.gcTimer);
     for (const handle of this.handles.values()) {
       this.closeJsonlWatcher(handle);
@@ -551,36 +527,15 @@ export class CodexManager {
     };
   }
 
-  private emitActiveTerminalFrame(handle: CodexHandle | null): void {
-    if (!handle) {
-      return;
-    }
-
-    this.emitTerminalFramePatch(handle, handle.terminalFrame.createResetPatch());
-  }
-
-  private createRuntimeSnapshot(handle: CodexHandle | null): RuntimeSnapshot {
-    if (!handle) {
-      return {
-        providerId: null,
-        conversationKey: null,
-        status: 'idle',
-        sessionId: null,
-        messages: [],
-        hasOlderMessages: false,
-        lastError: null
-      };
-    }
-
-    return {
+  private emitRuntimeMeta(handle: CodexHandle): void {
+    this.callbacks.emitRuntimeMeta({
       providerId: this.providerId,
       conversationKey: handle.threadKey,
-      status: handle.runtime.status,
+      cwd: handle.cwd,
+      lastError: handle.runtime.lastError,
       sessionId: handle.runtime.sessionId,
-      messages: cloneValue(handle.runtime.messages),
-      hasOlderMessages: handle.runtime.hasOlderMessages,
-      lastError: handle.runtime.lastError
-    };
+      status: handle.runtime.status
+    } satisfies Omit<RuntimeMetaPayload, 'cliId'>);
   }
 
   private getActiveHandle(): CodexHandle | null {
@@ -855,9 +810,7 @@ export class CodexManager {
     if (this.isActiveHandle(handle) || handle.pty) {
       this.ensureJsonlWatcher(handle, match.filePath);
     }
-    if (this.isActiveHandle(handle)) {
-      this.emitSnapshotNow();
-    }
+    this.emitRuntimeMeta(handle);
   }
 
   private async discoverReplacementSessionForHandle(handle: CodexHandle): Promise<void> {
@@ -895,22 +848,13 @@ export class CodexManager {
     this.resetJsonlParsingState(handle, match.sessionId);
 
     const terminalResetPatch = handle.terminalFrame.reset(match.sessionId);
+    this.emitRuntimeMeta(handle);
     if (this.isActiveHandle(handle)) {
       this.emitTerminalFramePatch(handle, terminalResetPatch);
-      this.emitSnapshotNow();
     }
     if (this.isActiveHandle(handle) || handle.pty) {
       this.ensureJsonlWatcher(handle, match.filePath);
     }
-  }
-
-  private async refreshActiveMessages(): Promise<void> {
-    const handle = this.getActiveHandle();
-    if (!handle) {
-      return;
-    }
-
-    await this.refreshMessagesFromJsonl(handle);
   }
 
   private async refreshMessagesFromJsonl(handle: CodexHandle): Promise<void> {
@@ -928,7 +872,7 @@ export class CodexManager {
       const nextStatus = this.resolveRuntimeStatusFromState(handle, handle.jsonlMessagesState.runtimePhase);
       if (this.isActiveHandle(handle) && handle.runtime.status !== nextStatus) {
         handle.runtime.status = nextStatus;
-        this.emitSnapshotNow();
+        this.emitRuntimeMeta(handle);
       }
       return;
     }
@@ -1007,6 +951,7 @@ export class CodexManager {
       }
       if (statusChanged) {
         handle.runtime.status = nextRuntimeStatus;
+        this.emitRuntimeMeta(handle);
       }
 
       if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged || statusChanged) {
@@ -1019,9 +964,6 @@ export class CodexManager {
         );
         if (upsertPayload) {
           this.callbacks.emitMessagesUpsert(upsertPayload);
-        }
-        if (this.isActiveHandle(handle)) {
-          this.scheduleSnapshotEmit(statusChanged ? 0 : this.options.snapshotEmitDebounceMs);
         }
       }
 
@@ -1079,35 +1021,13 @@ export class CodexManager {
     this.jsonlRefreshTimer.unref();
   }
 
-  private scheduleSnapshotEmit(delayMs = this.options.snapshotEmitDebounceMs): void {
-    if (this.snapshotEmitTimer) {
-      clearTimeout(this.snapshotEmitTimer);
-    }
-
-    this.snapshotEmitTimer = setTimeout(() => {
-      this.snapshotEmitTimer = null;
-      this.emitSnapshotNow();
-    }, delayMs);
-  }
-
-  private emitSnapshotNow(): void {
-    this.callbacks.emitSnapshot(this.createRuntimeSnapshot(this.getActiveHandle()));
-  }
-
-  private setStatus(handle: CodexHandle, nextStatus: RuntimeStatus, immediate = false): void {
+  private setStatus(handle: CodexHandle, nextStatus: RuntimeStatus): void {
     if (handle.runtime.status === nextStatus) {
       return;
     }
 
     handle.runtime.status = nextStatus;
-    if (!this.isActiveHandle(handle)) {
-      return;
-    }
-    if (immediate) {
-      this.emitSnapshotNow();
-      return;
-    }
-    this.scheduleSnapshotEmit();
+    this.emitRuntimeMeta(handle);
   }
 
   private clearLastError(handle: CodexHandle): void {
@@ -1119,9 +1039,7 @@ export class CodexManager {
     if (handle.runtime.status === 'error') {
       handle.runtime.status = this.resolveRuntimeStatusFromState(handle, handle.jsonlMessagesState.runtimePhase);
     }
-    if (this.isActiveHandle(handle)) {
-      this.emitSnapshotNow();
-    }
+    this.emitRuntimeMeta(handle);
   }
 
   private setLastError(handle: CodexHandle, nextError: string | null): void {
@@ -1140,9 +1058,7 @@ export class CodexManager {
       handle.runtime.status = 'error';
       handle.lifecycle = 'error';
     }
-    if (this.isActiveHandle(handle)) {
-      this.emitSnapshotNow();
-    }
+    this.emitRuntimeMeta(handle);
   }
 
   private detachHandle(handle: CodexHandle): void {
@@ -1194,13 +1110,10 @@ export class CodexManager {
     handle.terminalFrame.dispose();
     this.handles.delete(handle.threadKey);
 
-    if (wasActive) {
-      if (this.jsonlRefreshTimer) {
-        clearTimeout(this.jsonlRefreshTimer);
-        this.jsonlRefreshTimer = null;
-        this.jsonlRefreshDueAt = null;
-      }
-      this.emitSnapshotNow();
+    if (wasActive && this.jsonlRefreshTimer) {
+      clearTimeout(this.jsonlRefreshTimer);
+      this.jsonlRefreshTimer = null;
+      this.jsonlRefreshDueAt = null;
     }
   }
 
@@ -1301,10 +1214,10 @@ export class CodexManager {
     const framePatch = handle.terminalFrame.reset(handle.sessionId);
     handle.runtime.status = 'starting';
     handle.lifecycle = this.isActiveHandle(handle) ? 'attached' : 'detached';
+    this.emitRuntimeMeta(handle);
     if (this.isActiveHandle(handle)) {
       this.emitTerminalFramePatch(handle, framePatch);
       this.ensureJsonlWatcher(handle, handle.sessionFilePath);
-      this.emitSnapshotNow();
       this.scheduleJsonlRefresh(0, 'start-handle-session');
     }
   }
@@ -1399,6 +1312,8 @@ export class CodexManager {
           runtimeStatus: handle.runtime.status
         });
         handle.runtime.lastError = 'Codex CLI exited unexpectedly';
+        handle.runtime.status = 'error';
+        this.emitRuntimeMeta(handle);
       }
       try {
         await this.refreshMessagesFromJsonl(handle);
@@ -1419,7 +1334,7 @@ export class CodexManager {
         stopReason: expectedExitReason ?? 'unknown',
         runtimeStatus: handle.runtime.status
       });
-      this.setStatus(handle, 'idle', true);
+      this.setStatus(handle, 'idle');
       return;
     }
     this.log('error', 'active codex pty exited unexpectedly', {
@@ -1667,7 +1582,7 @@ export class CodexManager {
         handle.runtime.hasOlderMessages = nextHasOlderMessages;
       }
 
-      this.setStatus(handle, 'idle', true);
+      this.setStatus(handle, 'idle');
 
       if (this.isActiveHandle(handle) && (allMessagesChanged || messagesChanged || hasOlderMessagesChanged)) {
         const upsertPayload = this.createMessagesUpsertPayload(

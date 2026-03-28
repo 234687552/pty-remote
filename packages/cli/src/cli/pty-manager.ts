@@ -5,6 +5,7 @@ import path from 'node:path';
 import type {
   ManagedPtyHandleSummary,
   MessagesUpsertPayload,
+  RuntimeMetaPayload,
   SelectConversationResultPayload,
   TerminalFramePatchPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
@@ -38,7 +39,6 @@ export interface PtyManagerOptions {
   claudeReadyTimeoutMs: number;
   promptSubmitDelayMs: number;
   jsonlRefreshDebounceMs: number;
-  snapshotEmitDebounceMs: number;
   snapshotMessagesMax: number;
   gcIntervalMs: number;
   detachedDraftTtlMs: number;
@@ -49,7 +49,7 @@ export interface PtyManagerOptions {
 
 interface PtyManagerCallbacks {
   emitMessagesUpsert(payload: Omit<MessagesUpsertPayload, 'cliId'>): void;
-  emitSnapshot(snapshot: RuntimeSnapshot): void;
+  emitRuntimeMeta(payload: Omit<RuntimeMetaPayload, 'cliId'>): void;
   emitTerminalFramePatch(payload: Omit<TerminalFramePatchPayload, 'cliId' | 'providerId'>): void;
   emitTerminalSessionEvicted(payload: {
     conversationKey: string | null;
@@ -165,8 +165,6 @@ export class PtyManager {
 
   private jsonlRefreshTimer: NodeJS.Timeout | null = null;
 
-  private snapshotEmitTimer: NodeJS.Timeout | null = null;
-
   private gcTimer: NodeJS.Timeout;
 
   private terminalSize: { cols: number; rows: number };
@@ -213,23 +211,6 @@ export class PtyManager {
       sessionId: handle?.sessionId ?? null,
       conversationKey: handle?.threadKey ?? null
     };
-  }
-
-  getSnapshot(): RuntimeSnapshot {
-    return this.createRuntimeSnapshot(this.getActiveHandle());
-  }
-
-  async primeActiveTerminalFrame(): Promise<void> {
-    const handle = this.getActiveHandle();
-    if (!handle) {
-      throw new Error('No active terminal is selected');
-    }
-    this.emitActiveTerminalFrame(handle);
-  }
-
-  async refreshActiveState(): Promise<void> {
-    await this.refreshActiveMessages();
-    this.emitSnapshotNow();
   }
 
   updateTerminalSize(cols: number, rows: number): void {
@@ -303,12 +284,12 @@ export class PtyManager {
     await this.refreshMessagesFromJsonl(handle);
 
     if (!handle.pty) {
-      this.startHandleSession(handle, { emitSnapshot: false });
+      this.startHandleSession(handle);
     } else {
       this.ensureJsonlWatcher(handle, handle.sessionId);
     }
 
-    this.emitSnapshotNow();
+    this.emitRuntimeMeta(handle);
 
     return {
       providerId: this.providerId,
@@ -341,7 +322,7 @@ export class PtyManager {
       await this.waitForHandleReady(handle);
       handle.awaitingJsonlTurn = true;
       handle.lastUserInputAt = Date.now();
-      this.setStatus(handle, 'running', true);
+      this.setStatus(handle, 'running');
       await this.sendPromptToHandle(handle, trimmedContent);
       this.scheduleJsonlRefresh(0);
     } catch (error) {
@@ -350,7 +331,7 @@ export class PtyManager {
         error: errorMessage(error, 'Claude request failed'),
         promptLength: trimmedContent.length
       });
-      this.setStatus(handle, 'idle', true);
+      this.setStatus(handle, 'idle');
       this.setLastError(handle, error instanceof Error ? error.message : 'Claude request failed');
       throw error;
     }
@@ -390,7 +371,7 @@ export class PtyManager {
     }
 
     this.stopHandlePtyPreservingReplay(handle, 'stop-active-run');
-    this.setStatus(handle, 'idle', true);
+    this.setStatus(handle, 'idle');
 
     if (this.isActiveHandle(handle) && (allMessagesChanged || messagesChanged || hasOlderMessagesChanged)) {
       const upsertPayload = this.createMessagesUpsertPayload(
@@ -420,7 +401,7 @@ export class PtyManager {
     this.resetHandleRuntime(handle, null);
     handle.lifecycle = 'attached';
     handle.detachedAt = null;
-    this.emitSnapshotNow();
+    this.emitRuntimeMeta(handle);
   }
 
   async sendTerminalInput(input: string): Promise<void> {
@@ -471,11 +452,6 @@ export class PtyManager {
       clearTimeout(this.jsonlRefreshTimer);
       this.jsonlRefreshTimer = null;
     }
-    if (this.snapshotEmitTimer) {
-      clearTimeout(this.snapshotEmitTimer);
-      this.snapshotEmitTimer = null;
-    }
-
     clearInterval(this.gcTimer);
     for (const handle of this.handles.values()) {
       this.closeJsonlWatcher(handle);
@@ -531,36 +507,15 @@ export class PtyManager {
     };
   }
 
-  private emitActiveTerminalFrame(handle: PtyHandle | null): void {
-    if (!handle) {
-      return;
-    }
-
-    this.emitTerminalFramePatch(handle, handle.terminalFrame.createResetPatch());
-  }
-
-  private createRuntimeSnapshot(handle: PtyHandle | null): RuntimeSnapshot {
-    if (!handle) {
-      return {
-        providerId: null,
-        conversationKey: null,
-        status: 'idle',
-        sessionId: null,
-        messages: [],
-        hasOlderMessages: false,
-        lastError: null
-      };
-    }
-
-    return {
+  private emitRuntimeMeta(handle: PtyHandle): void {
+    this.callbacks.emitRuntimeMeta({
       providerId: this.providerId,
       conversationKey: handle.threadKey,
-      status: handle.runtime.status,
+      cwd: handle.cwd,
+      lastError: handle.runtime.lastError,
       sessionId: handle.runtime.sessionId,
-      messages: cloneValue(handle.runtime.messages),
-      hasOlderMessages: handle.runtime.hasOlderMessages,
-      lastError: handle.runtime.lastError
-    };
+      status: handle.runtime.status
+    } satisfies Omit<RuntimeMetaPayload, 'cliId'>);
   }
 
   private getActiveHandle(): PtyHandle | null {
@@ -838,22 +793,13 @@ export class PtyManager {
     }
   }
 
-  private async refreshActiveMessages(): Promise<void> {
-    const handle = this.getActiveHandle();
-    if (!handle) {
-      return;
-    }
-
-    await this.refreshMessagesFromJsonl(handle);
-  }
-
   private async refreshMessagesFromJsonl(handle: PtyHandle): Promise<void> {
     const sessionId = handle.sessionId;
     if (!sessionId) {
       this.closeJsonlWatcher(handle);
       if (this.isActiveHandle(handle) && handle.runtime.status !== 'idle') {
         handle.runtime.status = 'idle';
-        this.emitSnapshotNow();
+        this.emitRuntimeMeta(handle);
       }
       return;
     }
@@ -931,6 +877,7 @@ export class PtyManager {
       }
       if (statusChanged) {
         handle.runtime.status = nextRuntimeStatus;
+        this.emitRuntimeMeta(handle);
       }
 
       if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged || statusChanged) {
@@ -943,9 +890,6 @@ export class PtyManager {
         );
         if (upsertPayload) {
           this.callbacks.emitMessagesUpsert(upsertPayload);
-        }
-        if (this.isActiveHandle(handle)) {
-          this.scheduleSnapshotEmit(statusChanged ? 0 : this.options.snapshotEmitDebounceMs);
         }
       }
 
@@ -986,35 +930,13 @@ export class PtyManager {
     }, delayMs);
   }
 
-  private scheduleSnapshotEmit(delayMs = this.options.snapshotEmitDebounceMs): void {
-    if (this.snapshotEmitTimer) {
-      clearTimeout(this.snapshotEmitTimer);
-    }
-
-    this.snapshotEmitTimer = setTimeout(() => {
-      this.snapshotEmitTimer = null;
-      this.emitSnapshotNow();
-    }, delayMs);
-  }
-
-  private emitSnapshotNow(): void {
-    this.callbacks.emitSnapshot(this.createRuntimeSnapshot(this.getActiveHandle()));
-  }
-
-  private setStatus(handle: PtyHandle, nextStatus: RuntimeStatus, immediate = false): void {
+  private setStatus(handle: PtyHandle, nextStatus: RuntimeStatus): void {
     if (handle.runtime.status === nextStatus) {
       return;
     }
 
     handle.runtime.status = nextStatus;
-    if (!this.isActiveHandle(handle)) {
-      return;
-    }
-    if (immediate) {
-      this.emitSnapshotNow();
-      return;
-    }
-    this.scheduleSnapshotEmit();
+    this.emitRuntimeMeta(handle);
   }
 
   private clearLastError(handle: PtyHandle): void {
@@ -1026,9 +948,7 @@ export class PtyManager {
     if (handle.runtime.status === 'error') {
       handle.runtime.status = this.resolveRuntimeStatusFromJsonl(handle, handle.jsonlMessagesState.runtimePhase);
     }
-    if (this.isActiveHandle(handle)) {
-      this.emitSnapshotNow();
-    }
+    this.emitRuntimeMeta(handle);
   }
 
   private setLastError(handle: PtyHandle, nextError: string | null): void {
@@ -1047,9 +967,7 @@ export class PtyManager {
       handle.runtime.status = 'error';
       handle.lifecycle = 'error';
     }
-    if (this.isActiveHandle(handle)) {
-      this.emitSnapshotNow();
-    }
+    this.emitRuntimeMeta(handle);
   }
 
   private detachHandle(handle: PtyHandle): void {
@@ -1101,12 +1019,9 @@ export class PtyManager {
     handle.terminalFrame.dispose();
     this.handles.delete(handle.threadKey);
 
-    if (wasActive) {
-      if (this.jsonlRefreshTimer) {
-        clearTimeout(this.jsonlRefreshTimer);
-        this.jsonlRefreshTimer = null;
-      }
-      this.emitSnapshotNow();
+    if (wasActive && this.jsonlRefreshTimer) {
+      clearTimeout(this.jsonlRefreshTimer);
+      this.jsonlRefreshTimer = null;
     }
   }
 
@@ -1166,7 +1081,7 @@ export class PtyManager {
     stopClaudePtySession(currentPty);
   }
 
-  private startHandleSession(handle: PtyHandle, options?: { emitSnapshot?: boolean }): void {
+  private startHandleSession(handle: PtyHandle): void {
     this.resetTerminalReplay(handle);
     handle.bypassPromptAutoAccepting = false;
     handle.suppressNextPtyExitError = false;
@@ -1208,12 +1123,10 @@ export class PtyManager {
     const framePatch = handle.terminalFrame.reset(started.sessionId);
     handle.runtime.status = 'starting';
     handle.lifecycle = this.isActiveHandle(handle) ? 'attached' : 'detached';
+    this.emitRuntimeMeta(handle);
     if (this.isActiveHandle(handle)) {
       this.emitTerminalFramePatch(handle, framePatch);
       this.ensureJsonlWatcher(handle, started.sessionId);
-      if (options?.emitSnapshot !== false) {
-        this.emitSnapshotNow();
-      }
       this.scheduleJsonlRefresh(0);
     }
   }
@@ -1301,6 +1214,8 @@ export class PtyManager {
           runtimeStatus: handle.runtime.status
         });
         handle.runtime.lastError = 'Claude CLI exited unexpectedly';
+        handle.runtime.status = 'error';
+        this.emitRuntimeMeta(handle);
       }
       try {
         await this.refreshMessagesFromJsonl(handle);
@@ -1321,7 +1236,7 @@ export class PtyManager {
         stopReason: expectedExitReason ?? 'unknown',
         runtimeStatus: handle.runtime.status
       });
-      this.setStatus(handle, 'idle', true);
+      this.setStatus(handle, 'idle');
       return;
     }
     this.log('error', 'active claude pty exited unexpectedly', {

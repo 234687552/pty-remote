@@ -29,9 +29,6 @@ export function createClaudeProviderRuntime(
     getRegistrationPayload() {
       return manager.getRegistrationPayload();
     },
-    getSnapshot() {
-      return manager.getSnapshot();
-    },
     listSlashCommands() {
       return listProviderSlashCommands('claude');
     },
@@ -40,12 +37,6 @@ export function createClaudeProviderRuntime(
     },
     listManagedPtyHandles() {
       return Promise.resolve(manager.listManagedPtyHandles());
-    },
-    primeActiveTerminalFrame() {
-      return manager.primeActiveTerminalFrame();
-    },
-    refreshActiveState() {
-      return manager.refreshActiveState();
     },
     resetActiveConversation() {
       return manager.resetActiveThread();

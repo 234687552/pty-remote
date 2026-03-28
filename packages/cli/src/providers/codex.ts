@@ -30,9 +30,6 @@ export function createCodexProviderRuntime(
     getRegistrationPayload() {
       return manager.getRegistrationPayload();
     },
-    getSnapshot() {
-      return manager.getSnapshot();
-    },
     listSlashCommands() {
       return listProviderSlashCommands('codex');
     },
@@ -41,12 +38,6 @@ export function createCodexProviderRuntime(
     },
     listManagedPtyHandles() {
       return Promise.resolve(manager.listManagedPtyHandles());
-    },
-    primeActiveTerminalFrame() {
-      return manager.primeActiveTerminalFrame();
-    },
-    refreshActiveState() {
-      return manager.refreshActiveState();
     },
     resetActiveConversation() {
       return manager.resetActiveThread();

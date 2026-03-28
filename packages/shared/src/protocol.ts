@@ -1,4 +1,4 @@
-import type { ChatMessage, CliDescriptor, ProviderId, RuntimeSnapshot } from './runtime-types.ts';
+import type { ChatMessage, CliDescriptor, ProviderId, RuntimeSnapshot, RuntimeStatus } from './runtime-types.ts';
 import type { TerminalFramePatch, TerminalFrameSnapshot } from './terminal-frame.ts';
 
 export interface CliRegisterPayload {
@@ -52,7 +52,6 @@ export type CliCommandName =
   | 'delete-attachment'
   | 'stop-message'
   | 'reset-session'
-  | 'get-runtime-snapshot'
   | 'pick-project-directory'
   | 'list-project-conversations'
   | 'list-managed-pty-handles'
@@ -77,7 +76,6 @@ export interface CliCommandPayloadMap {
   };
   'stop-message': Record<string, never>;
   'reset-session': Record<string, never>;
-  'get-runtime-snapshot': Record<string, never>;
   'pick-project-directory': Record<string, never>;
   'list-project-conversations': {
     cwd: string;
@@ -98,10 +96,6 @@ export interface CliCommandPayloadMap {
     conversationKey: string;
     sessionId: string | null;
   };
-}
-
-export interface GetRuntimeSnapshotResultPayload {
-  snapshot: RuntimeSnapshot;
 }
 
 export interface PickProjectDirectoryResultPayload {
@@ -150,7 +144,6 @@ export interface CliCommandResultPayloadMap {
   'delete-attachment': null;
   'stop-message': null;
   'reset-session': null;
-  'get-runtime-snapshot': GetRuntimeSnapshotResultPayload;
   'pick-project-directory': PickProjectDirectoryResultPayload;
   'list-project-conversations': ListProjectSessionsResultPayload;
   'list-managed-pty-handles': ListManagedPtyHandlesResultPayload;
@@ -230,6 +223,16 @@ export interface RuntimeSnapshotPayload {
   cliId: string;
   providerId: ProviderId;
   snapshot: RuntimeSnapshot;
+}
+
+export interface RuntimeMetaPayload {
+  cliId: string;
+  providerId: ProviderId;
+  conversationKey: string | null;
+  cwd: string;
+  lastError: string | null;
+  sessionId: string | null;
+  status: RuntimeStatus;
 }
 
 export interface MessagesUpsertPayload {

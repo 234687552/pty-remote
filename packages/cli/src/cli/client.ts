@@ -11,18 +11,17 @@ import type {
   CliCommandResult,
   CliRegisterPayload,
   CliRegisterResult,
-  GetRuntimeSnapshotResultPayload,
   ListSlashCommandsResultPayload,
   ListManagedPtyHandlesResultPayload,
   ListProjectSessionsResultPayload,
   PickProjectDirectoryResultPayload,
+  RuntimeMetaPayload,
   UploadAttachmentResultPayload,
-  RuntimeSnapshotPayload,
   TerminalFramePatchPayload,
   TerminalInputPayload,
   TerminalSessionEvictedPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
-import type { ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import type { ProviderId, RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import { AttachmentManager } from '../attachments/manager.ts';
 import { createClaudeProviderRuntime } from '../providers/claude.ts';
 import { createCodexProviderRuntime, type CodexProviderRuntimeOptions } from '../providers/codex.ts';
@@ -79,7 +78,6 @@ const CLAUDE_READY_TIMEOUT_MS = getConfigInt('CLAUDE_READY_TIMEOUT_MS', 20_000, 
 const CODEX_READY_TIMEOUT_MS = getConfigInt('CODEX_READY_TIMEOUT_MS', 20_000, 0);
 const PROMPT_SUBMIT_DELAY_MS = getConfigInt('PROMPT_SUBMIT_DELAY_MS', 120, 0);
 const JSONL_REFRESH_DEBOUNCE_MS = getConfigInt('JSONL_REFRESH_DEBOUNCE_MS', 120, 0);
-const SNAPSHOT_EMIT_DEBOUNCE_MS = getConfigInt('SNAPSHOT_EMIT_DEBOUNCE_MS', 200, 0);
 const SNAPSHOT_MESSAGES_MAX = getConfigInt('SNAPSHOT_MESSAGES_MAX', 40, 1);
 const TERMINAL_COLS = getConfigInt('TERMINAL_COLS', 120, 1);
 const TERMINAL_ROWS = getConfigInt('TERMINAL_ROWS', 32, 1);
@@ -105,7 +103,6 @@ const runtimeOptions: PtyManagerOptions = {
   claudeReadyTimeoutMs: CLAUDE_READY_TIMEOUT_MS,
   promptSubmitDelayMs: PROMPT_SUBMIT_DELAY_MS,
   jsonlRefreshDebounceMs: JSONL_REFRESH_DEBOUNCE_MS,
-  snapshotEmitDebounceMs: SNAPSHOT_EMIT_DEBOUNCE_MS,
   snapshotMessagesMax: SNAPSHOT_MESSAGES_MAX,
   gcIntervalMs: GC_INTERVAL_MS,
   detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
@@ -123,7 +120,6 @@ const codexRuntimeOptions: CodexProviderRuntimeOptions = {
   codexReadyTimeoutMs: CODEX_READY_TIMEOUT_MS,
   promptSubmitDelayMs: PROMPT_SUBMIT_DELAY_MS,
   jsonlRefreshDebounceMs: JSONL_REFRESH_DEBOUNCE_MS,
-  snapshotEmitDebounceMs: SNAPSHOT_EMIT_DEBOUNCE_MS,
   snapshotMessagesMax: SNAPSHOT_MESSAGES_MAX,
   gcIntervalMs: GC_INTERVAL_MS,
   detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
@@ -153,7 +149,7 @@ function createRuntime(providerId: ProviderId): ProviderRuntime {
       providerId: ProviderId | null;
       conversationKey: string | null;
       sessionId: string | null;
-      upserts: ReturnType<ProviderRuntime['getSnapshot']>['messages'];
+      upserts: RuntimeSnapshot['messages'];
       recentMessageIds: string[];
       hasOlderMessages: boolean;
     }) {
@@ -165,15 +161,14 @@ function createRuntime(providerId: ProviderId): ProviderRuntime {
         cliId: CLI_ID
       });
     },
-    emitSnapshot(snapshot: ReturnType<ProviderRuntime['getSnapshot']>) {
+    emitRuntimeMeta(payload: Omit<RuntimeMetaPayload, 'cliId'>) {
       if (!socketClient?.connected) {
         return;
       }
-      socketClient.emit('cli:snapshot', {
-        cliId: CLI_ID,
-        providerId,
-        snapshot
-      } satisfies RuntimeSnapshotPayload);
+      socketClient.emit('cli:runtime-meta', {
+        ...payload,
+        cliId: CLI_ID
+      } satisfies RuntimeMetaPayload);
     },
     emitTerminalFramePatch(payload: { conversationKey: string | null; patch: TerminalFramePatchPayload['patch'] }) {
       if (!socketClient?.connected) {
@@ -389,17 +384,6 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
       return { ok: true, payload: null };
     }
 
-    if (envelope.name === 'get-runtime-snapshot') {
-      const runtime = getRuntime(requireTargetProviderId(envelope));
-      await runtime.refreshActiveState();
-      return {
-        ok: true,
-        payload: {
-          snapshot: runtime.getSnapshot()
-        } satisfies GetRuntimeSnapshotResultPayload
-      };
-    }
-
     if (envelope.name === 'select-conversation') {
       const payload = envelope.payload as {
         cwd: string;
@@ -600,25 +584,6 @@ function connectSocketClient(): void {
         callback?.({
           ok: false,
           error: error instanceof Error ? error.message : 'Failed to send terminal input'
-        });
-      }
-    }
-  );
-
-  socket.on(
-    'cli:terminal-frame-prime',
-    async (payload: { targetProviderId?: ProviderId | null }, callback?: (result: { ok: boolean; error?: string }) => void) => {
-      try {
-        const providerId = payload.targetProviderId ?? null;
-        if (!providerId) {
-          throw new Error('Provider is not selected');
-        }
-        await getRuntime(providerId).primeActiveTerminalFrame();
-        callback?.({ ok: true });
-      } catch (error) {
-        callback?.({
-          ok: false,
-          error: error instanceof Error ? error.message : 'Failed to prime terminal frame'
         });
       }
     }

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef } from 'react';
 import type React from 'react';
 
 import type {
-  GetRuntimeSnapshotResultPayload,
   ListManagedPtyHandlesResultPayload,
   ListProjectSessionsResultPayload,
   ManagedPtyHandleSummary,
@@ -16,7 +15,6 @@ import { PROVIDER_LABELS, type CliDescriptor, type ProviderId, type RuntimeSnaps
 
 import type { CliSocketController } from '@/hooks/useCliSocket.ts';
 import type { TerminalBridge } from '@/hooks/useTerminalBridge.ts';
-import { createEmptySnapshot } from '@/lib/runtime.ts';
 import { readConversationCache } from '@/lib/messages-cache.ts';
 import {
   clampSidebarToggleTop,
@@ -495,31 +493,8 @@ export function useWorkspaceController({
     if (!socketConnected || !activeCliId || !activeCliConnected) {
       store.resetRuntimeForCliChange();
       terminal.clearTerminal();
-      return;
     }
-
-    terminal.prepareForResume();
-    store.resetRuntimeForCliChange();
-    const snapshotCliId = activeCliId;
-    const snapshotProviderId = activeProviderId;
-    const snapshotConversationId = store.workspaceState.activeConversationId;
-    void sendCommand('get-runtime-snapshot', {}, activeCliId, activeProviderId)
-      .then(async (result) => {
-        if (
-          store.workspaceState.activeCliId !== snapshotCliId ||
-          store.workspaceState.activeProviderId !== snapshotProviderId ||
-          store.workspaceState.activeConversationId !== snapshotConversationId
-        ) {
-          return;
-        }
-        const nextSnapshot = (result.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
-        store.setSnapshot(nextSnapshot);
-      })
-      .catch((runtimeError) => {
-        terminal.clearTerminal();
-        store.setError(runtimeError instanceof Error ? runtimeError.message : '加载 CLI 运行态失败');
-      });
-  }, [activeCliConnected, activeCliId, activeProviderId, sendCommand, socketConnected, terminal]);
+  }, [activeCliConnected, activeCliId, socketConnected, store, terminal]);
 
   useEffect(() => {
     if (!socketConnected || !activeCli?.connected || !activeProject || !activeConversation || !activeProviderId) {
@@ -750,25 +725,10 @@ export function useWorkspaceController({
         );
       }
 
-      const runtimeSnapshotResult = await sendCommand('get-runtime-snapshot', {}, targetCli.cliId, providerId);
       if (conversationActivationSeqRef.current !== requestId) {
         return;
       }
-      const nextSnapshot =
-        (runtimeSnapshotResult.payload as GetRuntimeSnapshotResultPayload | undefined)?.snapshot ?? createEmptySnapshot();
-      store.setSnapshot(nextSnapshot);
 
-      const acknowledgedRequestToken = selectPayload?.clientRequestId ?? null;
-      const activationState = conversationActivationRef.current;
-      if (
-        requestId !== null &&
-        requestToken !== null &&
-        activationState.status === 'selecting' &&
-        activationState.requestId === requestId &&
-        (acknowledgedRequestToken === null || acknowledgedRequestToken === requestToken)
-      ) {
-        conversationActivationRef.current = { status: 'idle' };
-      }
       store.setMobilePane('chat');
     } catch (activateError) {
       const activationState = conversationActivationRef.current;

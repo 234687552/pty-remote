@@ -305,13 +305,13 @@ export function Composer({
         onChange={handleImageInputChange}
       />
 
-      <div className="mb-0 px-1 text-[9px] font-medium md:mb-px md:px-0 md:text-[11px]">
-        <div className="hidden min-w-0 md:flex md:flex-wrap md:gap-1.5">
+      <div className="hidden items-center justify-between gap-3 px-1 pb-1 text-[11px] font-medium md:flex">
+        <div className="min-w-0 flex flex-wrap gap-1.5">
           {[conversationBadge, socketBadge, cliBadge].map((badge) => (
             <span
               key={badge.label}
               className={[
-                'min-w-0 truncate rounded-full px-1.5 py-0.5 text-center opacity-80 md:px-2.5 md:opacity-100',
+                'min-w-0 truncate rounded-full px-2.5 py-0.5 text-center',
                 badge.className
               ].join(' ')}
             >
@@ -319,10 +319,9 @@ export function Composer({
             </span>
           ))}
         </div>
-      </div>
-
-      <div className="mb-1 hidden justify-end px-1 md:flex">
-        <TerminalQuickKeys variant="desktop" disabled={!canSendTerminalInput} onInput={onTerminalInput} />
+        <div className="shrink-0">
+          <TerminalQuickKeys variant="desktop" disabled={!canSendTerminalInput} onInput={onTerminalInput} />
+        </div>
       </div>
 
       <div className="relative rounded-[1.5rem] border border-zinc-200/80 bg-zinc-100/90 shadow-[0_1px_0_rgba(255,255,255,0.55)_inset] md:bg-white md:shadow-none">

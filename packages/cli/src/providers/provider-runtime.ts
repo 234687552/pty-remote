@@ -2,6 +2,7 @@ import type {
   ManagedPtyHandleSummary,
   ProviderRuntimeRegistration,
   ProjectSessionSummary,
+  RuntimeMetaPayload,
   SelectConversationResultPayload,
   TerminalFramePatchPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
@@ -23,7 +24,7 @@ export interface ProviderRuntimeCallbacks {
     recentMessageIds: string[];
     hasOlderMessages: boolean;
   }): void;
-  emitSnapshot(snapshot: RuntimeSnapshot): void;
+  emitRuntimeMeta(payload: Omit<RuntimeMetaPayload, 'cliId'>): void;
   emitTerminalFramePatch(payload: Omit<TerminalFramePatchPayload, 'cliId' | 'providerId'>): void;
   emitTerminalSessionEvicted(payload: {
     conversationKey: string | null;
@@ -43,12 +44,9 @@ export interface ProviderRuntime {
   cleanupProject(cwd: string): Promise<void>;
   dispatchMessage(content: string): Promise<void>;
   getRegistrationPayload(): ProviderRuntimeRegistration;
-  getSnapshot(): RuntimeSnapshot;
   listSlashCommands(): Promise<string[]>;
   listProjectConversations(projectRoot: string, maxSessions?: number): Promise<ProjectSessionSummary[]>;
   listManagedPtyHandles(): Promise<ManagedPtyHandleSummary[]>;
-  primeActiveTerminalFrame(): Promise<void>;
-  refreshActiveState(): Promise<void>;
   resetActiveConversation(): Promise<void>;
   sendTerminalInput(input: string): Promise<void>;
   shutdown(): Promise<void>;

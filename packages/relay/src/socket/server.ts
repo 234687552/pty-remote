@@ -12,6 +12,7 @@ import type {
   CliRegisterResult,
   CliStatusPayload,
   MessagesUpsertPayload,
+  RuntimeMetaPayload,
   RuntimeSubscriptionPayload,
   RuntimeSnapshotPayload,
   TerminalFramePatchPayload,
@@ -23,8 +24,21 @@ import type {
   WebCommandEnvelope,
   WebInitPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
-import type { CliDescriptor, CliProviderRuntimeDescriptor, ProviderId, RuntimeSnapshot, RuntimeStatus } from '@lzdi/pty-remote-protocol/runtime-types.ts';
-import { applyTerminalFramePatch, cloneTerminalFrameSnapshot, type TerminalFramePatch, type TerminalFrameSnapshot } from '@lzdi/pty-remote-protocol/terminal-frame.ts';
+import type {
+  ChatMessage,
+  CliDescriptor,
+  CliProviderRuntimeDescriptor,
+  ProviderId,
+  RuntimeSnapshot,
+  RuntimeStatus
+} from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import {
+  applyTerminalFramePatch,
+  cloneTerminalFrameSnapshot,
+  createEmptyTerminalFrameSnapshot,
+  type TerminalFramePatch,
+  type TerminalFrameSnapshot
+} from '@lzdi/pty-remote-protocol/terminal-frame.ts';
 
 import { loadRelayConfig } from './relay-config.ts';
 
@@ -244,6 +258,123 @@ function cacheSnapshot(payload: RuntimeSnapshotPayload): void {
   }
 }
 
+function getCachedSnapshotPayload(cacheKey: string): RuntimeSnapshotPayload | null {
+  return relaySnapshotCache.get(cacheKey)?.payload ?? null;
+}
+
+function cacheSnapshotFromMessages(cliId: string, payload: MessagesUpsertPayload): RuntimeSnapshotPayload | null {
+  const providerId = payload.providerId ?? null;
+  const cacheKey = resolveConversationCacheKey(cliId, providerId, payload.conversationKey ?? null, payload.sessionId ?? null);
+  if (!cacheKey || !providerId) {
+    return null;
+  }
+
+  const previousSnapshot = getCachedSnapshotPayload(cacheKey)?.snapshot ?? null;
+  const messagesById = new Map((previousSnapshot?.messages ?? []).map((message) => [message.id, message]));
+  for (const message of payload.upserts) {
+    messagesById.set(message.id, cloneValue(message));
+  }
+  const messages = payload.recentMessageIds.filter((messageId): messageId is string => typeof messageId === 'string').map((messageId) => messagesById.get(messageId)).filter((message): message is ChatMessage => Boolean(message));
+
+  const snapshotPayload = {
+    cliId,
+    providerId,
+    snapshot: {
+      providerId,
+      conversationKey: payload.conversationKey ?? null,
+      status: previousSnapshot?.status ?? 'idle',
+      sessionId: payload.sessionId ?? null,
+      messages,
+      hasOlderMessages: payload.hasOlderMessages,
+      lastError: previousSnapshot?.lastError ?? null
+    }
+  } satisfies RuntimeSnapshotPayload;
+
+  cacheSnapshot(snapshotPayload);
+  return snapshotPayload;
+}
+
+function cacheSnapshotFromRuntimeMeta(payload: RuntimeMetaPayload): RuntimeSnapshotPayload | null {
+  const cacheKey = resolveConversationCacheKey(payload.cliId, payload.providerId, payload.conversationKey, payload.sessionId);
+  if (!cacheKey) {
+    return null;
+  }
+
+  const previousSnapshot = getCachedSnapshotPayload(cacheKey)?.snapshot ?? null;
+  const sessionChanged = previousSnapshot?.sessionId !== payload.sessionId;
+  const snapshotPayload = {
+    cliId: payload.cliId,
+    providerId: payload.providerId,
+    snapshot: {
+      providerId: payload.providerId,
+      conversationKey: payload.conversationKey,
+      status: payload.status,
+      sessionId: payload.sessionId,
+      messages: sessionChanged ? [] : cloneValue(previousSnapshot?.messages ?? []),
+      hasOlderMessages: sessionChanged ? false : (previousSnapshot?.hasOlderMessages ?? false),
+      lastError: payload.lastError
+    }
+  } satisfies RuntimeSnapshotPayload;
+
+  cacheSnapshot(snapshotPayload);
+  return snapshotPayload;
+}
+
+function createEmptySnapshotPayload(subscription: RuntimeSubscriptionPayload): RuntimeSnapshotPayload | null {
+  if (!hasRuntimeSubscriptionTarget(subscription) || !hasRuntimeSubscriptionConversation(subscription)) {
+    return null;
+  }
+
+  const cliId = subscription.targetCliId;
+  const providerId = subscription.targetProviderId;
+  if (!cliId || !providerId) {
+    return null;
+  }
+
+  return {
+    cliId,
+    providerId,
+    snapshot: {
+      providerId,
+      conversationKey: subscription.conversationKey,
+      status: 'idle',
+      sessionId: subscription.sessionId,
+      messages: [],
+      hasOlderMessages: false,
+      lastError: null
+    }
+  } satisfies RuntimeSnapshotPayload;
+}
+
+function applyRuntimeMetaToDescriptor(record: CliRuntimeRecord, payload: RuntimeMetaPayload): void {
+  const currentRuntime = record.descriptor.runtimes[payload.providerId];
+  if (!currentRuntime) {
+    return;
+  }
+
+  const matchesCurrentConversation =
+    currentRuntime.conversationKey === payload.conversationKey &&
+    currentRuntime.sessionId === payload.sessionId;
+  if (!matchesCurrentConversation) {
+    return;
+  }
+
+  record.descriptor = {
+    ...record.descriptor,
+    runtimes: {
+      ...record.descriptor.runtimes,
+      [payload.providerId]: {
+        ...currentRuntime,
+        cwd: payload.cwd,
+        conversationKey: payload.conversationKey,
+        sessionId: payload.sessionId,
+        status: payload.status
+      }
+    },
+    lastSeenAt: new Date().toISOString()
+  };
+}
+
 function emitCachedSnapshotToSocket(socket: Socket, subscription: RuntimeSubscriptionPayload): boolean {
   if (!hasRuntimeSubscriptionTarget(subscription) || !hasRuntimeSubscriptionConversation(subscription)) {
     return false;
@@ -291,13 +422,13 @@ function replayMessagesToSocket(socket: Socket, subscription: RuntimeSubscriptio
     return false;
   }
   const entries = buffer.entries.filter((entry) => entry.seq > (subscription.lastSeq ?? 0));
+  buffer.lastAccessedAt = Date.now();
   if (entries.length === 0) {
-    return true;
+    return false;
   }
   for (const entry of entries) {
     socket.emit('runtime:messages-upsert', cloneValue(entry.payload));
   }
-  buffer.lastAccessedAt = Date.now();
   return true;
 }
 
@@ -316,7 +447,7 @@ function createProviderRuntimeDescriptor(
 
 function createProviderRuntimeRecord(previous?: CliProviderRuntimeRecord | null): CliProviderRuntimeRecord {
   return {
-    snapshot: previous?.snapshot ?? null,
+    snapshot: null,
     terminalSessions: cloneTerminalSessions(previous?.terminalSessions)
   };
 }
@@ -465,27 +596,6 @@ function pruneRelayState(io: SocketIOServer): void {
 
 function getProviderRecord(record: CliRuntimeRecord, providerId: ProviderId): CliProviderRuntimeRecord | null {
   return record.runtimes[providerId] ?? null;
-}
-
-function updateDescriptorFromSnapshot(record: CliRuntimeRecord, providerId: ProviderId): void {
-  const providerRecord = getProviderRecord(record, providerId);
-  if (!providerRecord?.snapshot) {
-    return;
-  }
-
-  record.descriptor = {
-    ...record.descriptor,
-    runtimes: {
-      ...record.descriptor.runtimes,
-      [providerId]: {
-        cwd: record.descriptor.runtimes[providerId]?.cwd ?? record.descriptor.cwd,
-        conversationKey: providerRecord.snapshot.conversationKey,
-        status: providerRecord.snapshot.status,
-        sessionId: providerRecord.snapshot.sessionId
-      }
-    },
-    lastSeenAt: new Date().toISOString()
-  };
 }
 
 function pruneTerminalSessions(record: CliProviderRuntimeRecord): void {
@@ -739,29 +849,6 @@ function matchesProviderRuntimeSubscription(
   return true;
 }
 
-function emitCurrentRuntimeSnapshotToSocket(socket: Socket, subscription: RuntimeSubscriptionPayload): void {
-  if (!hasRuntimeSubscriptionTarget(subscription)) {
-    return;
-  }
-
-  const record = getConnectedCliRecord(subscription.targetCliId);
-  const providerId = subscription.targetProviderId;
-  if (!record || !providerId) {
-    return;
-  }
-
-  const providerRecord = getProviderRecord(record, providerId);
-  if (!providerRecord?.snapshot || !matchesProviderRuntimeSubscription(subscription, record.descriptor.cliId, providerId, providerRecord)) {
-    return;
-  }
-
-  socket.emit('runtime:snapshot', {
-    cliId: record.descriptor.cliId,
-    providerId,
-    snapshot: cloneValue(providerRecord.snapshot)
-  } satisfies RuntimeSnapshotPayload);
-}
-
 function emitRuntimeSnapshotToSubscribers(io: SocketIOServer, payload: RuntimeSnapshotPayload): void {
   for (const socket of io.of('/web').sockets.values()) {
     const subscription = webRuntimeSubscriptions.get(socket.id);
@@ -801,8 +888,7 @@ async function createTerminalFrameSyncResult(socket: Socket, payload: TerminalFr
   const providerId = payload.targetProviderId ?? null;
   const providerRecord = record && providerId ? getProviderRecord(record, providerId) : null;
   const requestedSessionId = payload.sessionId ?? providerRecord?.snapshot?.sessionId ?? null;
-  let terminalSessionCache = getTerminalSessionCache(providerRecord, requestedSessionId);
-  const isActiveSessionRequest = requestedSessionId !== null && requestedSessionId === providerRecord?.snapshot?.sessionId;
+  const terminalSessionCache = getTerminalSessionCache(providerRecord, requestedSessionId);
   const terminalFrameSnapshot = terminalSessionCache?.snapshot ?? null;
 
   if (
@@ -814,38 +900,12 @@ async function createTerminalFrameSyncResult(socket: Socket, payload: TerminalFr
     !terminalSessionCache ||
     !terminalFrameSnapshot
   ) {
-    if (record && providerId && providerRecord && subscription && isActiveSessionRequest) {
-      const result = await new Promise<{ ok: boolean; error?: string }>((resolve) => {
-        record.socket.emit('cli:terminal-frame-prime', { targetProviderId: providerId }, (ack?: { ok: boolean; error?: string }) => {
-          resolve(ack ?? { ok: false, error: 'No response from CLI terminal frame priming' });
-        });
-      });
-      if (!result.ok) {
-        return {
-          ok: false,
-          error: result.error || 'Failed to prepare terminal frame',
-          providerId,
-          sessionId: requestedSessionId
-        };
-      }
-
-      terminalSessionCache = getTerminalSessionCache(providerRecord, requestedSessionId);
-      if (terminalSessionCache?.snapshot) {
-        return {
-          ok: true,
-          providerId,
-          sessionId: terminalSessionCache.snapshot.sessionId,
-          mode: 'snapshot',
-          snapshot: cloneTerminalFrameSnapshot(terminalSessionCache.snapshot)
-        };
-      }
-    }
-
     return {
-      ok: false,
-      error: 'Terminal frame is unavailable for the requested runtime',
+      ok: true,
+      mode: 'snapshot',
       providerId,
-      sessionId: null
+      sessionId: requestedSessionId,
+      snapshot: createEmptyTerminalFrameSnapshot(requestedSessionId)
     };
   }
 
@@ -1062,43 +1122,11 @@ export async function startSocketServer(): Promise<void> {
       };
 
       cliRecords.set(cliId, record);
-      for (const providerId of record.descriptor.supportedProviders) {
-        updateDescriptorFromSnapshot(record, providerId);
-      }
       emitCliStatus(io);
       callback?.({
         ok: true,
         cliId
       });
-    });
-
-    socket.on('cli:snapshot', (payload: RuntimeSnapshotPayload) => {
-      const cliId = getSocketCliId(socket);
-      if (!cliId) {
-        return;
-      }
-      const record = cliId ? cliRecords.get(cliId) : null;
-      if (!record || record.socket.id !== socket.id) {
-        return;
-      }
-
-      const providerRecord = getProviderRecord(record, payload.providerId);
-      if (!providerRecord) {
-        return;
-      }
-
-      record.descriptor.connected = true;
-      record.disconnectedAt = null;
-      providerRecord.snapshot = cloneValue(payload.snapshot);
-      updateDescriptorFromSnapshot(record, payload.providerId);
-      const snapshotPayload = {
-        cliId,
-        providerId: payload.providerId,
-        snapshot: cloneValue(payload.snapshot)
-      } satisfies RuntimeSnapshotPayload;
-      cacheSnapshot(snapshotPayload);
-      emitRuntimeSnapshotToSubscribers(io, snapshotPayload);
-      emitCliStatus(io);
     });
 
     socket.on('cli:messages-upsert', (payload: MessagesUpsertPayload) => {
@@ -1125,7 +1153,47 @@ export async function startSocketServer(): Promise<void> {
         basePayload.sessionId ?? null
       );
       const messagesPayload = cacheKey ? recordReplayEntry(cacheKey, basePayload) : basePayload;
+      cacheSnapshotFromMessages(cliId, messagesPayload);
       emitMessagesUpsertToSubscribers(io, messagesPayload);
+    });
+
+    socket.on('cli:runtime-meta', (payload: RuntimeMetaPayload) => {
+      const cliId = getSocketCliId(socket);
+      if (!cliId) {
+        return;
+      }
+      const record = cliId ? cliRecords.get(cliId) : null;
+      if (!record || record.socket.id !== socket.id) {
+        return;
+      }
+
+      const providerRecord = getProviderRecord(record, payload.providerId);
+      if (!providerRecord) {
+        return;
+      }
+
+      record.descriptor.connected = true;
+      record.disconnectedAt = null;
+      applyRuntimeMetaToDescriptor(record, payload);
+
+      const snapshotPayload = cacheSnapshotFromRuntimeMeta({
+        ...payload,
+        cliId
+      });
+      if (!snapshotPayload) {
+        return;
+      }
+
+      const descriptorRuntime = record.descriptor.runtimes[payload.providerId];
+      if (
+        descriptorRuntime?.conversationKey === payload.conversationKey &&
+        descriptorRuntime.sessionId === payload.sessionId
+      ) {
+        providerRecord.snapshot = cloneValue(snapshotPayload.snapshot);
+      }
+
+      emitRuntimeSnapshotToSubscribers(io, snapshotPayload);
+      emitCliStatus(io);
     });
 
     socket.on('cli:terminal-frame-patch', (payload: TerminalFramePatchPayload) => {
@@ -1219,7 +1287,10 @@ export async function startSocketServer(): Promise<void> {
       if (emitCachedSnapshotToSocket(socket, subscription)) {
         return;
       }
-      emitCurrentRuntimeSnapshotToSocket(socket, subscription);
+      const emptySnapshot = createEmptySnapshotPayload(subscription);
+      if (emptySnapshot) {
+        socket.emit('runtime:snapshot', emptySnapshot);
+      }
     });
 
     socket.on('web:command', async (command: WebCommandEnvelope, callback?: (result: CliCommandResult) => void) => {
