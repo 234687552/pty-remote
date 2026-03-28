@@ -13,14 +13,16 @@ import type { ChatMessage, ProviderId, RuntimeSnapshot, RuntimeStatus } from '@l
 import {
   applyCodexJsonlLine,
   createCodexJsonlMessagesState,
+  markCodexJsonlTurnInterrupted,
   materializeCodexJsonlMessages,
-  refreshCodexJsonlMessageStatuses,
   type CodexJsonlMessagesState,
   type CodexJsonlRuntimePhase
 } from './codex-jsonl.ts';
 import {
   appendRecentOutput,
+  getCodexPtyLifecycle,
   looksLikeDirectoryTrustPrompt,
+  looksLikeInterruptedOutput,
   looksLikeModelChoicePrompt,
   looksLikeUpdatePrompt,
   looksReadyForInput,
@@ -769,6 +771,92 @@ export class CodexManager {
     };
   }
 
+  private syncHandleRuntimeFromJsonlState(
+    handle: CodexHandle,
+    previousMessages: ChatMessage[],
+    previousHasOlderMessages: boolean
+  ): void {
+    const nextAllMessages = materializeCodexJsonlMessages(handle.jsonlMessagesState);
+    const nextMessages = this.selectRecentMessages(nextAllMessages);
+    const nextHasOlderMessages = nextAllMessages.length > nextMessages.length;
+    const nextRuntimeStatus = this.resolveRuntimeStatusFromState(handle, handle.jsonlMessagesState.runtimePhase);
+    const allMessagesChanged = !messagesEqual(handle.runtime.allMessages, nextAllMessages);
+    const messagesChanged = !messagesEqual(handle.runtime.messages, nextMessages);
+    const hasOlderMessagesChanged = handle.runtime.hasOlderMessages !== nextHasOlderMessages;
+    const statusChanged = handle.runtime.status !== nextRuntimeStatus;
+
+    if (allMessagesChanged) {
+      handle.runtime.allMessages = nextAllMessages;
+    }
+    if (messagesChanged) {
+      handle.runtime.messages = nextMessages;
+    }
+    if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
+      handle.runtime.hasOlderMessages = nextHasOlderMessages;
+    }
+    if (statusChanged) {
+      handle.runtime.status = nextRuntimeStatus;
+      this.emitRuntimeMeta(handle);
+    }
+
+    if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged || statusChanged) {
+      const upsertPayload = this.createMessagesUpsertPayload(
+        handle,
+        previousMessages,
+        nextMessages,
+        previousHasOlderMessages,
+        nextHasOlderMessages
+      );
+      if (upsertPayload) {
+        this.callbacks.emitMessagesUpsert(upsertPayload);
+      }
+    }
+  }
+
+  private markHandleTurnInterrupted(handle: CodexHandle, source: 'manual-interrupt' | 'terminal-output'): void {
+    const previousMessages = handle.runtime.messages;
+    const previousHasOlderMessages = handle.runtime.hasOlderMessages;
+    const wasBusy =
+      handle.awaitingJsonlTurn || handle.runtime.status === 'running' || handle.jsonlMessagesState.runtimePhase === 'running';
+
+    handle.awaitingJsonlTurn = false;
+    const stateChanged = markCodexJsonlTurnInterrupted(handle.jsonlMessagesState, handle.jsonlMessagesState.activeTurnId);
+    if (!stateChanged && !wasBusy) {
+      return;
+    }
+
+    this.log('warn', 'marking codex turn interrupted from fallback', {
+      ...this.handleContext(handle),
+      source,
+      runtimeStatus: handle.runtime.status
+    });
+    this.syncHandleRuntimeFromJsonlState(handle, previousMessages, previousHasOlderMessages);
+  }
+
+  private async maybeMarkHandleInterruptedFromTerminal(handle: CodexHandle): Promise<void> {
+    if (
+      !handle.pty ||
+      (!handle.awaitingJsonlTurn && handle.runtime.status !== 'running' && handle.jsonlMessagesState.runtimePhase !== 'running')
+    ) {
+      return;
+    }
+
+    if (!looksLikeInterruptedOutput(handle.runtime.recentTerminalOutput)) {
+      return;
+    }
+
+    const { bottomText, visibleText } = await this.getHandleTerminalView(handle);
+    if (!looksLikeInterruptedOutput(visibleText)) {
+      return;
+    }
+
+    if (getCodexPtyLifecycle(bottomText) === 'running') {
+      return;
+    }
+
+    this.markHandleTurnInterrupted(handle, 'terminal-output');
+  }
+
   private async readJsonlTail(filePath: string, startOffset: number): Promise<{ size: number; text: string }> {
     const stat = await fs.stat(filePath);
     if (startOffset >= stat.size) {
@@ -1264,6 +1352,12 @@ export class CodexManager {
         if (patch) {
           this.emitTerminalFramePatch(handle, patch);
         }
+        void this.maybeMarkHandleInterruptedFromTerminal(handle).catch((error) => {
+          this.log('warn', 'failed to inspect codex terminal interrupt fallback', {
+            ...this.handleContext(handle),
+            error: errorMessage(error, 'Failed to inspect terminal interrupt fallback')
+          });
+        });
       })
       .catch((error) => {
         if (this.isActiveHandle(handle)) {
@@ -1515,6 +1609,8 @@ export class CodexManager {
     const { bottomText } = await this.getHandleTerminalView(handle);
     const shouldForceSubmit = showsStarterPrompt(bottomText);
     const normalizedContent = content.replace(/\r\n/g, '\n');
+    handle.runtime.recentTerminalOutput = '';
+    handle.pty.recentOutput = '';
     if (normalizedContent.includes('\n')) {
       handle.pty.pty.write('\x1b[200~');
       handle.pty.pty.write(normalizedContent);
@@ -1550,53 +1646,13 @@ export class CodexManager {
       return;
     }
 
-    const previousMessages = handle.runtime.messages;
-    const previousHasOlderMessages = handle.runtime.hasOlderMessages;
-
     try {
       const { bottomText } = await this.getHandleTerminalView(handle);
       if (!looksReadyForInput(bottomText)) {
         return;
       }
 
-      handle.awaitingJsonlTurn = false;
-      if (handle.jsonlMessagesState.runtimePhase !== 'idle') {
-        handle.jsonlMessagesState.runtimePhase = 'idle';
-        handle.jsonlMessagesState.activityRevision += 1;
-        refreshCodexJsonlMessageStatuses(handle.jsonlMessagesState);
-      }
-
-      const nextAllMessages = materializeCodexJsonlMessages(handle.jsonlMessagesState);
-      const nextMessages = this.selectRecentMessages(nextAllMessages);
-      const nextHasOlderMessages = nextAllMessages.length > nextMessages.length;
-      const allMessagesChanged = !messagesEqual(handle.runtime.allMessages, nextAllMessages);
-      const messagesChanged = !messagesEqual(handle.runtime.messages, nextMessages);
-      const hasOlderMessagesChanged = handle.runtime.hasOlderMessages !== nextHasOlderMessages;
-
-      if (allMessagesChanged) {
-        handle.runtime.allMessages = nextAllMessages;
-      }
-      if (messagesChanged) {
-        handle.runtime.messages = nextMessages;
-      }
-      if (allMessagesChanged || messagesChanged || hasOlderMessagesChanged) {
-        handle.runtime.hasOlderMessages = nextHasOlderMessages;
-      }
-
-      this.setStatus(handle, 'idle');
-
-      if (this.isActiveHandle(handle) && (allMessagesChanged || messagesChanged || hasOlderMessagesChanged)) {
-        const upsertPayload = this.createMessagesUpsertPayload(
-          handle,
-          previousMessages,
-          nextMessages,
-          previousHasOlderMessages,
-          nextHasOlderMessages
-        );
-        if (upsertPayload) {
-          this.callbacks.emitMessagesUpsert(upsertPayload);
-        }
-      }
+      this.markHandleTurnInterrupted(handle, 'manual-interrupt');
     } catch (error) {
       this.log('warn', 'failed to confirm codex ready state after interrupt', {
         ...this.handleContext(handle),

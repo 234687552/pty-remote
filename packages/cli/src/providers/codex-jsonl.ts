@@ -57,6 +57,7 @@ export interface CodexJsonlMessagesState {
   messagesById: Map<string, ChatMessage>;
   runtimePhase: CodexJsonlRuntimePhase;
   activeTurnId: string | null;
+  interruptedTurnIds: Set<string>;
   activityRevision: number;
   messageSequence: number;
   seenAssistantTextKeys: Set<string>;
@@ -69,6 +70,7 @@ export function createCodexJsonlMessagesState(): CodexJsonlMessagesState {
     messagesById: new Map<string, ChatMessage>(),
     runtimePhase: 'idle',
     activeTurnId: null,
+    interruptedTurnIds: new Set<string>(),
     activityRevision: 0,
     messageSequence: 0,
     seenAssistantTextKeys: new Set<string>(),
@@ -324,16 +326,22 @@ function mergeMessageBlocks(existingBlocks: ChatMessageBlock[], nextBlocks: Chat
 }
 
 function deriveMessageStatus(
-  blocks: ChatMessageBlock[],
-  runtimePhase: CodexJsonlRuntimePhase
+  state: CodexJsonlMessagesState,
+  message: Pick<ChatMessage, 'blocks' | 'meta'>
 ): ChatMessage['status'] {
+  const { blocks } = message;
   if (blocks.some((block) => block.type === 'tool_result' && block.isError)) {
     return 'error';
   }
 
   const hasToolUse = blocks.some((block) => block.type === 'tool_use');
   const hasToolResult = blocks.some((block) => block.type === 'tool_result');
-  if (hasToolUse && !hasToolResult && runtimePhase === 'running') {
+  const interruptedTurnId = message.meta?.turnId ?? null;
+  if (hasToolUse && !hasToolResult && interruptedTurnId && state.interruptedTurnIds.has(interruptedTurnId)) {
+    return 'error';
+  }
+
+  if (hasToolUse && !hasToolResult && state.runtimePhase === 'running') {
     return 'streaming';
   }
 
@@ -356,7 +364,7 @@ function mergeMessageMeta(existing: ChatMessageMeta | undefined, next: ChatMessa
 
 export function refreshCodexJsonlMessageStatuses(state: CodexJsonlMessagesState): void {
   for (const [messageId, message] of state.messagesById.entries()) {
-    const nextStatus = deriveMessageStatus(message.blocks, state.runtimePhase);
+    const nextStatus = deriveMessageStatus(state, message);
     if (message.status === nextStatus) {
       continue;
     }
@@ -382,7 +390,10 @@ function upsertMessage(state: CodexJsonlMessagesState, nextMessage: ChatMessage)
     role: nextMessage.role,
     blocks,
     meta: mergeMessageMeta(existing?.meta, nextMessage.meta),
-    status: deriveMessageStatus(blocks, state.runtimePhase),
+    status: deriveMessageStatus(state, {
+      blocks,
+      meta: mergeMessageMeta(existing?.meta, nextMessage.meta)
+    }),
     createdAt: existing?.createdAt ?? nextMessage.createdAt,
     sequence: existing?.sequence ?? nextMessage.sequence
   };
@@ -420,6 +431,60 @@ function extractTextBlocks(content: string | CodexTextContentBlock[] | undefined
   }
 
   return blocks;
+}
+
+function commitRuntimePhaseChange(state: CodexJsonlMessagesState): void {
+  state.activityRevision += 1;
+  refreshCodexJsonlMessageStatuses(state);
+}
+
+function completeCodexJsonlTurn(state: CodexJsonlMessagesState, turnId?: string | null): void {
+  const normalizedTurnId = turnId ?? state.activeTurnId;
+  let changed = false;
+
+  if (!normalizedTurnId || normalizedTurnId === state.activeTurnId) {
+    if (state.activeTurnId !== null) {
+      state.activeTurnId = null;
+      changed = true;
+    }
+  }
+
+  if (state.runtimePhase !== 'idle') {
+    state.runtimePhase = 'idle';
+    changed = true;
+  }
+
+  if (changed) {
+    commitRuntimePhaseChange(state);
+  }
+}
+
+export function markCodexJsonlTurnInterrupted(state: CodexJsonlMessagesState, turnId?: string | null): boolean {
+  const normalizedTurnId = turnId ?? state.activeTurnId;
+  let changed = false;
+
+  if (normalizedTurnId && !state.interruptedTurnIds.has(normalizedTurnId)) {
+    state.interruptedTurnIds.add(normalizedTurnId);
+    changed = true;
+  }
+
+  if (!normalizedTurnId || normalizedTurnId === state.activeTurnId) {
+    if (state.activeTurnId !== null) {
+      state.activeTurnId = null;
+      changed = true;
+    }
+  }
+
+  if (state.runtimePhase !== 'idle') {
+    state.runtimePhase = 'idle';
+    changed = true;
+  }
+
+  if (changed) {
+    commitRuntimePhaseChange(state);
+  }
+
+  return changed;
 }
 
 function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPayload | undefined, timestamp: string | undefined): void {
@@ -507,26 +572,32 @@ function applyEventMsg(state: CodexJsonlMessagesState, payload: CodexEventMsgPay
     return;
   }
 
-  let nextPhase: CodexJsonlRuntimePhase | null = null;
   const payloadTurnId = normalizeTurnId(payload?.turn_id);
 
   if (payloadType === 'task_started') {
-    nextPhase = 'running';
-    state.activeTurnId = payloadTurnId ?? state.activeTurnId;
-  } else if (payloadType === 'task_complete' || payloadType === 'turn_aborted') {
-    nextPhase = 'idle';
-    if (!payloadTurnId || payloadTurnId === state.activeTurnId) {
-      state.activeTurnId = null;
+    let changed = false;
+    if (payloadTurnId && state.interruptedTurnIds.delete(payloadTurnId)) {
+      changed = true;
     }
-  }
-
-  if (!nextPhase || nextPhase === state.runtimePhase) {
+    state.activeTurnId = payloadTurnId ?? state.activeTurnId;
+    if (state.runtimePhase !== 'running') {
+      state.runtimePhase = 'running';
+      changed = true;
+    }
+    if (changed) {
+      commitRuntimePhaseChange(state);
+    }
     return;
   }
 
-  state.runtimePhase = nextPhase;
-  state.activityRevision += 1;
-  refreshCodexJsonlMessageStatuses(state);
+  if (payloadType === 'task_complete') {
+    completeCodexJsonlTurn(state, payloadTurnId);
+    return;
+  }
+
+  if (payloadType === 'turn_aborted') {
+    markCodexJsonlTurnInterrupted(state, payloadTurnId);
+  }
 }
 
 function applyResponseItem(

@@ -130,6 +130,9 @@ const MODEL_CONFIRM_FOOTER_PATTERN = /Use\s+↑\/↓\s+to move,\s+press enter to
 const DIRECTORY_TRUST_KEYWORDS = ['trust', 'directory', 'yes', 'continue'];
 const MODEL_CHOICE_KEYWORDS = ['choose', 'codex', 'proceed', 'try', 'new', 'model', 'use', 'existing'];
 const UPDATE_PROMPT_KEYWORDS = ['update', 'available', 'skip', 'continue'];
+const INTERRUPTED_CONVERSATION_PATTERN = /Conversation interrupted/i;
+const INTERRUPTED_GENERIC_ERROR_PATTERN = /Something went wrong/i;
+const INTERRUPTED_FEEDBACK_PATTERN = /Hit\s+\/feedback/i;
 const STARTER_PROMPT_PATTERN =
   /Use \/skills to list available skills|Improve documentation in @filename|To get started, describe a task|Implement\s+\{feature\}|Implement\s+<feature>/i;
 
@@ -179,6 +182,14 @@ export function looksLikeUpdatePrompt(output: string): boolean {
   const hasFooter = UPDATE_CONTINUE_PATTERN.test(tail);
   const hasKeywordShape = includesAllKeywords(compactKeywordText(tail), UPDATE_PROMPT_KEYWORDS);
   return (hasHeader && (hasSkipChoice || hasFooter)) || hasKeywordShape;
+}
+
+export function looksLikeInterruptedOutput(output: string): boolean {
+  const tail = tailOutput(output);
+  return (
+    INTERRUPTED_CONVERSATION_PATTERN.test(tail) ||
+    (INTERRUPTED_GENERIC_ERROR_PATTERN.test(tail) && INTERRUPTED_FEEDBACK_PATTERN.test(tail))
+  );
 }
 
 export function showsStarterPrompt(output: string): boolean {
