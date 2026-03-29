@@ -48,6 +48,10 @@ export interface ManagedPtyHandleSummary {
 export type CliCommandName =
   | 'send-message'
   | 'list-slash-commands'
+  | 'list-directory'
+  | 'list-git-status-files'
+  | 'read-project-file'
+  | 'git-diff-file'
   | 'upload-attachment'
   | 'delete-attachment'
   | 'stop-message'
@@ -62,6 +66,23 @@ export type CliCommandName =
 export interface CliCommandPayloadMap {
   'send-message': { content: string };
   'list-slash-commands': Record<string, never>;
+  'list-directory': {
+    cwd: string;
+    path?: string;
+  };
+  'list-git-status-files': {
+    cwd: string;
+  };
+  'read-project-file': {
+    cwd: string;
+    maxBytes?: number;
+    path: string;
+  };
+  'git-diff-file': {
+    cwd: string;
+    path: string;
+    staged?: boolean;
+  };
   'upload-attachment': {
     contentBase64: string;
     conversationKey: string | null;
@@ -137,9 +158,68 @@ export interface ListSlashCommandsResultPayload {
   commands: string[];
 }
 
+export interface DirectoryEntrySummary {
+  absolutePath: string;
+  modifiedAt?: number;
+  name: string;
+  path: string;
+  size?: number;
+  type: 'file' | 'directory' | 'other';
+}
+
+export interface ListDirectoryResultPayload {
+  cwd: string;
+  entries: DirectoryEntrySummary[];
+  path: string;
+}
+
+export type GitStatusFileState = 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted';
+
+export interface GitStatusFileSummary {
+  absolutePath: string;
+  fileName: string;
+  filePath: string;
+  linesAdded: number;
+  linesRemoved: number;
+  oldPath?: string;
+  path: string;
+  staged: boolean;
+  status: GitStatusFileState;
+}
+
+export interface ListGitStatusFilesResultPayload {
+  branch: string | null;
+  cwd: string;
+  stagedFiles: GitStatusFileSummary[];
+  totalStaged: number;
+  totalUnstaged: number;
+  unstagedFiles: GitStatusFileSummary[];
+}
+
+export interface ReadProjectFileResultPayload {
+  absolutePath: string;
+  contentBase64?: string;
+  cwd: string;
+  isBinary: boolean;
+  path: string;
+  size: number;
+  truncated: boolean;
+}
+
+export interface GitDiffFileResultPayload {
+  cwd: string;
+  diff: string;
+  path: string;
+  staged: boolean;
+}
+
 export interface CliCommandResultPayloadMap {
   'send-message': null;
   'list-slash-commands': ListSlashCommandsResultPayload;
+  'list-directory': ListDirectoryResultPayload;
+  'list-git-status-files': ListGitStatusFilesResultPayload;
+  'read-project-file': ReadProjectFileResultPayload;
+  'git-diff-file': GitDiffFileResultPayload;
   'upload-attachment': UploadAttachmentResultPayload;
   'delete-attachment': null;
   'stop-message': null;

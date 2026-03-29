@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, promises as fs, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -11,10 +11,14 @@ import type {
   CliCommandResult,
   CliRegisterPayload,
   CliRegisterResult,
+  GitDiffFileResultPayload,
+  ListDirectoryResultPayload,
+  ListGitStatusFilesResultPayload,
   ListSlashCommandsResultPayload,
   ListManagedPtyHandlesResultPayload,
   ListProjectSessionsResultPayload,
   PickProjectDirectoryResultPayload,
+  ReadProjectFileResultPayload,
   RuntimeMetaPayload,
   UploadAttachmentResultPayload,
   TerminalFramePatchPayload,
@@ -27,6 +31,7 @@ import { createClaudeProviderRuntime } from '../providers/claude.ts';
 import { createCodexProviderRuntime, type CodexProviderRuntimeOptions } from '../providers/codex.ts';
 import type { ProviderRuntime } from '../providers/provider-runtime.ts';
 import { normalizeProcessShellEnv } from '../providers/shell-exec.ts';
+import { getGitDiffFile, listDirectory, listGitStatusFiles, readProjectFile, resolveProjectRoot } from './file-browser.ts';
 import { loadCliConfig } from './cli-config.ts';
 import type { PtyManagerOptions } from './pty-manager.ts';
 
@@ -253,11 +258,6 @@ function execFileSyncSafe(command: string, args: string[]): string {
   return `${execFileSync(command, args, { encoding: 'utf8' })}`.trim();
 }
 
-async function resolveProjectCwd(rawCwd: string): Promise<string> {
-  const resolvedCwd = path.resolve(rawCwd);
-  return fs.realpath(resolvedCwd).catch(() => resolvedCwd);
-}
-
 function sanitizePermissionMode(value: string | undefined): string {
   const allowed = new Set(['default', 'acceptEdits', 'dontAsk', 'plan', 'bypassPermissions']);
   if (value && allowed.has(value)) {
@@ -332,6 +332,42 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
           providerId: runtime.providerId,
           commands: await runtime.listSlashCommands()
         } satisfies ListSlashCommandsResultPayload
+      };
+    }
+
+    if (envelope.name === 'list-directory') {
+      const payload = envelope.payload as { cwd: string; path?: string };
+      const cwd = await resolveProjectRoot(payload.cwd);
+      return {
+        ok: true,
+        payload: await listDirectory(cwd, payload.path ?? '') satisfies ListDirectoryResultPayload
+      };
+    }
+
+    if (envelope.name === 'list-git-status-files') {
+      const payload = envelope.payload as { cwd: string };
+      const cwd = await resolveProjectRoot(payload.cwd);
+      return {
+        ok: true,
+        payload: await listGitStatusFiles(cwd) satisfies ListGitStatusFilesResultPayload
+      };
+    }
+
+    if (envelope.name === 'read-project-file') {
+      const payload = envelope.payload as { cwd: string; maxBytes?: number; path: string };
+      const cwd = await resolveProjectRoot(payload.cwd);
+      return {
+        ok: true,
+        payload: await readProjectFile(cwd, payload.path, payload.maxBytes) satisfies ReadProjectFileResultPayload
+      };
+    }
+
+    if (envelope.name === 'git-diff-file') {
+      const payload = envelope.payload as { cwd: string; path: string; staged?: boolean };
+      const cwd = await resolveProjectRoot(payload.cwd);
+      return {
+        ok: true,
+        payload: await getGitDiffFile(cwd, payload.path, payload.staged ?? false) satisfies GitDiffFileResultPayload
       };
     }
 
@@ -445,7 +481,7 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
     if (envelope.name === 'list-project-conversations') {
       const payload = envelope.payload as { cwd: string; maxSessions?: number };
       const runtime = getRuntime(requireTargetProviderId(envelope));
-      const cwd = await resolveProjectCwd(payload.cwd);
+      const cwd = await resolveProjectRoot(payload.cwd);
       return {
         ok: true,
         payload: {
@@ -507,7 +543,7 @@ async function pickProjectDirectory(): Promise<PickProjectDirectoryResultPayload
       throw error;
     }
 
-    const cwd = await resolveProjectCwd(stdout.trim().replace(/\/+$/, '') || '/');
+    const cwd = await resolveProjectRoot(stdout.trim().replace(/\/+$/, '') || '/');
     return {
       cwd,
       label: path.basename(cwd) || cwd

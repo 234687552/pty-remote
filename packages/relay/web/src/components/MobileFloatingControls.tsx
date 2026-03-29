@@ -10,6 +10,7 @@ interface MobileStatusBadge {
 }
 
 interface MobileFloatingControlsProps {
+  canOpenFiles: boolean;
   canSendTerminalInput: boolean;
   jumpControls: MobileJumpControls | null;
   mobileAgentLabel: string;
@@ -17,6 +18,7 @@ interface MobileFloatingControlsProps {
   mobileProjectTitle: string;
   mobileSidebarOpen: boolean;
   statusBadges: MobileStatusBadge[];
+  onFilesOpen: () => void;
   onMobilePaneChange: (pane: WorkspacePane) => void;
   onSidebarOpen: () => void;
   onTerminalInput: (input: string) => void;
@@ -85,6 +87,16 @@ function KeyboardIcon() {
     <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4.5 w-4.5">
       <rect x="3.25" y="5" width="13.5" height="9.5" rx="2.2" stroke="currentColor" strokeWidth="1.6" />
       <path d="M5.75 8.2h.01M8.35 8.2h.01M10.95 8.2h.01M13.55 8.2h.01M5.75 10.8h.01M8.35 10.8h.01M10.95 10.8h.01M13.55 10.8h.01M7 13.1h6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function FilesIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-4.5 w-4.5">
+      <path d="M6.15 3.75h5.45L15 7.15v8.1a1 1 0 0 1-1 1H6.15a1 1 0 0 1-1-1V4.75a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.55" strokeLinejoin="round" />
+      <path d="M11.6 3.75V7.1H15" stroke="currentColor" strokeWidth="1.55" strokeLinejoin="round" />
+      <path d="M7.75 10.1h4.55M7.75 12.9h4.55" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
     </svg>
   );
 }
@@ -211,6 +223,7 @@ function ActionButton({
 }
 
 export function MobileFloatingControls({
+  canOpenFiles,
   canSendTerminalInput,
   jumpControls,
   mobileAgentLabel: _mobileAgentLabel,
@@ -218,6 +231,7 @@ export function MobileFloatingControls({
   mobileProjectTitle,
   mobileSidebarOpen,
   statusBadges,
+  onFilesOpen,
   onMobilePaneChange,
   onSidebarOpen,
   onTerminalInput
@@ -268,6 +282,11 @@ export function MobileFloatingControls({
 
   function handleConversationListOpen(): void {
     onSidebarOpen();
+    setOpenPanel('none');
+  }
+
+  function handleFilesOpen(): void {
+    onFilesOpen();
     setOpenPanel('none');
   }
 
@@ -331,6 +350,10 @@ export function MobileFloatingControls({
             onClick={handlePaneSwitch}
           >
             <PaneSwitchIcon targetPane={targetPane} />
+          </ActionButton>
+
+          <ActionButton disabled={!canOpenFiles} label="文件浏览" onClick={handleFilesOpen}>
+            <FilesIcon />
           </ActionButton>
         </div>
       ) : null}

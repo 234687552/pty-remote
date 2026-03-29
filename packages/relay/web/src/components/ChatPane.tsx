@@ -39,12 +39,6 @@ interface ToolCallMeta {
   useBlockId?: string;
 }
 
-interface ApprovalRequestDetails {
-  command: string;
-  justification: string;
-  prefixRule: string[];
-}
-
 interface ApprovalOption {
   id: string;
   input: string;
@@ -55,6 +49,7 @@ interface ApprovalOption {
 interface TerminalInterruptedState {
   confidence: 'high' | 'medium';
   message: string;
+  relatedToolCallId: string | null;
 }
 
 interface TerminalApprovalState {
@@ -68,6 +63,18 @@ interface TerminalApprovalState {
 interface TerminalSideChannelState {
   approval: TerminalApprovalState | null;
   interrupted: TerminalInterruptedState | null;
+}
+
+interface ToolCallUiState {
+  hasResult: boolean;
+  interrupted: TerminalInterruptedState | null;
+  terminalApproval: TerminalApprovalState | null;
+}
+
+interface MergedChatToolState {
+  approvalNotice: TerminalApprovalState | null;
+  interruptedNotice: TerminalInterruptedState | null;
+  toolCallUiStateIndex: Map<string, ToolCallUiState>;
 }
 
 interface ActivityGroup {
@@ -706,64 +713,6 @@ function getStructuredToolInputStringArray(input: string, field: string): string
     .filter(Boolean);
 }
 
-function getApprovalRequestDetails(block: ToolUseChatMessageBlock): ApprovalRequestDetails | null {
-  const normalizedToolName = block.toolName.trim().toLowerCase();
-  if (
-    normalizedToolName !== 'exec_command' &&
-    !normalizedToolName.endsWith('.exec_command') &&
-    normalizedToolName !== 'shell_command' &&
-    !normalizedToolName.endsWith('.shell_command')
-  ) {
-    return null;
-  }
-
-  const parsedInput = parseStructuredToolInput(block.input);
-  if (!parsedInput || parsedInput.sandbox_permissions !== 'require_escalated') {
-    return null;
-  }
-
-  const command = getStructuredToolInputField(block.input, 'cmd') ?? getStructuredToolInputField(block.input, 'command');
-  if (!command) {
-    return null;
-  }
-
-  return {
-    command,
-    justification: getStructuredToolInputField(block.input, 'justification') ?? 'Do you want to allow this command to run?',
-    prefixRule: getStructuredToolInputStringArray(block.input, 'prefix_rule')
-  };
-}
-
-function createApprovalOptions(request: ApprovalRequestDetails): ApprovalOption[] {
-  const options: ApprovalOption[] = [
-    {
-      id: 'approve_once',
-      input: '\r',
-      label: 'Yes, proceed',
-      shortcut: 'Enter'
-    }
-  ];
-
-  if (request.prefixRule.length > 0) {
-    options.push({
-      id: 'approve_for_rule',
-      input: '\x1b[B\r',
-      label: `Yes, and don't ask again for commands that start with \`${request.prefixRule.join(' ')}\``,
-      shortcut: '↓ Enter'
-    });
-  }
-
-  const denySteps = options.length;
-  options.push({
-    id: 'deny',
-    input: `${'\x1b[B'.repeat(denySteps)}\r`,
-    label: 'No, and tell Codex what to do differently',
-    shortcut: `${'↓ '.repeat(denySteps).trim()} Enter`
-  });
-
-  return options;
-}
-
 function extractPatchFileLabels(input: string, maxFiles = 2): string[] {
   const files: string[] = [];
   const seen = new Set<string>();
@@ -1079,7 +1028,8 @@ function detectTerminalSideChannelState(
     joinedText.includes('tell the model what to do differently')
       ? {
           confidence: 'high' as const,
-          message: 'Conversation interrupted. This state is observed from the live terminal screen.'
+          message: 'Conversation interrupted. This state is observed from the live terminal screen.',
+          relatedToolCallId
         }
       : null;
 
@@ -1108,15 +1058,86 @@ function detectTerminalSideChannelState(
     .filter(Boolean)
     .slice(0, 4);
 
+  const approval: TerminalApprovalState = {
+    confidence: options.length >= 2 ? 'high' : 'medium',
+    contextLines,
+    options,
+    relatedToolCallId,
+    title: normalizedLines[approvalTitleIndex] ?? 'Pending approval in terminal'
+  };
+
   return {
-    approval: {
-      confidence: options.length >= 2 ? 'high' : 'medium',
-      contextLines,
-      options,
-      relatedToolCallId,
-      title: normalizedLines[approvalTitleIndex] ?? 'Pending approval in terminal'
-    },
+    approval: isInterruptedApprovalSuppressed(approval.relatedToolCallId, interrupted) ? null : approval,
     interrupted
+  };
+}
+
+function isInterruptedApprovalSuppressed(
+  toolCallId: string | null | undefined,
+  interrupted: TerminalInterruptedState | null | undefined
+): boolean {
+  return Boolean(toolCallId && interrupted?.relatedToolCallId && toolCallId === interrupted.relatedToolCallId);
+}
+
+function mergeToolCallUiState(
+  messages: ChatMessage[],
+  toolCallIndex: Map<string, ToolCallMeta>,
+  terminalSideChannel: TerminalSideChannelState
+): MergedChatToolState {
+  const toolCallUiStateIndex = new Map<string, ToolCallUiState>();
+
+  for (const message of messages) {
+    for (const block of message.blocks) {
+      if (block.type !== 'tool_use' || !block.toolCallId) {
+        continue;
+      }
+
+      const toolCallId = block.toolCallId;
+      const current = toolCallUiStateIndex.get(toolCallId);
+      const hasResult = current?.hasResult ?? Boolean(toolCallIndex.get(toolCallId)?.resultBlock);
+
+      toolCallUiStateIndex.set(toolCallId, {
+        hasResult,
+        interrupted: current?.interrupted ?? null,
+        terminalApproval: current?.terminalApproval ?? null
+      });
+    }
+  }
+
+  const interrupted = terminalSideChannel.interrupted;
+  const interruptedToolCallId = interrupted?.relatedToolCallId ?? null;
+  if (interruptedToolCallId && toolCallUiStateIndex.has(interruptedToolCallId)) {
+    const current = toolCallUiStateIndex.get(interruptedToolCallId);
+    if (current) {
+      toolCallUiStateIndex.set(interruptedToolCallId, {
+        ...current,
+        interrupted,
+        terminalApproval: null
+      });
+    }
+  }
+
+  const approval = terminalSideChannel.approval;
+  const approvalToolCallId = approval?.relatedToolCallId ?? null;
+  if (approval && approvalToolCallId && toolCallUiStateIndex.has(approvalToolCallId)) {
+    const current = toolCallUiStateIndex.get(approvalToolCallId);
+    if (current && !current.hasResult && !current.interrupted) {
+      toolCallUiStateIndex.set(approvalToolCallId, {
+        ...current,
+        terminalApproval: approval
+      });
+    }
+  }
+
+  const approvalNotice =
+    approval && (!approvalToolCallId || !toolCallUiStateIndex.has(approvalToolCallId))
+      ? approval
+      : null;
+
+  return {
+    approvalNotice,
+    interruptedNotice: interrupted,
+    toolCallUiStateIndex
   };
 }
 
@@ -1208,83 +1229,6 @@ function resolveToolUseStatus(
   }
 
   return toolCallIndex.get(block.toolCallId)?.resultStatus ?? fallbackStatus;
-}
-
-function ApprovalRequestBlockContent({
-  approvalRequest,
-  canSendApprovalInput,
-  onApprovalInput,
-  options
-}: {
-  approvalRequest: ApprovalRequestDetails;
-  canSendApprovalInput: boolean;
-  onApprovalInput?: (input: string) => void;
-  options?: ApprovalOption[];
-}) {
-  const resolvedOptions = options ?? createApprovalOptions(approvalRequest);
-
-  return (
-    <div className="flex justify-start">
-      <section className="w-full max-w-3xl overflow-hidden rounded-2xl border border-amber-200 bg-amber-50/80 shadow-sm">
-        <div className="border-b border-amber-200/80 px-4 py-3">
-          <div className="text-sm font-semibold text-zinc-950">Would you like to run the following command?</div>
-          <div className="mt-1 text-xs leading-5 text-zinc-600">
-            This approval request was reconstructed from the JSONL tool call.
-          </div>
-        </div>
-
-        <div className="space-y-4 px-4 py-4">
-          <ToolDetailSection label="Reason">
-            <div className="rounded-xl border border-amber-200 bg-white/70 px-3 py-2 text-sm leading-6 text-zinc-800">
-              {approvalRequest.justification}
-            </div>
-          </ToolDetailSection>
-
-          <ToolDetailSection label="Command">
-            <pre className="overflow-auto rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
-              {approvalRequest.command}
-            </pre>
-          </ToolDetailSection>
-
-          <div className="space-y-2">
-            {resolvedOptions.map((option, index) => (
-              <button
-                key={option.id}
-                type="button"
-                disabled={!canSendApprovalInput || !onApprovalInput}
-                onClick={() => {
-                  onApprovalInput?.(option.input);
-                }}
-                className={[
-                  'flex w-full items-start justify-between gap-3 rounded-xl border px-3 py-3 text-left transition',
-                  canSendApprovalInput && onApprovalInput
-                    ? option.id === 'deny'
-                      ? 'border-zinc-200 bg-white hover:border-red-300 hover:bg-red-50/60'
-                      : 'border-zinc-200 bg-white hover:border-amber-300 hover:bg-amber-100/60'
-                    : 'cursor-not-allowed border-zinc-200 bg-zinc-100 text-zinc-400 opacity-80'
-                ].join(' ')}
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-semibold text-zinc-900">
-                    {index + 1}. {option.label}
-                  </div>
-                </div>
-                <span className="shrink-0 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 font-mono text-[10px] text-zinc-500">
-                  {option.shortcut}
-                </span>
-              </button>
-            ))}
-          </div>
-
-          <div className="text-xs leading-5 text-zinc-500">
-            {canSendApprovalInput && onApprovalInput
-              ? 'Clicking an option sends the corresponding Arrow/Enter sequence to the live PTY.'
-              : 'Approval actions are unavailable until the current terminal session is connected.'}
-          </div>
-        </div>
-      </section>
-    </div>
-  );
 }
 
 function TerminalInterruptedBanner({ interrupted }: { interrupted: TerminalInterruptedState }) {
@@ -1665,14 +1609,14 @@ function buildCodexDisplayItems(messages: ChatMessage[]): ChatPaneDisplayItem[] 
 function MessageContent({
   canSendApprovalInput = false,
   message,
+  mergedToolState,
   onApprovalInput,
-  terminalSideChannel,
   toolCallIndex
 }: {
   canSendApprovalInput?: boolean;
   message: ChatMessage;
+  mergedToolState: MergedChatToolState;
   onApprovalInput?: (input: string) => void;
-  terminalSideChannel: TerminalSideChannelState;
   toolCallIndex: Map<string, ToolCallMeta>;
 }) {
   if (message.blocks.length === 0 && (message.attachments?.length ?? 0) === 0) {
@@ -1699,21 +1643,9 @@ function MessageContent({
 
         if (block.type === 'tool_use') {
           const toolMeta = block.toolCallId ? toolCallIndex.get(block.toolCallId) : undefined;
-          const approvalRequest = getApprovalRequestDetails(block);
-          const terminalApproval =
-            block.toolCallId && terminalSideChannel.approval?.relatedToolCallId === block.toolCallId
-              ? terminalSideChannel.approval
-              : null;
-          if (approvalRequest && !toolMeta?.resultBlock) {
-            return (
-              <ApprovalRequestBlockContent
-                key={block.id}
-                approvalRequest={approvalRequest}
-                canSendApprovalInput={canSendApprovalInput}
-                onApprovalInput={onApprovalInput}
-              />
-            );
-          }
+          const toolUiState = block.toolCallId ? mergedToolState.toolCallUiStateIndex.get(block.toolCallId) ?? null : null;
+          const hasResult = toolUiState?.hasResult ?? Boolean(toolMeta?.resultBlock);
+          const terminalApproval = toolUiState?.terminalApproval ?? null;
           return (
             <ToolUseBlockContent
               key={block.id}
@@ -1722,7 +1654,7 @@ function MessageContent({
               onApprovalInput={onApprovalInput}
               status={resolveToolUseStatus(block, toolCallIndex, message.status)}
               resultBlock={toolMeta?.resultBlock}
-              terminalApproval={toolMeta?.resultBlock ? null : terminalApproval}
+              terminalApproval={hasResult ? null : terminalApproval}
             />
           );
         }
@@ -1736,14 +1668,14 @@ function MessageContent({
 function ActivityGroupCard({
   canSendApprovalInput,
   group,
+  mergedToolState,
   onApprovalInput,
-  terminalSideChannel,
   toolCallIndex
 }: {
   canSendApprovalInput?: boolean;
   group: ActivityGroup;
+  mergedToolState: MergedChatToolState;
   onApprovalInput?: (input: string) => void;
-  terminalSideChannel: TerminalSideChannelState;
   toolCallIndex: Map<string, ToolCallMeta>;
 }) {
   const hasPendingApproval = useMemo(
@@ -1755,18 +1687,20 @@ function ActivityGroupCard({
           }
 
           const toolMeta = block.toolCallId ? toolCallIndex.get(block.toolCallId) : undefined;
-          if (toolMeta?.resultBlock) {
+          const toolUiState = block.toolCallId ? mergedToolState.toolCallUiStateIndex.get(block.toolCallId) ?? null : null;
+          const hasResult = toolUiState?.hasResult ?? Boolean(toolMeta?.resultBlock);
+          if (hasResult) {
             return false;
           }
 
-          if (getApprovalRequestDetails(block)) {
-            return true;
+          if (toolUiState?.interrupted) {
+            return false;
           }
 
-          return Boolean(block.toolCallId && terminalSideChannel.approval?.relatedToolCallId === block.toolCallId);
+          return Boolean(toolUiState?.terminalApproval);
         })
       ),
-    [group.entries, terminalSideChannel.approval, toolCallIndex]
+    [group.entries, mergedToolState.toolCallUiStateIndex, toolCallIndex]
   );
   const [expanded, setExpanded] = useState(hasPendingApproval);
   const countLabel = `${group.entries.length}项`;
@@ -1835,8 +1769,8 @@ function ActivityGroupCard({
                 <MessageContent
                   canSendApprovalInput={canSendApprovalInput}
                   message={entry}
+                  mergedToolState={mergedToolState}
                   onApprovalInput={onApprovalInput}
-                  terminalSideChannel={terminalSideChannel}
                   toolCallIndex={toolCallIndex}
                 />
               </div>
@@ -1892,6 +1826,10 @@ export function ChatPane({
   const terminalSideChannel = useMemo(
     () => detectTerminalSideChannelState(frameSnapshot, latestOpenToolCallId),
     [frameSnapshot, latestOpenToolCallId]
+  );
+  const mergedToolState = useMemo(
+    () => mergeToolCallUiState(messages, toolCallIndex, terminalSideChannel),
+    [messages, terminalSideChannel, toolCallIndex]
   );
   const questionMessageIds = useMemo(
     () =>
@@ -2163,10 +2101,10 @@ export function ChatPane({
           onScroll={handleMessagesScroll}
           className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
         >
-          {terminalSideChannel.interrupted ? <TerminalInterruptedBanner interrupted={terminalSideChannel.interrupted} /> : null}
-          {terminalSideChannel.approval ? (
+          {mergedToolState.interruptedNotice ? <TerminalInterruptedBanner interrupted={mergedToolState.interruptedNotice} /> : null}
+          {mergedToolState.approvalNotice ? (
             <TerminalApprovalInlineNotice
-              approval={terminalSideChannel.approval}
+              approval={mergedToolState.approvalNotice}
               canSendApprovalInput={canSendApprovalInput && connected}
               onApprovalInput={onApprovalInput}
             />
@@ -2180,8 +2118,8 @@ export function ChatPane({
                       key={item.group.id}
                       canSendApprovalInput={canSendApprovalInput && connected}
                       group={item.group}
+                      mergedToolState={mergedToolState}
                       onApprovalInput={onApprovalInput}
-                      terminalSideChannel={terminalSideChannel}
                       toolCallIndex={toolCallIndex}
                     />
                   );
@@ -2197,8 +2135,8 @@ export function ChatPane({
                       <MessageContent
                         canSendApprovalInput={canSendApprovalInput && connected}
                         message={message}
+                        mergedToolState={mergedToolState}
                         onApprovalInput={onApprovalInput}
-                        terminalSideChannel={terminalSideChannel}
                         toolCallIndex={toolCallIndex}
                       />
                     </MessageShell>
