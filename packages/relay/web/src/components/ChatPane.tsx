@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { Mermaid as MermaidApi } from 'mermaid';
 import type { PanZoom as PanZoomInstance } from 'panzoom';
+import type { TerminalFrameLine, TerminalFrameSnapshot } from '@lzdi/pty-remote-protocol/terminal-frame.ts';
 
 import type {
   ChatAttachment,
@@ -38,6 +39,37 @@ interface ToolCallMeta {
   useBlockId?: string;
 }
 
+interface ApprovalRequestDetails {
+  command: string;
+  justification: string;
+  prefixRule: string[];
+}
+
+interface ApprovalOption {
+  id: string;
+  input: string;
+  label: string;
+  shortcut: string;
+}
+
+interface TerminalInterruptedState {
+  confidence: 'high' | 'medium';
+  message: string;
+}
+
+interface TerminalApprovalState {
+  confidence: 'high' | 'medium';
+  contextLines: string[];
+  options: ApprovalOption[];
+  relatedToolCallId: string | null;
+  title: string;
+}
+
+interface TerminalSideChannelState {
+  approval: TerminalApprovalState | null;
+  interrupted: TerminalInterruptedState | null;
+}
+
 interface ActivityGroup {
   anchorMessage?: ChatMessage;
   createdAt: string;
@@ -60,10 +92,13 @@ type ChatPaneDisplayItem =
 
 interface ChatPaneProps {
   activeProviderId: ProviderId | null;
+  canSendApprovalInput?: boolean;
   conversationScrollKey: string | null;
   connected: boolean;
+  frameSnapshot?: TerminalFrameSnapshot | null;
   messages: ChatMessage[];
   onMobileJumpControlsChange?: (controls: MobileJumpControls | null) => void;
+  onApprovalInput?: (input: string) => void;
   paneVisible: boolean;
   scrollToBottomRequestKey: number;
   visible: boolean;
@@ -658,6 +693,77 @@ function getStructuredToolInputField(input: string, field: string): string | nul
   return typeof value === 'string' && value.trim() ? value.trim() : null;
 }
 
+function getStructuredToolInputStringArray(input: string, field: string): string[] {
+  const parsed = parseStructuredToolInput(input);
+  const value = parsed?.[field];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((entry): entry is string => typeof entry === 'string')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function getApprovalRequestDetails(block: ToolUseChatMessageBlock): ApprovalRequestDetails | null {
+  const normalizedToolName = block.toolName.trim().toLowerCase();
+  if (
+    normalizedToolName !== 'exec_command' &&
+    !normalizedToolName.endsWith('.exec_command') &&
+    normalizedToolName !== 'shell_command' &&
+    !normalizedToolName.endsWith('.shell_command')
+  ) {
+    return null;
+  }
+
+  const parsedInput = parseStructuredToolInput(block.input);
+  if (!parsedInput || parsedInput.sandbox_permissions !== 'require_escalated') {
+    return null;
+  }
+
+  const command = getStructuredToolInputField(block.input, 'cmd') ?? getStructuredToolInputField(block.input, 'command');
+  if (!command) {
+    return null;
+  }
+
+  return {
+    command,
+    justification: getStructuredToolInputField(block.input, 'justification') ?? 'Do you want to allow this command to run?',
+    prefixRule: getStructuredToolInputStringArray(block.input, 'prefix_rule')
+  };
+}
+
+function createApprovalOptions(request: ApprovalRequestDetails): ApprovalOption[] {
+  const options: ApprovalOption[] = [
+    {
+      id: 'approve_once',
+      input: '\r',
+      label: 'Yes, proceed',
+      shortcut: 'Enter'
+    }
+  ];
+
+  if (request.prefixRule.length > 0) {
+    options.push({
+      id: 'approve_for_rule',
+      input: '\x1b[B\r',
+      label: `Yes, and don't ask again for commands that start with \`${request.prefixRule.join(' ')}\``,
+      shortcut: '↓ Enter'
+    });
+  }
+
+  const denySteps = options.length;
+  options.push({
+    id: 'deny',
+    input: `${'\x1b[B'.repeat(denySteps)}\r`,
+    label: 'No, and tell Codex what to do differently',
+    shortcut: `${'↓ '.repeat(denySteps).trim()} Enter`
+  });
+
+  return options;
+}
+
 function extractPatchFileLabels(input: string, maxFiles = 2): string[] {
   const files: string[] = [];
   const seen = new Set<string>();
@@ -872,6 +978,148 @@ function truncateActivityTitle(value: string, maxChars = 96): string {
   return `${normalized.slice(0, maxChars - 3)}...`;
 }
 
+function terminalFrameLineToText(line: TerminalFrameLine): string {
+  return line.runs.map((run) => run.text).join('');
+}
+
+function normalizeTerminalText(text: string): string {
+  return text.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function getTerminalViewportLines(snapshot: TerminalFrameSnapshot | null | undefined): string[] {
+  if (!snapshot || snapshot.lines.length === 0) {
+    return [];
+  }
+
+  const viewportStart = Math.max(0, snapshot.viewportY - snapshot.tailStart);
+  const viewportEnd = Math.min(snapshot.lines.length, viewportStart + Math.max(snapshot.rows, 1));
+  const viewportLines = snapshot.lines.slice(viewportStart, viewportEnd);
+
+  return viewportLines
+    .map((line) => terminalFrameLineToText(line).replace(/\u00a0/g, ' ').replace(/\s+$/g, ''))
+    .filter((line, index, lines) => line.length > 0 || index === lines.length - 1);
+}
+
+function buildTerminalApprovalShortcut(index: number): string {
+  if (index <= 0) {
+    return 'Enter';
+  }
+
+  return `${'↓ '.repeat(index).trim()} Enter`;
+}
+
+function createTerminalApprovalOption(index: number, label: string): ApprovalOption {
+  return {
+    id: `terminal:${index}`,
+    input: `${'\x1b[B'.repeat(index)}\r`,
+    label,
+    shortcut: buildTerminalApprovalShortcut(index)
+  };
+}
+
+function parseTerminalApprovalOptions(lines: string[]): ApprovalOption[] {
+  const options = new Map<number, ApprovalOption>();
+
+  for (const line of lines) {
+    const normalizedLine = line.replace(/^[>\u203a\u25b8\u25b6*\-]+\s*/, '');
+    const match = normalizedLine.match(/^\s*(\d+)\.\s+(.+?)\s*(?:\(([a-z])\))?\s*$/i);
+    if (!match) {
+      continue;
+    }
+
+    const rawIndex = Number.parseInt(match[1] ?? '', 10);
+    const label = (match[2] ?? '').trim();
+    if (!Number.isFinite(rawIndex) || rawIndex <= 0 || !label) {
+      continue;
+    }
+
+    options.set(rawIndex - 1, createTerminalApprovalOption(rawIndex - 1, label));
+  }
+
+  return Array.from(options.entries())
+    .sort((left, right) => left[0] - right[0])
+    .map(([, option]) => option);
+}
+
+function findLatestOpenToolCallId(messages: ChatMessage[], toolCallIndex: Map<string, ToolCallMeta>): string | null {
+  for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
+    const message = messages[messageIndex];
+    for (let blockIndex = message.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
+      const block = message.blocks[blockIndex];
+      if (block.type !== 'tool_use' || !block.toolCallId) {
+        continue;
+      }
+
+      if (!toolCallIndex.get(block.toolCallId)?.resultBlock) {
+        return block.toolCallId;
+      }
+    }
+  }
+
+  return null;
+}
+
+function detectTerminalSideChannelState(
+  frameSnapshot: TerminalFrameSnapshot | null | undefined,
+  relatedToolCallId: string | null
+): TerminalSideChannelState {
+  const viewportLines = getTerminalViewportLines(frameSnapshot);
+  if (viewportLines.length === 0) {
+    return {
+      approval: null,
+      interrupted: null
+    };
+  }
+
+  const normalizedLines = viewportLines.map((line) => normalizeTerminalText(line));
+  const joinedText = normalizedLines.join(' ').toLowerCase();
+
+  const interrupted =
+    joinedText.includes('conversation interrupted') &&
+    joinedText.includes('tell the model what to do differently')
+      ? {
+          confidence: 'high' as const,
+          message: 'Conversation interrupted. This state is observed from the live terminal screen.'
+        }
+      : null;
+
+  const approvalTitleIndex = normalizedLines.findIndex((line) => {
+    const lower = line.toLowerCase();
+    return (
+      lower.includes('would you like to run the following command?') ||
+      lower.includes('do you want to approve network access to ') ||
+      lower.includes('would you like to make the following edits?') ||
+      lower.includes('would you like to grant these permissions?') ||
+      lower.endsWith('needs your approval.')
+    );
+  });
+
+  if (approvalTitleIndex === -1) {
+    return {
+      approval: null,
+      interrupted
+    };
+  }
+
+  const options = parseTerminalApprovalOptions(normalizedLines);
+  const firstOptionIndex = normalizedLines.findIndex((line) => /^\s*\d+\.\s+/.test(line));
+  const contextLines = normalizedLines
+    .slice(approvalTitleIndex + 1, firstOptionIndex >= 0 ? firstOptionIndex : approvalTitleIndex + 5)
+    .filter(Boolean)
+    .slice(0, 4);
+
+  return {
+    approval: {
+      confidence: options.length >= 2 ? 'high' : 'medium',
+      contextLines,
+      options,
+      relatedToolCallId,
+      title: normalizedLines[approvalTitleIndex] ?? 'Pending approval in terminal'
+    },
+    interrupted
+  };
+}
+
 function hasNonTextBlock(message: ChatMessage): boolean {
   return message.blocks.some((block) => block.type !== 'text');
 }
@@ -962,14 +1210,179 @@ function resolveToolUseStatus(
   return toolCallIndex.get(block.toolCallId)?.resultStatus ?? fallbackStatus;
 }
 
+function ApprovalRequestBlockContent({
+  approvalRequest,
+  canSendApprovalInput,
+  onApprovalInput,
+  options
+}: {
+  approvalRequest: ApprovalRequestDetails;
+  canSendApprovalInput: boolean;
+  onApprovalInput?: (input: string) => void;
+  options?: ApprovalOption[];
+}) {
+  const resolvedOptions = options ?? createApprovalOptions(approvalRequest);
+
+  return (
+    <div className="flex justify-start">
+      <section className="w-full max-w-3xl overflow-hidden rounded-2xl border border-amber-200 bg-amber-50/80 shadow-sm">
+        <div className="border-b border-amber-200/80 px-4 py-3">
+          <div className="text-sm font-semibold text-zinc-950">Would you like to run the following command?</div>
+          <div className="mt-1 text-xs leading-5 text-zinc-600">
+            This approval request was reconstructed from the JSONL tool call.
+          </div>
+        </div>
+
+        <div className="space-y-4 px-4 py-4">
+          <ToolDetailSection label="Reason">
+            <div className="rounded-xl border border-amber-200 bg-white/70 px-3 py-2 text-sm leading-6 text-zinc-800">
+              {approvalRequest.justification}
+            </div>
+          </ToolDetailSection>
+
+          <ToolDetailSection label="Command">
+            <pre className="overflow-auto rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
+              {approvalRequest.command}
+            </pre>
+          </ToolDetailSection>
+
+          <div className="space-y-2">
+            {resolvedOptions.map((option, index) => (
+              <button
+                key={option.id}
+                type="button"
+                disabled={!canSendApprovalInput || !onApprovalInput}
+                onClick={() => {
+                  onApprovalInput?.(option.input);
+                }}
+                className={[
+                  'flex w-full items-start justify-between gap-3 rounded-xl border px-3 py-3 text-left transition',
+                  canSendApprovalInput && onApprovalInput
+                    ? option.id === 'deny'
+                      ? 'border-zinc-200 bg-white hover:border-red-300 hover:bg-red-50/60'
+                      : 'border-zinc-200 bg-white hover:border-amber-300 hover:bg-amber-100/60'
+                    : 'cursor-not-allowed border-zinc-200 bg-zinc-100 text-zinc-400 opacity-80'
+                ].join(' ')}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-semibold text-zinc-900">
+                    {index + 1}. {option.label}
+                  </div>
+                </div>
+                <span className="shrink-0 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 font-mono text-[10px] text-zinc-500">
+                  {option.shortcut}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <div className="text-xs leading-5 text-zinc-500">
+            {canSendApprovalInput && onApprovalInput
+              ? 'Clicking an option sends the corresponding Arrow/Enter sequence to the live PTY.'
+              : 'Approval actions are unavailable until the current terminal session is connected.'}
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function TerminalInterruptedBanner({ interrupted }: { interrupted: TerminalInterruptedState }) {
+  return (
+    <section className="rounded-2xl border border-red-200 bg-red-50/85 px-4 py-3 shadow-sm">
+      <div className="flex items-start gap-3">
+        <span className="mt-0.5 inline-flex h-2.5 w-2.5 shrink-0 rounded-full bg-red-600" />
+        <div className="min-w-0 space-y-1">
+          <div className="text-sm font-semibold text-zinc-950">Interrupted</div>
+          <div className="text-sm leading-6 text-zinc-700">{interrupted.message}</div>
+          <div className="text-[11px] uppercase tracking-[0.18em] text-zinc-500">Source: terminal side-channel</div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TerminalApprovalInlineNotice({
+  approval,
+  canSendApprovalInput,
+  onApprovalInput
+}: {
+  approval: TerminalApprovalState;
+  canSendApprovalInput: boolean;
+  onApprovalInput?: (input: string) => void;
+}) {
+  return (
+    <section className="mt-2 overflow-hidden rounded-2xl border border-amber-200 bg-amber-50/85 shadow-sm">
+      <div className="border-b border-amber-200/80 px-4 py-3">
+        <div className="text-sm font-semibold text-zinc-950">Pending approval in terminal</div>
+        <div className="mt-1 text-xs leading-5 text-zinc-600">This state is inferred from the current PTY screen, not from JSONL.</div>
+      </div>
+
+      <div className="space-y-3 px-4 py-4">
+        <div className="rounded-xl border border-amber-200 bg-white/80 px-3 py-2 text-sm leading-6 text-zinc-800">
+          {approval.title}
+        </div>
+
+        {approval.contextLines.length > 0 ? (
+          <pre className="overflow-auto rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
+            {approval.contextLines.join('\n')}
+          </pre>
+        ) : null}
+
+        {approval.options.length > 0 ? (
+          <div className="space-y-2">
+            {approval.options.map((option, index) => (
+              <button
+                key={option.id}
+                type="button"
+                disabled={!canSendApprovalInput || !onApprovalInput}
+                onClick={() => {
+                  onApprovalInput?.(option.input);
+                }}
+                className={[
+                  'flex w-full items-start justify-between gap-3 rounded-xl border px-3 py-3 text-left transition',
+                  canSendApprovalInput && onApprovalInput
+                    ? option.label.toLowerCase().startsWith('no')
+                      ? 'border-zinc-200 bg-white hover:border-red-300 hover:bg-red-50/60'
+                      : 'border-zinc-200 bg-white hover:border-amber-300 hover:bg-amber-100/60'
+                    : 'cursor-not-allowed border-zinc-200 bg-zinc-100 text-zinc-400 opacity-80'
+                ].join(' ')}
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-semibold text-zinc-900">
+                    {index + 1}. {option.label}
+                  </div>
+                </div>
+                <span className="shrink-0 rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 font-mono text-[10px] text-zinc-500">
+                  {option.shortcut}
+                </span>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed border-zinc-200 bg-white/70 px-3 py-2 text-xs leading-5 text-zinc-500">
+            Approval options were not parsed from the current terminal viewport. Continue in the terminal.
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function ToolUseBlockContent({
   block,
+  canSendApprovalInput,
   resultBlock,
-  status
+  status,
+  terminalApproval,
+  onApprovalInput
 }: {
   block: ToolUseChatMessageBlock;
+  canSendApprovalInput?: boolean;
   resultBlock?: ToolResultChatMessageBlock;
   status: MessageStatus;
+  terminalApproval?: TerminalApprovalState | null;
+  onApprovalInput?: (input: string) => void;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const variant = getToolVariant(block.toolName);
@@ -1025,6 +1438,14 @@ function ToolUseBlockContent({
           </div>
         </button>
       </div>
+
+      {terminalApproval ? (
+        <TerminalApprovalInlineNotice
+          approval={terminalApproval}
+          canSendApprovalInput={Boolean(canSendApprovalInput)}
+          onApprovalInput={onApprovalInput}
+        />
+      ) : null}
 
       {isExpanded ? (
         <div className="fixed inset-0 z-50 bg-zinc-950/72 backdrop-blur-sm" onClick={() => setIsExpanded(false)}>
@@ -1241,7 +1662,19 @@ function buildCodexDisplayItems(messages: ChatMessage[]): ChatPaneDisplayItem[] 
   return items;
 }
 
-function MessageContent({ message, toolCallIndex }: { message: ChatMessage; toolCallIndex: Map<string, ToolCallMeta> }) {
+function MessageContent({
+  canSendApprovalInput = false,
+  message,
+  onApprovalInput,
+  terminalSideChannel,
+  toolCallIndex
+}: {
+  canSendApprovalInput?: boolean;
+  message: ChatMessage;
+  onApprovalInput?: (input: string) => void;
+  terminalSideChannel: TerminalSideChannelState;
+  toolCallIndex: Map<string, ToolCallMeta>;
+}) {
   if (message.blocks.length === 0 && (message.attachments?.length ?? 0) === 0) {
     return null;
   }
@@ -1266,12 +1699,30 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
 
         if (block.type === 'tool_use') {
           const toolMeta = block.toolCallId ? toolCallIndex.get(block.toolCallId) : undefined;
+          const approvalRequest = getApprovalRequestDetails(block);
+          const terminalApproval =
+            block.toolCallId && terminalSideChannel.approval?.relatedToolCallId === block.toolCallId
+              ? terminalSideChannel.approval
+              : null;
+          if (approvalRequest && !toolMeta?.resultBlock) {
+            return (
+              <ApprovalRequestBlockContent
+                key={block.id}
+                approvalRequest={approvalRequest}
+                canSendApprovalInput={canSendApprovalInput}
+                onApprovalInput={onApprovalInput}
+              />
+            );
+          }
           return (
             <ToolUseBlockContent
               key={block.id}
               block={block}
+              canSendApprovalInput={canSendApprovalInput}
+              onApprovalInput={onApprovalInput}
               status={resolveToolUseStatus(block, toolCallIndex, message.status)}
               resultBlock={toolMeta?.resultBlock}
+              terminalApproval={toolMeta?.resultBlock ? null : terminalApproval}
             />
           );
         }
@@ -1283,22 +1734,63 @@ function MessageContent({ message, toolCallIndex }: { message: ChatMessage; tool
 }
 
 function ActivityGroupCard({
+  canSendApprovalInput,
   group,
+  onApprovalInput,
+  terminalSideChannel,
   toolCallIndex
 }: {
+  canSendApprovalInput?: boolean;
   group: ActivityGroup;
+  onApprovalInput?: (input: string) => void;
+  terminalSideChannel: TerminalSideChannelState;
   toolCallIndex: Map<string, ToolCallMeta>;
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const hasPendingApproval = useMemo(
+    () =>
+      group.entries.some((entry) =>
+        entry.blocks.some((block) => {
+          if (block.type !== 'tool_use') {
+            return false;
+          }
+
+          const toolMeta = block.toolCallId ? toolCallIndex.get(block.toolCallId) : undefined;
+          if (toolMeta?.resultBlock) {
+            return false;
+          }
+
+          if (getApprovalRequestDetails(block)) {
+            return true;
+          }
+
+          return Boolean(block.toolCallId && terminalSideChannel.approval?.relatedToolCallId === block.toolCallId);
+        })
+      ),
+    [group.entries, terminalSideChannel.approval, toolCallIndex]
+  );
+  const [expanded, setExpanded] = useState(hasPendingApproval);
   const countLabel = `${group.entries.length}项`;
+
+  useEffect(() => {
+    if (hasPendingApproval) {
+      setExpanded(true);
+    }
+  }, [hasPendingApproval]);
 
   return (
     <section className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
       <button
         type="button"
         aria-expanded={expanded}
-        className={`w-full px-3.5 py-2.5 text-left transition hover:bg-zinc-50/80 ${expanded ? 'bg-zinc-50/70' : ''}`}
-        onClick={() => setExpanded((current) => !current)}
+        disabled={hasPendingApproval}
+        className={`w-full px-3.5 py-2.5 text-left transition ${
+          hasPendingApproval ? 'cursor-default bg-amber-50/50' : `hover:bg-zinc-50/80 ${expanded ? 'bg-zinc-50/70' : ''}`
+        }`}
+        onClick={() => {
+          if (!hasPendingApproval) {
+            setExpanded((current) => !current);
+          }
+        }}
       >
         <div className={`flex gap-2.5 ${expanded ? 'items-start' : 'items-center'}`}>
           <div className={`flex h-5 w-5 shrink-0 items-center justify-center ${expanded ? 'pt-0.5' : ''}`}>
@@ -1314,10 +1806,23 @@ function ActivityGroupCard({
           >
             {countLabel}
           </span>
+          {hasPendingApproval ? (
+            <span
+              className={`inline-flex shrink-0 items-center rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-medium tabular-nums text-amber-900 ${expanded ? 'mt-0.5' : ''}`}
+            >
+              审批中
+            </span>
+          ) : null}
           <span className={`shrink-0 text-zinc-500 ${expanded ? 'mt-0.5' : ''}`}>
-            <svg viewBox="0 0 16 16" aria-hidden="true" className={`h-4 w-4 transition ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="1.7">
-              <path d="m4.5 6.5 3.5 3 3.5-3" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+            {hasPendingApproval ? (
+              <svg viewBox="0 0 16 16" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7">
+                <path d="M4 8h8" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 16 16" aria-hidden="true" className={`h-4 w-4 transition ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="1.7">
+                <path d="m4.5 6.5 3.5 3 3.5-3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
           </span>
         </div>
       </button>
@@ -1327,7 +1832,13 @@ function ActivityGroupCard({
           <div className="divide-y divide-zinc-200">
             {group.entries.map((entry) => (
               <div key={entry.id} className="py-3 first:pt-0 last:pb-0">
-                <MessageContent message={entry} toolCallIndex={toolCallIndex} />
+                <MessageContent
+                  canSendApprovalInput={canSendApprovalInput}
+                  message={entry}
+                  onApprovalInput={onApprovalInput}
+                  terminalSideChannel={terminalSideChannel}
+                  toolCallIndex={toolCallIndex}
+                />
               </div>
             ))}
           </div>
@@ -1339,10 +1850,13 @@ function ActivityGroupCard({
 
 export function ChatPane({
   activeProviderId,
+  canSendApprovalInput = false,
   conversationScrollKey,
   connected,
+  frameSnapshot = null,
   messages,
   onMobileJumpControlsChange,
+  onApprovalInput,
   paneVisible,
   scrollToBottomRequestKey,
   visible
@@ -1374,6 +1888,11 @@ export function ChatPane({
   // Keep them out of the main message list, but still index them so tool cards
   // reflect the actual completion/error state.
   const toolCallIndex = useMemo(() => createToolCallIndex(messages), [messages]);
+  const latestOpenToolCallId = useMemo(() => findLatestOpenToolCallId(messages, toolCallIndex), [messages, toolCallIndex]);
+  const terminalSideChannel = useMemo(
+    () => detectTerminalSideChannelState(frameSnapshot, latestOpenToolCallId),
+    [frameSnapshot, latestOpenToolCallId]
+  );
   const questionMessageIds = useMemo(
     () =>
       displayItems
@@ -1644,11 +2163,28 @@ export function ChatPane({
           onScroll={handleMessagesScroll}
           className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
         >
+          {terminalSideChannel.interrupted ? <TerminalInterruptedBanner interrupted={terminalSideChannel.interrupted} /> : null}
+          {terminalSideChannel.approval ? (
+            <TerminalApprovalInlineNotice
+              approval={terminalSideChannel.approval}
+              canSendApprovalInput={canSendApprovalInput && connected}
+              onApprovalInput={onApprovalInput}
+            />
+          ) : null}
           {displayItems.length === 0
             ? null
             : displayItems.map((item) => {
                 if (item.type === 'activity_group') {
-                  return <ActivityGroupCard key={item.group.id} group={item.group} toolCallIndex={toolCallIndex} />;
+                  return (
+                    <ActivityGroupCard
+                      key={item.group.id}
+                      canSendApprovalInput={canSendApprovalInput && connected}
+                      group={item.group}
+                      onApprovalInput={onApprovalInput}
+                      terminalSideChannel={terminalSideChannel}
+                      toolCallIndex={toolCallIndex}
+                    />
+                  );
                 }
 
                 const { message } = item;
@@ -1658,7 +2194,13 @@ export function ChatPane({
                     ref={message.role === 'user' ? (node) => setQuestionMessageRef(message.id, node) : undefined}
                   >
                     <MessageShell message={message}>
-                      <MessageContent message={message} toolCallIndex={toolCallIndex} />
+                      <MessageContent
+                        canSendApprovalInput={canSendApprovalInput && connected}
+                        message={message}
+                        onApprovalInput={onApprovalInput}
+                        terminalSideChannel={terminalSideChannel}
+                        toolCallIndex={toolCallIndex}
+                      />
                     </MessageShell>
                   </div>
                 );

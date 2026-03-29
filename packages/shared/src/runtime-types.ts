@@ -10,7 +10,7 @@ export const PROVIDER_LABELS: Record<ProviderId, string> = {
 
 export const BUILTIN_SLASH_COMMANDS: Record<ProviderId, string[]> = {
   claude: ['clear', 'compact', 'context', 'cost', 'doctor', 'help', 'plan', 'stats', 'status'],
-  codex: ['review', 'new', 'compat', 'undo', 'diff', 'status']
+  codex: ['review', 'new', 'compat', 'undo', 'diff', 'status', 'permissions']
 };
 
 export interface TextChatMessageBlock {

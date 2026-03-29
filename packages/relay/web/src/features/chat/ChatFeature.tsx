@@ -6,6 +6,7 @@ import { ChatPane } from '@/components/ChatPane.tsx';
 import { selectWorkspaceDerivedState } from '@/features/workspace/selectors.ts';
 import type { WorkspaceStore } from '@/features/workspace/store.ts';
 import type { MobileJumpControls } from '@/features/workspace/types.ts';
+import type { TerminalBridge } from '@/hooks/useTerminalBridge.ts';
 
 interface ChatFeatureProps {
   clis: CliDescriptor[];
@@ -14,6 +15,7 @@ interface ChatFeatureProps {
   scrollToBottomRequestKey: number;
   socketConnected: boolean;
   store: WorkspaceStore;
+  terminal: TerminalBridge;
 }
 
 export function ChatFeature({
@@ -22,9 +24,10 @@ export function ChatFeature({
   paneVisible,
   scrollToBottomRequestKey,
   socketConnected,
-  store
+  store,
+  terminal
 }: ChatFeatureProps) {
-  const { activeConversation, activeProviderId, connected, visibleMessages } = useMemo(
+  const { activeCliId, activeConversation, activeProviderId, connected, visibleMessages } = useMemo(
     () => selectWorkspaceDerivedState(store, clis, socketConnected),
     [
       clis,
@@ -36,14 +39,18 @@ export function ChatFeature({
       store.workspaceState
     ]
   );
+  const canSendApprovalInput = Boolean(activeCliId && activeProviderId && connected);
 
   return (
     <ChatPane
       activeProviderId={activeProviderId}
+      canSendApprovalInput={canSendApprovalInput}
       conversationScrollKey={activeConversation ? `${activeProviderId ?? 'unknown'}:${activeConversation.conversationKey}` : null}
       connected={connected}
+      frameSnapshot={terminal.frameSnapshot}
       messages={visibleMessages}
       onMobileJumpControlsChange={onMobileJumpControlsChange}
+      onApprovalInput={terminal.sendInput}
       paneVisible={paneVisible}
       scrollToBottomRequestKey={scrollToBottomRequestKey}
       visible={store.mobilePane === 'chat'}

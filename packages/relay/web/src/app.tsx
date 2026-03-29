@@ -224,6 +224,7 @@ export function App() {
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
           socketConnected={socketConnected}
           store={store}
+          terminal={terminal}
         />
       }
       terminal={

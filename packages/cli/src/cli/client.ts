@@ -26,6 +26,7 @@ import { AttachmentManager } from '../attachments/manager.ts';
 import { createClaudeProviderRuntime } from '../providers/claude.ts';
 import { createCodexProviderRuntime, type CodexProviderRuntimeOptions } from '../providers/codex.ts';
 import type { ProviderRuntime } from '../providers/provider-runtime.ts';
+import { normalizeProcessShellEnv } from '../providers/shell-exec.ts';
 import { loadCliConfig } from './cli-config.ts';
 import type { PtyManagerOptions } from './pty-manager.ts';
 
@@ -636,6 +637,14 @@ process.once('SIGHUP', () => {
 });
 
 export async function startCliClient(): Promise<void> {
+  const originalShell = process.env.SHELL?.trim() || null;
+  const normalizedShell = normalizeProcessShellEnv(process.env);
+  if (normalizedShell !== originalShell) {
+    console.log('[pty-remote][cli] normalized SHELL', {
+      normalizedShell,
+      originalShell
+    });
+  }
   attachmentManager.start();
   connectSocketClient();
   console.log(`cli client connecting to ${SOCKET_URL} as ${CLI_ID}`);

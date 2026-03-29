@@ -20,6 +20,7 @@ import {
 } from './codex-jsonl.ts';
 import {
   appendRecentOutput,
+  createCodexLaunchConfig,
   getCodexPtyLifecycle,
   looksLikeDirectoryTrustPrompt,
   looksLikeInterruptedOutput,
@@ -1269,19 +1270,24 @@ export class CodexManager {
       handle.sessionFilePath = null;
     }
     const token = ++handle.ptyToken;
+    const launchEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      TERM: 'xterm-256color'
+    };
+    const launchConfig = createCodexLaunchConfig(launchEnv, handle.cwd, handle.sessionId);
     this.log('info', 'starting codex pty session', {
       ...this.handleContext(handle),
       cols: this.terminalSize.cols,
+      launchArgs: launchConfig.args,
+      launchCommand: launchConfig.command,
+      shell: launchEnv.SHELL ?? null,
       rows: this.terminalSize.rows,
       token
     });
     const started = startCodexPtySession({
       cols: this.terminalSize.cols,
       cwd: handle.cwd,
-      env: {
-        ...process.env,
-        TERM: 'xterm-256color'
-      },
+      env: launchEnv,
       resumeSessionId: handle.sessionId,
       rows: this.terminalSize.rows,
       onData: (chunk) => {
