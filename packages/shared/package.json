@@ -1,6 +1,6 @@
 {
   "name": "@lzdi/pty-remote-protocol",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": false,
   "type": "module",
   "repository": {

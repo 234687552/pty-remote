@@ -1,6 +1,6 @@
 {
   "name": "@lzdi/pty-remote-cli",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": false,
   "type": "module",
   "repository": {
@@ -22,7 +22,7 @@
     "threads": "node bin/pty-remote-cli.js threads"
   },
   "dependencies": {
-    "@lzdi/pty-remote-protocol": "0.1.10",
+    "@lzdi/pty-remote-protocol": "0.1.11",
     "@xterm/headless": "^6.0.0",
     "node-pty": "^1.1.0",
     "socket.io-client": "^4.8.3",
