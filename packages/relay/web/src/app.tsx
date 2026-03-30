@@ -1,14 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 
 import { AppShell } from '@/app-shell/AppShell.tsx';
+import { DesktopWorkspaceBrowser } from '@/components/DesktopWorkspaceBrowser.tsx';
 import { ChatFeature } from '@/features/chat/ChatFeature.tsx';
 import { ComposerFeature } from '@/features/composer/ComposerFeature.tsx';
 import { HeaderFeature } from '@/features/header/HeaderFeature.tsx';
 import { SidebarFeature } from '@/features/sidebar/SidebarFeature.tsx';
 import { TerminalFeature } from '@/features/terminal/TerminalFeature.tsx';
 import { useWorkspaceController } from '@/features/workspace/controller.ts';
-import { selectActiveCliId, selectActiveProviderId } from '@/features/workspace/selectors.ts';
+import {
+  selectActiveCliId,
+  selectActiveProviderId,
+  selectComposerViewModel,
+  selectHeaderSummary,
+  selectMobileProjectTitle,
+  selectWorkspaceDerivedState
+} from '@/features/workspace/selectors.ts';
 import { useWorkspaceStore } from '@/features/workspace/store.ts';
 import { useCliSocket } from '@/hooks/useCliSocket.ts';
 import { useTerminalBridge } from '@/hooks/useTerminalBridge.ts';
@@ -32,6 +40,7 @@ export function App() {
   const [desktopTerminalVisible, setDesktopTerminalVisible] = useState(() =>
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
   );
+  const [desktopWorkspaceBrowserOpen, setDesktopWorkspaceBrowserOpen] = useState(false);
   const activeCliId = selectActiveCliId(store.workspaceState);
   const activeProviderId = selectActiveProviderId(store.workspaceState);
   const activeProjectId = store.workspaceState.activeProjectId;
@@ -47,7 +56,7 @@ export function App() {
   const activeConversationKey = activeConversation?.conversationKey ?? null;
   const activeSessionId = activeConversation?.sessionId ?? null;
   const mobileJumpControls = mobileJumpControlsByPane[store.mobilePane];
-  const terminalVisible = desktopTerminalVisible || store.mobilePane === 'terminal';
+  const isDesktopLayout = desktopTerminalVisible;
   const socketRef = useRef<Socket | null>(null);
   const lastTerminalSyncKeyRef = useRef<string | null>(null);
 
@@ -73,6 +82,9 @@ export function App() {
     const mediaQuery = window.matchMedia('(min-width: 1024px)');
     const handleChange = (event: MediaQueryListEvent) => {
       setDesktopTerminalVisible(event.matches);
+      if (!event.matches) {
+        setDesktopWorkspaceBrowserOpen(false);
+      }
     };
 
     setDesktopTerminalVisible(mediaQuery.matches);
@@ -81,6 +93,10 @@ export function App() {
       mediaQuery.removeEventListener('change', handleChange);
     };
   }, []);
+
+  const desktopPrimaryWorkspaceVisible = isDesktopLayout && !desktopWorkspaceBrowserOpen;
+  const terminalVisible = desktopPrimaryWorkspaceVisible || (!isDesktopLayout && store.mobilePane === 'terminal');
+  const chatPaneVisible = desktopPrimaryWorkspaceVisible || (!isDesktopLayout && store.mobilePane === 'chat');
 
   const terminal = useTerminalBridge({
     activeCliId,
@@ -134,9 +150,32 @@ export function App() {
   });
   const activeCli = activeCliId ? clis.find((cli) => cli.cliId === activeCliId) ?? null : null;
   const activeRuntime = activeProviderId ? activeCli?.runtimes[activeProviderId] ?? null : null;
+  const workspaceDerivedState = useMemo(
+    () => selectWorkspaceDerivedState(store, clis, socketConnected),
+    [
+      clis,
+      socketConnected,
+      store.pendingAttachments,
+      store.projectConversationsByKey,
+      store.prompt,
+      store.sentAttachmentBindingsByConversationId,
+      store.snapshot,
+      store.workspaceState
+    ]
+  );
+  const headerSummary = useMemo(() => selectHeaderSummary(workspaceDerivedState), [workspaceDerivedState]);
+  const mobileProjectTitle = useMemo(() => selectMobileProjectTitle(workspaceDerivedState), [workspaceDerivedState]);
+  const composerViewModel = useMemo(
+    () => selectComposerViewModel(store, workspaceDerivedState, socketConnected),
+    [socketConnected, store.error, store.snapshot, workspaceDerivedState]
+  );
+  const desktopWorkspaceBrowserEnabled = Boolean(
+    workspaceDerivedState.activeProject?.cwd && workspaceDerivedState.activeCliId && workspaceDerivedState.connected
+  );
 
   const controller = useWorkspaceController({
     clis,
+    derivedState: workspaceDerivedState,
     requestMobilePaneScrollToBottom: () => {
       if (desktopTerminalVisible) {
         return;
@@ -152,6 +191,29 @@ export function App() {
     store,
     terminal
   });
+
+  useEffect(() => {
+    if (!desktopWorkspaceBrowserEnabled) {
+      setDesktopWorkspaceBrowserOpen(false);
+    }
+  }, [desktopWorkspaceBrowserEnabled]);
+
+  useEffect(() => {
+    if (!desktopWorkspaceBrowserOpen) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setDesktopWorkspaceBrowserOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [desktopWorkspaceBrowserOpen]);
 
   useEffect(() => {
     if (!terminalVisible || !socketConnected || !activeCliId || !activeProviderId || !activeConversation) {
@@ -210,19 +272,26 @@ export function App() {
       sidebar={<SidebarFeature clis={clis} controller={controller} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} store={store} />}
       renderHeader={() => (
         <HeaderFeature
-          clis={clis}
+          activeProviderId={workspaceDerivedState.activeProviderId}
+          desktopWorkspaceBrowserEnabled={desktopWorkspaceBrowserEnabled}
+          desktopWorkspaceBrowserOpen={desktopWorkspaceBrowserOpen}
+          onDesktopWorkspaceBrowserToggle={() => {
+            if (!desktopWorkspaceBrowserEnabled) {
+              return;
+            }
+            setDesktopWorkspaceBrowserOpen((current) => !current);
+          }}
           onSidebarToggle={handleDesktopSidebarToggle}
           sidebarCollapsed={store.workspaceState.sidebarCollapsed}
-          store={store}
+          summary={headerSummary}
         />
       )}
       chat={
         <ChatFeature
-          clis={clis}
+          derivedState={workspaceDerivedState}
           onMobileJumpControlsChange={handleChatMobileJumpControlsChange}
-          paneVisible={desktopTerminalVisible || store.mobilePane === 'chat'}
+          paneVisible={chatPaneVisible}
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
-          socketConnected={socketConnected}
           store={store}
           terminal={terminal}
         />
@@ -235,18 +304,31 @@ export function App() {
           terminal={terminal}
         />
       }
+      workspaceBrowser={
+        <DesktopWorkspaceBrowser
+          activeCliId={workspaceDerivedState.activeCliId}
+          activeProviderId={workspaceDerivedState.activeProviderId}
+          projectCwd={workspaceDerivedState.activeProject?.cwd ?? null}
+          projectLabel={workspaceDerivedState.activeProject?.label ?? '当前目录'}
+          sendCommand={controller.sendCommand}
+          setPrompt={store.setPrompt}
+          visible={desktopWorkspaceBrowserOpen}
+        />
+      }
+      workspaceBrowserOpen={desktopWorkspaceBrowserOpen}
       composer={
         <ComposerFeature
-          clis={clis}
           controller={controller}
+          derivedState={workspaceDerivedState}
           jumpControls={mobileJumpControls}
           mobilePane={store.mobilePane}
+          mobileProjectTitle={mobileProjectTitle}
           mobileSidebarOpen={mobileSidebarOpen}
           onMobilePaneChange={store.setMobilePane}
           onSidebarOpen={handleMobileSidebarOpen}
-          socketConnected={socketConnected}
           store={store}
           terminal={terminal}
+          viewModel={composerViewModel}
         />
       }
     />

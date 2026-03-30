@@ -27,7 +27,6 @@ interface WorkspaceState {
   projectsRefreshing: boolean;
   prompt: string;
   sentAttachmentBindingsByConversationId: Record<string, SentAttachmentBinding[]>;
-  sidebarToggleTop: number;
   snapshot: RuntimeSnapshot;
   workspaceState: PersistedWorkspaceState;
 }
@@ -42,14 +41,6 @@ type WorkspaceAction =
       projectId: string;
       providerId: ProviderId;
       updater: (conversations: ProjectConversationEntry[]) => ProjectConversationEntry[];
-    }
-  | {
-      type: 'sidebar-toggle/previewed';
-      value: SetStateAction<number>;
-    }
-  | {
-      type: 'sidebar-toggle/committed';
-      value: number;
     }
   | {
       type: 'error/set';
@@ -104,11 +95,9 @@ export interface WorkspaceStore {
   projectsRefreshing: boolean;
   prompt: string;
   sentAttachmentBindingsByConversationId: Record<string, SentAttachmentBinding[]>;
-  sidebarToggleTop: number;
   snapshot: RuntimeSnapshot;
   workspaceState: PersistedWorkspaceState;
   applyMessagesUpsert: (payload: MessagesUpsertPayload) => void;
-  commitSidebarToggleTop: (value: number) => void;
   dispatch: Dispatch<WorkspaceAction>;
   patchWorkspace: (updater: (current: PersistedWorkspaceState) => PersistedWorkspaceState) => void;
   resetRuntimeForCliChange: () => void;
@@ -128,7 +117,6 @@ export interface WorkspaceStore {
     conversationId: string,
     updater: (bindings: SentAttachmentBinding[]) => SentAttachmentBinding[]
   ) => void;
-  setSidebarToggleTop: Dispatch<SetStateAction<number>>;
   setSnapshot: Dispatch<SetStateAction<RuntimeSnapshot>>;
 }
 
@@ -182,7 +170,6 @@ function createInitialWorkspaceState(): WorkspaceState {
     projectsRefreshing: false,
     prompt: '',
     sentAttachmentBindingsByConversationId: {},
-    sidebarToggleTop: workspaceState.sidebarToggleTop,
     snapshot: createEmptySnapshot(),
     workspaceState
   };
@@ -216,22 +203,6 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
           ...state.projectConversationsByKey,
           [storageKey]: nextConversations
         }
-      };
-    }
-    case 'sidebar-toggle/previewed':
-      return { ...state, sidebarToggleTop: resolveStateUpdate(state.sidebarToggleTop, action.value) };
-    case 'sidebar-toggle/committed': {
-      if (state.sidebarToggleTop === action.value && state.workspaceState.sidebarToggleTop === action.value) {
-        return state;
-      }
-
-      return {
-        ...state,
-        sidebarToggleTop: action.value,
-        workspaceState:
-          state.workspaceState.sidebarToggleTop === action.value
-            ? state.workspaceState
-            : { ...state.workspaceState, sidebarToggleTop: action.value }
       };
     }
     case 'error/set':
@@ -317,10 +288,6 @@ export function useWorkspaceStore(): WorkspaceStore {
     dispatch({ type: 'conversations/patched', projectId, providerId, updater });
   }
 
-  function commitSidebarToggleTop(value: number): void {
-    dispatch({ type: 'sidebar-toggle/committed', value });
-  }
-
   const setError: Dispatch<SetStateAction<string>> = (value) => {
     dispatch({ type: 'error/set', value });
   };
@@ -352,10 +319,6 @@ export function useWorkspaceStore(): WorkspaceStore {
     dispatch({ type: 'sent-attachment-bindings/patched', conversationId, updater });
   }
 
-  const setSidebarToggleTop: Dispatch<SetStateAction<number>> = (value) => {
-    dispatch({ type: 'sidebar-toggle/previewed', value });
-  };
-
   const setSnapshot: Dispatch<SetStateAction<RuntimeSnapshot>> = (value) => {
     dispatch({ type: 'snapshot/set', value });
   };
@@ -381,11 +344,9 @@ export function useWorkspaceStore(): WorkspaceStore {
     projectsRefreshing: state.projectsRefreshing,
     prompt: state.prompt,
     sentAttachmentBindingsByConversationId: state.sentAttachmentBindingsByConversationId,
-    sidebarToggleTop: state.sidebarToggleTop,
     snapshot: state.snapshot,
     workspaceState: state.workspaceState,
     applyMessagesUpsert: applyRuntimeMessagesUpsert,
-    commitSidebarToggleTop,
     dispatch,
     patchWorkspace,
     resetRuntimeForCliChange,
@@ -398,7 +359,6 @@ export function useWorkspaceStore(): WorkspaceStore {
     setProjectsRefreshing,
     setPrompt,
     setSentAttachmentBindings,
-    setSidebarToggleTop,
     setSnapshot
   };
 }

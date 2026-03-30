@@ -233,9 +233,10 @@ export function selectFooterErrorText(store: WorkspaceStore): string {
   return next ?? '';
 }
 
-export function selectHeaderSummary(store: WorkspaceStore, clis: CliDescriptor[]): string[] {
-  const { activeCli, activeProject, activeConversation } = selectWorkspaceDerivedState(store, clis, true);
-
+export function selectHeaderSummary(
+  derivedState: Pick<WorkspaceDerivedState, 'activeCli' | 'activeProject' | 'activeConversation'>
+): string[] {
+  const { activeCli, activeProject, activeConversation } = derivedState;
   return [
     `CLI ${compactPreview(activeCli?.label ?? 'unselected', 28)}`,
     `目录 ${compactPreview(activeProject?.cwd ?? activeCli?.cwd ?? '-', 56)}`,
@@ -243,12 +244,16 @@ export function selectHeaderSummary(store: WorkspaceStore, clis: CliDescriptor[]
   ];
 }
 
-export function selectMobileProjectTitle(store: WorkspaceStore, clis: CliDescriptor[]): string {
-  const { activeProject } = selectWorkspaceDerivedState(store, clis, true);
+export function selectMobileProjectTitle(derivedState: Pick<WorkspaceDerivedState, 'activeProject'>): string {
+  const { activeProject } = derivedState;
   return compactPreview(activeProject?.label ?? 'pty-remote', 28);
 }
 
-export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescriptor[], socketConnected: boolean): ComposerViewModel {
+export function selectComposerViewModel(
+  store: Pick<WorkspaceStore, 'error' | 'snapshot'>,
+  derivedState: WorkspaceDerivedState,
+  socketConnected: boolean
+): ComposerViewModel {
   const {
     activeCli,
     activeCliId,
@@ -260,8 +265,7 @@ export function selectComposerViewModel(store: WorkspaceStore, clis: CliDescript
     canCompose,
     canSend,
     canStop
-  } =
-    selectWorkspaceDerivedState(store, clis, socketConnected);
+  } = derivedState;
   const hasCliCommandTimeout =
     isCliCommandTimeoutMessage(store.error) || isCliCommandTimeoutMessage(store.snapshot.lastError);
 

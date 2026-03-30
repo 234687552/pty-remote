@@ -280,7 +280,7 @@ async function runGitCommand(args: string[], cwd: string): Promise<string> {
       maxBuffer: GIT_COMMAND_MAX_BUFFER_BYTES,
       timeout: GIT_COMMAND_TIMEOUT_MS
     };
-    const { stdout } = await execFileAsync('git', args, options);
+    const { stdout } = await execFileAsync('git', ['-c', 'core.quotePath=false', ...args], options);
     return `${stdout ?? ''}`;
   } catch (error) {
     const commandError = error as NodeJS.ErrnoException & { stderr?: string; stdout?: string };

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import type React from 'react';
 
 import type {
@@ -17,7 +17,6 @@ import type { CliSocketController } from '@/hooks/useCliSocket.ts';
 import type { TerminalBridge } from '@/hooks/useTerminalBridge.ts';
 import { readConversationCache } from '@/lib/messages-cache.ts';
 import {
-  clampSidebarToggleTop,
   createConversationFromSession,
   createDraftConversation,
   getProjectProviderKey,
@@ -29,7 +28,7 @@ import {
   type ProjectEntry
 } from '@/lib/workspace.ts';
 
-import { selectWorkspaceDerivedState } from './selectors.ts';
+import type { WorkspaceDerivedState } from './selectors.ts';
 import type { WorkspaceStore } from './store.ts';
 import type { ComposerAttachment } from './types.ts';
 
@@ -71,6 +70,7 @@ export interface WorkspaceController {
 
 interface UseWorkspaceControllerParams {
   clis: CliDescriptor[];
+  derivedState: WorkspaceDerivedState;
   requestMobilePaneScrollToBottom?: () => void;
   sendCommand: CliSocketController['sendCommand'];
   socketConnected: boolean;
@@ -241,6 +241,7 @@ function getProjectPreferredConversation(
 
 export function useWorkspaceController({
   clis,
+  derivedState,
   requestMobilePaneScrollToBottom,
   sendCommand,
   socketConnected,
@@ -253,8 +254,6 @@ export function useWorkspaceController({
   const conversationActivationSeqRef = useRef(0);
   const pendingAttachmentsRef = useRef(store.pendingAttachments);
   const sentAttachmentBindingsRef = useRef(store.sentAttachmentBindingsByConversationId);
-  const sidebarToggleTopRef = useRef(store.sidebarToggleTop);
-
   const {
     activeCli,
     activeCliId,
@@ -263,21 +262,11 @@ export function useWorkspaceController({
     activeProviderId,
     activeConversation,
     visibleMessages
-  } = useMemo(
-    () => selectWorkspaceDerivedState(store, clis, socketConnected),
-    [
-      clis,
-      socketConnected,
-      store.projectConversationsByKey,
-      store.snapshot,
-      store.workspaceState
-    ]
-  );
+  } = derivedState;
   const activeCliConnected = Boolean(activeCli?.connected);
 
   pendingAttachmentsRef.current = store.pendingAttachments;
   sentAttachmentBindingsRef.current = store.sentAttachmentBindingsByConversationId;
-  sidebarToggleTopRef.current = store.sidebarToggleTop;
 
   useEffect(() => {
     return () => {
@@ -359,22 +348,6 @@ export function useWorkspaceController({
   useEffect(() => {
     terminal.scheduleResize();
   }, [store.workspaceState.sidebarCollapsed, terminal]);
-
-  useEffect(() => {
-    const handleResize = () => {
-      const nextTop = clampSidebarToggleTop(sidebarToggleTopRef.current, window.innerHeight);
-      store.setSidebarToggleTop(nextTop);
-      store.patchWorkspace((current) => {
-        const clampedTop = clampSidebarToggleTop(current.sidebarToggleTop, window.innerHeight);
-        return current.sidebarToggleTop === clampedTop ? current : { ...current, sidebarToggleTop: clampedTop };
-      });
-    };
-
-    window.addEventListener('resize', handleResize);
-    return () => {
-      window.removeEventListener('resize', handleResize);
-    };
-  }, []);
 
   useEffect(() => {
     if (clis.length === 0) {

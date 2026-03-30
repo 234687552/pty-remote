@@ -1,13 +1,12 @@
-import type { SetStateAction } from 'react';
 import { PROVIDER_LABELS, type ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 interface AppHeaderProps {
   activeProviderId: ProviderId | null;
+  desktopWorkspaceBrowserEnabled: boolean;
+  desktopWorkspaceBrowserOpen: boolean;
+  onDesktopWorkspaceBrowserToggle: () => void;
   onSidebarToggle: () => void;
-  onSidebarToggleTopChange: (value: SetStateAction<number>) => void;
-  onSidebarToggleTopCommit: (value: number) => void;
   sidebarCollapsed: boolean;
-  sidebarToggleTop: number;
   summary: string[];
 }
 
@@ -30,29 +29,59 @@ function SidebarToggleIcon({ collapsed }: { collapsed: boolean }) {
   );
 }
 
+function WorkspaceBrowserIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-[18px] w-[18px]">
+      <path d="M6.15 3.75h5.45L15 7.15v8.1a1 1 0 0 1-1 1H6.15a1 1 0 0 1-1-1V4.75a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.55" strokeLinejoin="round" />
+      <path d="M11.6 3.75V7.1H15" stroke="currentColor" strokeWidth="1.55" strokeLinejoin="round" />
+      <path d="M7.75 10.1h4.55M7.75 12.9h4.55" stroke="currentColor" strokeWidth="1.55" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function AppHeader({
   activeProviderId,
+  desktopWorkspaceBrowserEnabled,
+  desktopWorkspaceBrowserOpen,
+  onDesktopWorkspaceBrowserToggle,
   onSidebarToggle,
-  onSidebarToggleTopChange: _onSidebarToggleTopChange,
-  onSidebarToggleTopCommit: _onSidebarToggleTopCommit,
   sidebarCollapsed,
-  sidebarToggleTop: _sidebarToggleTop,
   summary
 }: AppHeaderProps) {
   return (
     <header className="sticky top-0 z-20 -mb-3 h-0 pointer-events-none lg:static lg:mb-0 lg:h-auto lg:pointer-events-auto">
       <div className="mx-0 hidden rounded-3xl border border-zinc-200 bg-white px-4 py-3 shadow-sm lg:block">
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={onSidebarToggle}
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-zinc-300 bg-white text-zinc-700 shadow-sm transition hover:bg-zinc-50"
-            aria-label={sidebarCollapsed ? '打开边栏' : '收起边栏'}
-            title={sidebarCollapsed ? '打开边栏' : '收起边栏'}
-            aria-pressed={!sidebarCollapsed}
-          >
-            <SidebarToggleIcon collapsed={sidebarCollapsed} />
-          </button>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={onSidebarToggle}
+              className="flex h-10 w-10 items-center justify-center rounded-2xl border border-zinc-300 bg-white text-zinc-700 shadow-sm transition hover:bg-zinc-50"
+              aria-label={sidebarCollapsed ? '打开边栏' : '收起边栏'}
+              title={sidebarCollapsed ? '打开边栏' : '收起边栏'}
+              aria-pressed={!sidebarCollapsed}
+            >
+              <SidebarToggleIcon collapsed={sidebarCollapsed} />
+            </button>
+
+            <button
+              type="button"
+              onClick={onDesktopWorkspaceBrowserToggle}
+              disabled={!desktopWorkspaceBrowserEnabled}
+              className={[
+                'flex h-10 w-10 items-center justify-center rounded-2xl border shadow-sm transition',
+                desktopWorkspaceBrowserOpen
+                  ? 'border-sky-200 bg-sky-50 text-sky-700'
+                  : 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50',
+                desktopWorkspaceBrowserEnabled ? '' : 'cursor-not-allowed opacity-45 shadow-none'
+              ].join(' ')}
+              aria-label={desktopWorkspaceBrowserOpen ? '关闭 Git Diff 和目录浏览' : '打开 Git Diff 和目录浏览'}
+              title={desktopWorkspaceBrowserOpen ? '关闭 Git Diff 和目录浏览' : '打开 Git Diff 和目录浏览'}
+              aria-pressed={desktopWorkspaceBrowserOpen}
+            >
+              <WorkspaceBrowserIcon />
+            </button>
+          </div>
 
           <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm text-zinc-600 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
             <div className="flex items-center gap-3">

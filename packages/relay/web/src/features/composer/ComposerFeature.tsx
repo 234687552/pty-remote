@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import type { CliDescriptor } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import { BUILTIN_SLASH_COMMANDS, PROVIDER_LABELS } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import type { ListSlashCommandsResultPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
 
@@ -7,44 +6,43 @@ import { Composer } from '@/components/Composer.tsx';
 import { MobileFileBrowserSheet } from '@/components/MobileFileBrowserSheet.tsx';
 import { MobileFloatingControls } from '@/components/MobileFloatingControls.tsx';
 import type { WorkspaceController } from '@/features/workspace/controller.ts';
-import { selectComposerViewModel, selectMobileProjectTitle, selectWorkspaceDerivedState } from '@/features/workspace/selectors.ts';
+import type { ComposerViewModel, WorkspaceDerivedState } from '@/features/workspace/selectors.ts';
 import type { WorkspaceStore } from '@/features/workspace/store.ts';
 import type { MobileJumpControls, WorkspacePane } from '@/features/workspace/types.ts';
 import type { TerminalBridge } from '@/hooks/useTerminalBridge.ts';
 
 interface ComposerFeatureProps {
-  clis: CliDescriptor[];
   controller: WorkspaceController;
+  derivedState: WorkspaceDerivedState;
   jumpControls: MobileJumpControls | null;
   mobilePane: WorkspacePane;
+  mobileProjectTitle: string;
   mobileSidebarOpen: boolean;
   onMobilePaneChange: (pane: WorkspacePane) => void;
   onSidebarOpen: () => void;
-  socketConnected: boolean;
   store: WorkspaceStore;
   terminal: TerminalBridge;
+  viewModel: ComposerViewModel;
 }
 
 export function ComposerFeature({
-  clis,
   controller,
+  derivedState,
   jumpControls,
   mobilePane,
+  mobileProjectTitle,
   mobileSidebarOpen,
   onMobilePaneChange,
   onSidebarOpen,
-  socketConnected,
   store,
-  terminal
+  terminal,
+  viewModel
 }: ComposerFeatureProps) {
-  const derivedState = selectWorkspaceDerivedState(store, clis, socketConnected);
-  const viewModel = selectComposerViewModel(store, clis, socketConnected);
   const [slashCommands, setSlashCommands] = useState<string[]>([]);
   const [mobileFileBrowserOpen, setMobileFileBrowserOpen] = useState(false);
   const mobileAgentLabel =
     store.workspaceState.activeProviderId ? PROVIDER_LABELS[store.workspaceState.activeProviderId] : 'agent';
-  const canSendTerminalInput = Boolean(viewModel.activeCliId && viewModel.activeProviderId && socketConnected);
-  const mobileProjectTitle = selectMobileProjectTitle(store, clis);
+  const canSendTerminalInput = Boolean(viewModel.activeCliId && viewModel.activeProviderId && derivedState.connected);
   const canOpenFiles = Boolean(derivedState.activeProject?.cwd && derivedState.activeCliId && derivedState.connected);
 
   useEffect(() => {
@@ -63,7 +61,7 @@ export function ComposerFeature({
     const activeProviderId = viewModel.activeProviderId;
     const fallbackCommands = activeProviderId ? BUILTIN_SLASH_COMMANDS[activeProviderId] ?? [] : [];
 
-    if (!viewModel.activeCliId || !activeProviderId || !socketConnected) {
+    if (!viewModel.activeCliId || !activeProviderId || !derivedState.connected) {
       setSlashCommands(fallbackCommands);
       return;
     }
@@ -89,7 +87,7 @@ export function ComposerFeature({
     return () => {
       cancelled = true;
     };
-  }, [controller.sendCommand, socketConnected, viewModel.activeCliId, viewModel.activeProviderId]);
+  }, [controller.sendCommand, derivedState.connected, viewModel.activeCliId, viewModel.activeProviderId]);
 
   return (
     <>

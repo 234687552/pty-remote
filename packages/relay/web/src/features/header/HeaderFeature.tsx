@@ -1,31 +1,35 @@
-import type { CliDescriptor } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import type { ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import { AppHeader } from '@/components/AppHeader.tsx';
-import { selectHeaderSummary } from '@/features/workspace/selectors.ts';
-import type { WorkspaceStore } from '@/features/workspace/store.ts';
 
 interface HeaderFeatureProps {
-  clis: CliDescriptor[];
+  activeProviderId: ProviderId | null;
+  desktopWorkspaceBrowserEnabled: boolean;
+  desktopWorkspaceBrowserOpen: boolean;
+  onDesktopWorkspaceBrowserToggle: () => void;
   onSidebarToggle: () => void;
   sidebarCollapsed: boolean;
-  store: WorkspaceStore;
+  summary: string[];
 }
 
 export function HeaderFeature({
-  clis,
+  activeProviderId,
+  desktopWorkspaceBrowserEnabled,
+  desktopWorkspaceBrowserOpen,
+  onDesktopWorkspaceBrowserToggle,
   onSidebarToggle,
   sidebarCollapsed,
-  store
+  summary
 }: HeaderFeatureProps) {
   return (
     <AppHeader
-      activeProviderId={store.workspaceState.activeProviderId}
+      activeProviderId={activeProviderId}
+      desktopWorkspaceBrowserEnabled={desktopWorkspaceBrowserEnabled}
+      desktopWorkspaceBrowserOpen={desktopWorkspaceBrowserOpen}
+      onDesktopWorkspaceBrowserToggle={onDesktopWorkspaceBrowserToggle}
       onSidebarToggle={onSidebarToggle}
-      onSidebarToggleTopChange={store.setSidebarToggleTop}
-      onSidebarToggleTopCommit={store.commitSidebarToggleTop}
       sidebarCollapsed={sidebarCollapsed}
-      sidebarToggleTop={store.sidebarToggleTop}
-      summary={selectHeaderSummary(store, clis)}
+      summary={summary}
     />
   );
 }

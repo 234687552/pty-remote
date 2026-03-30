@@ -1,50 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
-import type {
-  DirectoryEntrySummary,
-  GitDiffFileResultPayload,
-  GitStatusFileSummary,
-  ListDirectoryResultPayload,
-  ListGitStatusFilesResultPayload,
-  ReadProjectFileResultPayload
-} from '@lzdi/pty-remote-protocol/protocol.ts';
+import type { DirectoryEntrySummary, GitStatusFileSummary } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ProviderId } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
+import { DiffDisplay } from '@/features/file-browser/DiffDisplay.tsx';
+import { useFileBrowserData, useFilePreview } from '@/features/file-browser/hooks.ts';
+import {
+  appendPromptReference,
+  describeGitFilePath,
+  formatBytes,
+  formatRootLabel,
+  getSelectedAbsolutePath,
+  getSelectedFileKey,
+  getSelectedFileName,
+  getSelectedRelativePath,
+  statusBadge
+} from '@/features/file-browser/model.ts';
+import type { DirectoryLoadState, FileBrowserTab, ProjectBrowserSelectedFile as SelectedSheetFile } from '@/features/file-browser/types.ts';
 import type { CliSocketController } from '@/hooks/useCliSocket.ts';
-
-type FileBrowserTab = 'changes' | 'directories';
-type FileDetailTab = 'diff' | 'file';
-
-interface DirectoryLoadState {
-  entries: DirectoryEntrySummary[];
-  error: string | null;
-  loaded: boolean;
-  loading: boolean;
-}
-
-interface GitLoadState {
-  error: string | null;
-  loaded: boolean;
-  loading: boolean;
-  payload: ListGitStatusFilesResultPayload | null;
-}
-
-interface FileContentState {
-  error: string | null;
-  loading: boolean;
-  payload: ReadProjectFileResultPayload | null;
-}
-
-interface FileDiffState {
-  error: string | null;
-  loading: boolean;
-  payload: GitDiffFileResultPayload | null;
-}
-
-type SelectedSheetFile =
-  | { source: 'changes'; file: GitStatusFileSummary }
-  | { source: 'directories'; file: DirectoryEntrySummary };
 
 interface MobileFileBrowserSheetProps {
   activeCliId: string | null;
@@ -200,87 +174,6 @@ function ActionPillButton({
   );
 }
 
-function statusBadge(status: GitStatusFileSummary['status']): { label: string; toneClass: string } {
-  if (status === 'added') {
-    return { label: 'A', toneClass: 'border-emerald-200 bg-emerald-50 text-emerald-700' };
-  }
-  if (status === 'deleted') {
-    return { label: 'D', toneClass: 'border-red-200 bg-red-50 text-red-700' };
-  }
-  if (status === 'renamed') {
-    return { label: 'R', toneClass: 'border-sky-200 bg-sky-50 text-sky-700' };
-  }
-  if (status === 'untracked') {
-    return { label: '?', toneClass: 'border-amber-200 bg-amber-50 text-amber-700' };
-  }
-  if (status === 'conflicted') {
-    return { label: 'U', toneClass: 'border-red-200 bg-red-50 text-red-700' };
-  }
-  return { label: 'M', toneClass: 'border-zinc-200 bg-zinc-100 text-zinc-700' };
-}
-
-function appendPromptReference(currentPrompt: string, absolutePath: string): string {
-  const reference = `@${absolutePath}`;
-  const existingLines = currentPrompt
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-
-  if (existingLines.includes(reference)) {
-    return currentPrompt;
-  }
-
-  const trimmedEnd = currentPrompt.replace(/\s+$/g, '');
-  return trimmedEnd ? `${trimmedEnd}\n${reference}` : reference;
-}
-
-function describeGitFilePath(file: GitStatusFileSummary): string {
-  return file.filePath || 'project root';
-}
-
-function formatRootLabel(projectCwd: string | null, projectLabel: string): string {
-  if (projectLabel.trim()) {
-    return projectLabel.trim();
-  }
-  if (!projectCwd) {
-    return '当前目录';
-  }
-  const parts = projectCwd.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] ?? projectCwd;
-}
-
-function formatBytes(value: number): string {
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function normalizeGitErrorMessage(message: string): string {
-  const normalized = message.trim().toLowerCase();
-  if (normalized.includes('not a git repository') || normalized.includes('不是git仓库') || normalized.includes('不是 git 仓库')) {
-    return '不是 git 仓库';
-  }
-  return message;
-}
-
-function decodeBase64Utf8(value: string | undefined): string {
-  if (!value) {
-    return '';
-  }
-
-  try {
-    const binary = window.atob(value);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
-  } catch {
-    return '';
-  }
-}
-
 function useLongPressAction(onLongPress: () => void, delayMs = 450) {
   const timerRef = useRef<number | null>(null);
   const longPressedRef = useRef(false);
@@ -333,28 +226,6 @@ function useLongPressAction(onLongPress: () => void, delayMs = 450) {
   useEffect(() => clearTimer, [clearTimer]);
 
   return { bind, consumeLongPress };
-}
-
-function getSelectedFileKey(selectedFile: SelectedSheetFile | null): string {
-  if (!selectedFile) {
-    return 'none';
-  }
-  if (selectedFile.source === 'changes') {
-    return `${selectedFile.source}:${selectedFile.file.path}:${selectedFile.file.staged ? 'staged' : 'unstaged'}`;
-  }
-  return `${selectedFile.source}:${selectedFile.file.path}`;
-}
-
-function getSelectedFileName(selectedFile: SelectedSheetFile): string {
-  return selectedFile.source === 'changes' ? selectedFile.file.fileName : selectedFile.file.name;
-}
-
-function getSelectedAbsolutePath(selectedFile: SelectedSheetFile): string {
-  return selectedFile.file.absolutePath;
-}
-
-function getSelectedRelativePath(selectedFile: SelectedSheetFile): string {
-  return selectedFile.file.path;
 }
 
 function DirectorySkeleton({ depth = 0, rows = 4 }: { depth?: number; rows?: number }) {
@@ -678,36 +549,6 @@ function FileBrowserTabSwitcher({
   );
 }
 
-function DiffDisplay({ diffContent }: { diffContent: string }) {
-  const lines = diffContent.split('\n');
-
-  return (
-    <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white">
-      {lines.map((line, index) => {
-        const isAdd = line.startsWith('+') && !line.startsWith('+++');
-        const isRemove = line.startsWith('-') && !line.startsWith('---');
-        const isHunk = line.startsWith('@@');
-        const isHeader = line.startsWith('+++') || line.startsWith('---') || line.startsWith('diff --git') || line.startsWith('index ');
-        const className = [
-          'whitespace-pre-wrap px-3 py-0.5 text-[11px] font-mono leading-5',
-          isAdd ? 'bg-emerald-50 text-emerald-800' : '',
-          isRemove ? 'bg-red-50 text-red-800' : '',
-          isHunk ? 'bg-zinc-100 text-zinc-600 font-semibold' : '',
-          isHeader ? 'bg-zinc-50 text-zinc-500 font-semibold' : ''
-        ].join(' ');
-        const style =
-          isAdd ? { borderLeft: '2px solid rgb(16 185 129)' } : isRemove ? { borderLeft: '2px solid rgb(239 68 68)' } : undefined;
-
-        return (
-          <div key={`${index}:${line}`} className={className} style={style}>
-            {line || ' '}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 function FileDetailView({
   activeCliId,
   activeProviderId,
@@ -727,142 +568,29 @@ function FileDetailView({
   selectedFile: SelectedSheetFile;
   sendCommand: CliSocketController['sendCommand'];
 }) {
-  const selectedKey = getSelectedFileKey(selectedFile);
-  const fileName = getSelectedFileName(selectedFile);
-  const relativePath = getSelectedRelativePath(selectedFile);
-  const absolutePath = getSelectedAbsolutePath(selectedFile);
-  const [activeDetailTab, setActiveDetailTab] = useState<FileDetailTab>(selectedFile.source === 'changes' ? 'diff' : 'file');
-  const [contentState, setContentState] = useState<FileContentState>({
-    error: null,
-    loading: false,
-    payload: null
+  const {
+    activeDetailTab,
+    setActiveDetailTab,
+    contentState,
+    diffState,
+    decodedContent,
+    diffContent,
+    fileMeta,
+    badge,
+    showDiffTabs,
+    sourceLabel,
+    fileName,
+    relativePath,
+    absolutePath
+  } = useFilePreview({
+    activeCliId,
+    activeProviderId,
+    enabled: true,
+    projectCwd,
+    refreshToken,
+    selectedFile,
+    sendCommand
   });
-  const [diffState, setDiffState] = useState<FileDiffState>({
-    error: null,
-    loading: false,
-    payload: null
-  });
-
-  useEffect(() => {
-    setActiveDetailTab(selectedFile.source === 'changes' ? 'diff' : 'file');
-    setContentState({
-      error: null,
-      loading: false,
-      payload: null
-    });
-    setDiffState({
-      error: null,
-      loading: false,
-      payload: null
-    });
-  }, [selectedKey, selectedFile.source]);
-
-  useEffect(() => {
-    if (!projectCwd || !activeCliId) {
-      return;
-    }
-
-    let cancelled = false;
-    setContentState({
-      error: null,
-      loading: true,
-      payload: null
-    });
-
-    void sendCommand('read-project-file', { cwd: projectCwd, path: relativePath }, activeCliId, activeProviderId)
-      .then((result) => {
-        if (cancelled) {
-          return;
-        }
-        setContentState({
-          error: null,
-          loading: false,
-          payload: (result.payload as ReadProjectFileResultPayload | undefined) ?? null
-        });
-      })
-      .catch((error) => {
-        if (cancelled) {
-          return;
-        }
-        setContentState({
-          error: error instanceof Error ? error.message : '文件读取失败',
-          loading: false,
-          payload: null
-        });
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeCliId, activeProviderId, projectCwd, refreshToken, relativePath, selectedKey, sendCommand]);
-
-  useEffect(() => {
-    if (selectedFile.source !== 'changes' || !projectCwd || !activeCliId) {
-      setDiffState({
-        error: null,
-        loading: false,
-        payload: null
-      });
-      return;
-    }
-
-    let cancelled = false;
-    setDiffState({
-      error: null,
-      loading: true,
-      payload: null
-    });
-
-    void sendCommand(
-      'git-diff-file',
-      { cwd: projectCwd, path: relativePath, staged: selectedFile.file.staged },
-      activeCliId,
-      activeProviderId
-    )
-      .then((result) => {
-        if (cancelled) {
-          return;
-        }
-        setDiffState({
-          error: null,
-          loading: false,
-          payload: (result.payload as GitDiffFileResultPayload | undefined) ?? null
-        });
-      })
-      .catch((error) => {
-        if (cancelled) {
-          return;
-        }
-        setDiffState({
-          error: normalizeGitErrorMessage(error instanceof Error ? error.message : 'Diff 读取失败'),
-          loading: false,
-          payload: null
-        });
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeCliId, activeProviderId, projectCwd, refreshToken, relativePath, selectedFile, sendCommand]);
-
-  const decodedContent = useMemo(() => decodeBase64Utf8(contentState.payload?.contentBase64), [contentState.payload?.contentBase64]);
-  const diffContent = diffState.payload?.diff?.trim() ? diffState.payload.diff : '';
-  const hasDiff = diffContent.length > 0;
-  const showDiffTabs = selectedFile.source === 'changes' && hasDiff;
-  const fileMeta = contentState.payload;
-  const badge = selectedFile.source === 'changes' ? statusBadge(selectedFile.file.status) : null;
-  const sourceLabel =
-    selectedFile.source === 'changes'
-      ? selectedFile.file.staged
-        ? 'Staged 变更文件'
-        : 'Unstaged 变更文件'
-      : '目录文件';
-
-  useEffect(() => {
-    if (selectedFile.source === 'changes' && activeDetailTab === 'diff' && !diffState.loading && !hasDiff) {
-      setActiveDetailTab('file');
-    }
-  }, [activeDetailTab, diffState.loading, hasDiff, selectedFile.source]);
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-[calc(env(safe-area-inset-bottom)+1rem)]">
@@ -990,14 +718,13 @@ export function MobileFileBrowserSheet({
   setPrompt
 }: MobileFileBrowserSheetProps) {
   const [activeTab, setActiveTab] = useState<FileBrowserTab>('changes');
-  const [gitState, setGitState] = useState<GitLoadState>({
-    error: null,
-    loaded: false,
-    loading: false,
-    payload: null
-  });
-  const [directoryStateByPath, setDirectoryStateByPath] = useState<Record<string, DirectoryLoadState>>({});
-  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(() => new Set(['']));
+  const { gitState, directoryStateByPath, expandedPaths, loadGitStatus, loadDirectory, refreshDirectories, toggleDirectory } =
+    useFileBrowserData({
+      activeCliId,
+      activeProviderId,
+      projectCwd,
+      sendCommand
+    });
   const [recentlyInsertedPath, setRecentlyInsertedPath] = useState<string | null>(null);
   const [referencePopupMessage, setReferencePopupMessage] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<SelectedSheetFile | null>(null);
@@ -1005,14 +732,6 @@ export function MobileFileBrowserSheet({
   const rootLabel = useMemo(() => formatRootLabel(projectCwd, projectLabel), [projectCwd, projectLabel]);
 
   useEffect(() => {
-    setGitState({
-      error: null,
-      loaded: false,
-      loading: false,
-      payload: null
-    });
-    setDirectoryStateByPath({});
-    setExpandedPaths(new Set(['']));
     setRecentlyInsertedPath(null);
     setReferencePopupMessage(null);
     setSelectedFile(null);
@@ -1029,92 +748,6 @@ export function MobileFileBrowserSheet({
     }
     setSelectedFile(null);
   }, [open]);
-
-  const loadGitStatus = useCallback(
-    async (force = false) => {
-      if (!projectCwd || !activeCliId) {
-        return;
-      }
-      if (gitState.loading) {
-        return;
-      }
-      if (!force && gitState.loaded) {
-        return;
-      }
-
-      setGitState((current) => ({
-        ...current,
-        error: null,
-        loading: true
-      }));
-
-      try {
-        const result = await sendCommand('list-git-status-files', { cwd: projectCwd }, activeCliId, activeProviderId);
-        setGitState({
-          error: null,
-          loaded: true,
-          loading: false,
-          payload: (result.payload as ListGitStatusFilesResultPayload | undefined) ?? null
-        });
-      } catch (error) {
-        setGitState({
-          error: normalizeGitErrorMessage(error instanceof Error ? error.message : 'Git 状态读取失败'),
-          loaded: true,
-          loading: false,
-          payload: null
-        });
-      }
-    },
-    [activeCliId, activeProviderId, gitState.loaded, gitState.loading, projectCwd, sendCommand]
-  );
-
-  const loadDirectory = useCallback(
-    async (directoryPath: string, force = false) => {
-      if (!projectCwd || !activeCliId) {
-        return;
-      }
-
-      const currentState = directoryStateByPath[directoryPath];
-      if (!force && (currentState?.loading || currentState?.loaded)) {
-        return;
-      }
-
-      setDirectoryStateByPath((current) => ({
-        ...current,
-        [directoryPath]: {
-          entries: current[directoryPath]?.entries ?? [],
-          error: null,
-          loaded: current[directoryPath]?.loaded ?? false,
-          loading: true
-        }
-      }));
-
-      try {
-        const result = await sendCommand('list-directory', { cwd: projectCwd, path: directoryPath }, activeCliId, activeProviderId);
-        const payload = (result.payload as ListDirectoryResultPayload | undefined) ?? null;
-        setDirectoryStateByPath((current) => ({
-          ...current,
-          [directoryPath]: {
-            entries: payload?.entries ?? [],
-            error: null,
-            loaded: true,
-            loading: false
-          }
-        }));
-      } catch (error) {
-        setDirectoryStateByPath((current) => ({
-          ...current,
-          [directoryPath]: {
-            entries: current[directoryPath]?.entries ?? [],
-            error: error instanceof Error ? error.message : '目录读取失败',
-            loaded: true,
-            loading: false
-          }
-        }));
-      }
-    },
-    [activeCliId, activeProviderId, directoryStateByPath, projectCwd, sendCommand]
-  );
 
   useEffect(() => {
     if (!open) {
@@ -1170,23 +803,6 @@ export function MobileFileBrowserSheet({
     };
   }, [referencePopupMessage]);
 
-  const handleToggleDirectory = useCallback(
-    (directoryPath: string) => {
-      setExpandedPaths((current) => {
-        const next = new Set(current);
-        if (next.has(directoryPath)) {
-          next.delete(directoryPath);
-          return next;
-        }
-        next.add(directoryPath);
-        return next;
-      });
-
-      void loadDirectory(directoryPath);
-    },
-    [loadDirectory]
-  );
-
   const handleInsertFileReference = useCallback(
     (absolutePath: string) => {
       setPrompt((current) => appendPromptReference(current, absolutePath));
@@ -1214,12 +830,8 @@ export function MobileFileBrowserSheet({
       return;
     }
 
-    const expanded = Array.from(expandedPaths);
-    setDirectoryStateByPath({});
-    for (const directoryPath of expanded.length > 0 ? expanded : ['']) {
-      void loadDirectory(directoryPath, true);
-    }
-  }, [activeTab, expandedPaths, loadDirectory, loadGitStatus, selectedFile]);
+    refreshDirectories();
+  }, [activeTab, loadGitStatus, refreshDirectories, selectedFile]);
 
   if (!open) {
     return null;
@@ -1332,7 +944,7 @@ export function MobileFileBrowserSheet({
                       setSelectedFile({ source: 'directories', file: entry });
                     }}
                     onPathLongPress={handleLongPressInsertPath}
-                    onToggleDirectory={handleToggleDirectory}
+                    onToggleDirectory={toggleDirectory}
                     path=""
                   />
                 </div>

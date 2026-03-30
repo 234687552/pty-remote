@@ -919,12 +919,8 @@ function getFirstToolUseBlock(message: ChatMessage): ToolUseChatMessageBlock | n
   return message.blocks.find((block): block is ToolUseChatMessageBlock => block.type === 'tool_use') ?? null;
 }
 
-function truncateActivityTitle(value: string, maxChars = 96): string {
-  const normalized = value.replace(/\s+/g, ' ').trim();
-  if (normalized.length <= maxChars) {
-    return normalized;
-  }
-  return `${normalized.slice(0, maxChars - 3)}...`;
+function normalizeActivityTitle(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
 }
 
 function terminalFrameLineToText(line: TerminalFrameLine): string {
@@ -1487,7 +1483,7 @@ function createActivityGroupStatus(entries: ChatMessage[]): MessageStatus {
 }
 
 function createActivityGroupTitle(anchorMessage: ChatMessage | undefined, entries: ChatMessage[]): string {
-  const anchorText = anchorMessage ? truncateActivityTitle(getMessagePlainText(anchorMessage)) : '';
+  const anchorText = anchorMessage ? normalizeActivityTitle(getMessagePlainText(anchorMessage)) : '';
   if (anchorText) {
     return anchorText;
   }
@@ -1496,7 +1492,7 @@ function createActivityGroupTitle(anchorMessage: ChatMessage | undefined, entrie
   if (firstToolUseBlock) {
     const compactTitle = getCompactToolTitle(firstToolUseBlock.toolName, firstToolUseBlock.input);
     const compactPreview = getCompactToolPreview(firstToolUseBlock.toolName, firstToolUseBlock.input, 88);
-    return truncateActivityTitle(`${compactTitle}: ${compactPreview}`);
+    return normalizeActivityTitle(`${compactTitle}: ${compactPreview}`);
   }
 
   return 'Activity';
@@ -1702,14 +1698,20 @@ function ActivityGroupCard({
       ),
     [group.entries, mergedToolState.toolCallUiStateIndex, toolCallIndex]
   );
-  const [expanded, setExpanded] = useState(hasPendingApproval);
+  const shouldDefaultExpand = hasPendingApproval || group.status === 'streaming';
+  const [expanded, setExpanded] = useState(shouldDefaultExpand);
   const countLabel = `${group.entries.length}项`;
 
   useEffect(() => {
-    if (hasPendingApproval) {
+    if (shouldDefaultExpand) {
       setExpanded(true);
+      return;
     }
-  }, [hasPendingApproval]);
+
+    if (group.status === 'complete') {
+      setExpanded(false);
+    }
+  }, [group.status, shouldDefaultExpand]);
 
   return (
     <section className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
@@ -1726,28 +1728,26 @@ function ActivityGroupCard({
           }
         }}
       >
-        <div className={`flex gap-2.5 ${expanded ? 'items-start' : 'items-center'}`}>
-          <div className={`flex h-5 w-5 shrink-0 items-center justify-center ${expanded ? 'pt-0.5' : ''}`}>
+        <div className="flex items-start gap-2.5">
+          <div className="flex h-5 w-5 shrink-0 items-center justify-center pt-0.5">
             <ToolStatusIcon status={group.status} />
           </div>
-          <div
-            className={`min-w-0 flex-1 text-sm font-medium text-zinc-900 ${expanded ? 'whitespace-normal break-words leading-5' : 'truncate'}`}
-          >
+          <div className="min-w-0 flex-1 whitespace-normal break-words text-sm font-medium leading-5 text-zinc-900">
             {group.title}
           </div>
           <span
-            className={`inline-flex shrink-0 items-center rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium tabular-nums text-zinc-500 ${expanded ? 'mt-0.5' : ''}`}
+            className="mt-0.5 inline-flex shrink-0 items-center rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium tabular-nums text-zinc-500"
           >
             {countLabel}
           </span>
           {hasPendingApproval ? (
             <span
-              className={`inline-flex shrink-0 items-center rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-medium tabular-nums text-amber-900 ${expanded ? 'mt-0.5' : ''}`}
+              className="mt-0.5 inline-flex shrink-0 items-center rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-medium tabular-nums text-amber-900"
             >
               审批中
             </span>
           ) : null}
-          <span className={`shrink-0 text-zinc-500 ${expanded ? 'mt-0.5' : ''}`}>
+          <span className="mt-0.5 shrink-0 text-zinc-500">
             {hasPendingApproval ? (
               <svg viewBox="0 0 16 16" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7">
                 <path d="M4 8h8" strokeLinecap="round" />

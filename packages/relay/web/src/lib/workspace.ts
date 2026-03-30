@@ -3,8 +3,6 @@ import { PROVIDER_LABELS, type ChatMessage, type ProviderId, type RuntimeSnapsho
 
 export const PROJECTS_STORAGE_KEY = 'pty-remote.projects.v2';
 export const PROJECT_CONVERSATIONS_STORAGE_KEY = 'pty-remote.project-conversations.v2';
-export const SIDEBAR_TOGGLE_MARGIN = 16;
-export const SIDEBAR_TOGGLE_SIZE = 40;
 
 export interface ProjectConversationEntry {
   id: string;
@@ -32,7 +30,6 @@ export interface PersistedWorkspaceState {
   activeConversationId: string | null;
   projects: ProjectEntry[];
   sidebarCollapsed: boolean;
-  sidebarToggleTop: number;
 }
 
 export function getProjectProviderKey(projectId: string, providerId: ProviderId): string {
@@ -44,12 +41,6 @@ export function getThreadLabel(cwd: string): string {
   return segments[segments.length - 1] || cwd;
 }
 
-export function clampSidebarToggleTop(value: number, viewportHeight: number): number {
-  const minTop = SIDEBAR_TOGGLE_MARGIN;
-  const maxTop = Math.max(minTop, viewportHeight - SIDEBAR_TOGGLE_SIZE - SIDEBAR_TOGGLE_MARGIN);
-  return Math.min(maxTop, Math.max(minTop, Math.round(value)));
-}
-
 export function createEmptyWorkspaceState(): PersistedWorkspaceState {
   return {
     activeCliId: null,
@@ -57,8 +48,7 @@ export function createEmptyWorkspaceState(): PersistedWorkspaceState {
     activeProviderId: null,
     activeConversationId: null,
     projects: [],
-    sidebarCollapsed: false,
-    sidebarToggleTop: SIDEBAR_TOGGLE_MARGIN
+    sidebarCollapsed: false
   };
 }
 
@@ -84,11 +74,7 @@ export function loadWorkspaceState(): PersistedWorkspaceState {
           activeProviderId: parsed.activeProviderId ?? null,
           activeConversationId: parsed.activeConversationId ?? null,
           projects: normalizeProjects(parsed.projects),
-          sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
-          sidebarToggleTop: clampSidebarToggleTop(
-            typeof parsed.sidebarToggleTop === 'number' ? parsed.sidebarToggleTop : SIDEBAR_TOGGLE_MARGIN,
-            window.innerHeight
-          )
+          sidebarCollapsed: Boolean(parsed.sidebarCollapsed)
         };
       }
     }
