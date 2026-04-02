@@ -113,6 +113,7 @@ interface ChatPaneProps {
 
 const QUESTION_JUMP_LONG_PRESS_DELAY_MS = 420;
 const SCROLL_BOTTOM_THRESHOLD_PX = 12;
+const KNOWN_TERMINAL_APPROVAL_OPTION_LABELS = ['allow', 'allow for this session', 'always allow', 'cancel'] as const;
 
 let mermaidRenderSequence = 0;
 let mermaidLoader: Promise<MermaidApi> | null = null;
@@ -986,6 +987,91 @@ function parseTerminalApprovalOptions(lines: string[]): ApprovalOption[] {
     .map(([, option]) => option);
 }
 
+function normalizeApprovalOptionLabel(label: string): string {
+  return normalizeTerminalText(label).toLowerCase();
+}
+
+function hasKnownTerminalApprovalOptions(options: ApprovalOption[]): boolean {
+  if (options.length === 0) {
+    return false;
+  }
+
+  const labels = new Set(options.map((option) => normalizeApprovalOptionLabel(option.label)));
+  return KNOWN_TERMINAL_APPROVAL_OPTION_LABELS.every((label) => labels.has(label));
+}
+
+function isTerminalApprovalTitleLine(line: string): boolean {
+  const lower = line.toLowerCase();
+  return (
+    lower.includes('would you like to run the following command?') ||
+    lower.includes('do you want to approve network access to ') ||
+    lower.includes('would you like to make the following edits?') ||
+    lower.includes('would you like to grant these permissions?') ||
+    lower.endsWith('needs your approval.') ||
+    (/^allow (?:the )?.+\bto run tool\b.+\?$/.test(lower) && lower.includes('mcp server'))
+  );
+}
+
+function findTerminalApprovalTitleMatch(
+  normalizedLines: string[]
+): { index: number; title: string } | null {
+  for (let index = 0; index < normalizedLines.length; index += 1) {
+    const currentLine = normalizedLines[index] ?? '';
+    if (isTerminalApprovalTitleLine(currentLine)) {
+      return {
+        index,
+        title: currentLine
+      };
+    }
+
+    const nextLine = normalizedLines[index + 1];
+    if (!nextLine) {
+      continue;
+    }
+
+    const mergedLine = normalizeTerminalText(`${currentLine} ${nextLine}`);
+    if (isTerminalApprovalTitleLine(mergedLine)) {
+      return {
+        index,
+        title: mergedLine
+      };
+    }
+  }
+
+  return null;
+}
+
+function findTerminalApprovalFallbackMatch(
+  normalizedLines: string[],
+  options: ApprovalOption[]
+): { index: number; title: string } | null {
+  if (!hasKnownTerminalApprovalOptions(options)) {
+    return null;
+  }
+
+  const firstOptionIndex = normalizedLines.findIndex((line) => /^\s*\d+\.\s+/.test(line));
+  if (firstOptionIndex === -1) {
+    return null;
+  }
+
+  for (let index = firstOptionIndex - 1; index >= 0; index -= 1) {
+    const line = normalizedLines[index];
+    if (!line) {
+      continue;
+    }
+
+    return {
+      index,
+      title: line
+    };
+  }
+
+  return {
+    index: firstOptionIndex,
+    title: 'Pending approval in terminal'
+  };
+}
+
 function findLatestOpenToolCallId(messages: ChatMessage[], toolCallIndex: Map<string, ToolCallMeta>): string | null {
   for (let messageIndex = messages.length - 1; messageIndex >= 0; messageIndex -= 1) {
     const message = messages[messageIndex];
@@ -1029,16 +1115,10 @@ function detectTerminalSideChannelState(
         }
       : null;
 
-  const approvalTitleIndex = normalizedLines.findIndex((line) => {
-    const lower = line.toLowerCase();
-    return (
-      lower.includes('would you like to run the following command?') ||
-      lower.includes('do you want to approve network access to ') ||
-      lower.includes('would you like to make the following edits?') ||
-      lower.includes('would you like to grant these permissions?') ||
-      lower.endsWith('needs your approval.')
-    );
-  });
+  const options = parseTerminalApprovalOptions(normalizedLines);
+  const approvalTitleMatch =
+    findTerminalApprovalTitleMatch(normalizedLines) ?? findTerminalApprovalFallbackMatch(normalizedLines, options);
+  const approvalTitleIndex = approvalTitleMatch?.index ?? -1;
 
   if (approvalTitleIndex === -1) {
     return {
@@ -1047,7 +1127,6 @@ function detectTerminalSideChannelState(
     };
   }
 
-  const options = parseTerminalApprovalOptions(normalizedLines);
   const firstOptionIndex = normalizedLines.findIndex((line) => /^\s*\d+\.\s+/.test(line));
   const contextLines = normalizedLines
     .slice(approvalTitleIndex + 1, firstOptionIndex >= 0 ? firstOptionIndex : approvalTitleIndex + 5)
@@ -1059,7 +1138,7 @@ function detectTerminalSideChannelState(
     contextLines,
     options,
     relatedToolCallId,
-    title: normalizedLines[approvalTitleIndex] ?? 'Pending approval in terminal'
+    title: approvalTitleMatch?.title ?? normalizedLines[approvalTitleIndex] ?? 'Pending approval in terminal'
   };
 
   return {

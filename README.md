@@ -32,7 +32,7 @@ cli
 1. `cli` 连接 `relay`，上报自身信息和支持的 provider。
 2. 浏览器连接 `relay`，订阅某个 `cli + provider + conversation`。
 3. Web 侧发出的命令由 `relay` 转发给目标 `cli`。
-4. `cli` 持续回传 `snapshot`、`messages-upsert`、`terminal-chunk`。
+4. `cli` 持续回传 `snapshot`、`messages-upsert`、`terminal-frame-patch`。
 5. `relay` 负责广播、缓存、断线恢复和 Web UI 展示。
 
 ## 开发启动

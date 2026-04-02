@@ -2,12 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
 
 import { AppShell } from '@/app-shell/AppShell.tsx';
+import { AppHeader } from '@/components/AppHeader.tsx';
+import { ChatPane } from '@/components/ChatPane.tsx';
 import { DesktopWorkspaceBrowser } from '@/components/DesktopWorkspaceBrowser.tsx';
-import { ChatFeature } from '@/features/chat/ChatFeature.tsx';
+import { Sidebar } from '@/components/Sidebar.tsx';
+import { TerminalPane } from '@/components/TerminalPane.tsx';
 import { ComposerFeature } from '@/features/composer/ComposerFeature.tsx';
-import { HeaderFeature } from '@/features/header/HeaderFeature.tsx';
-import { SidebarFeature } from '@/features/sidebar/SidebarFeature.tsx';
-import { TerminalFeature } from '@/features/terminal/TerminalFeature.tsx';
 import { useWorkspaceController } from '@/features/workspace/controller.ts';
 import {
   selectActiveCliId,
@@ -23,6 +23,7 @@ import { useTerminalBridge } from '@/hooks/useTerminalBridge.ts';
 import { getProjectProviderKey } from '@/lib/workspace.ts';
 import { applyCachedMessagesUpsert, readCachedLastSeq, updateCachedLastSeq, writeConversationCache } from '@/lib/messages-cache.ts';
 import type { MobileJumpControls } from '@/features/workspace/types.ts';
+
 export function App() {
   const store = useWorkspaceStore();
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
@@ -169,6 +170,9 @@ export function App() {
     () => selectComposerViewModel(store, workspaceDerivedState, socketConnected),
     [socketConnected, store.error, store.snapshot, workspaceDerivedState]
   );
+  const canSendApprovalInput = Boolean(
+    workspaceDerivedState.activeCliId && workspaceDerivedState.activeProviderId && workspaceDerivedState.connected
+  );
   const desktopWorkspaceBrowserEnabled = Boolean(
     workspaceDerivedState.activeProject?.cwd && workspaceDerivedState.activeCliId && workspaceDerivedState.connected
   );
@@ -269,9 +273,40 @@ export function App() {
 
   return (
     <AppShell
-      sidebar={<SidebarFeature clis={clis} controller={controller} mobileOpen={mobileSidebarOpen} onMobileOpenChange={setMobileSidebarOpen} store={store} />}
+      sidebar={
+        <Sidebar
+          activeCliId={store.workspaceState.activeCliId}
+          activeConversationId={store.workspaceState.activeConversationId}
+          activeProjectId={store.workspaceState.activeProjectId}
+          activeProviderId={store.workspaceState.activeProviderId}
+          clis={clis}
+          collapsed={store.workspaceState.sidebarCollapsed}
+          mobileOpen={mobileSidebarOpen}
+          onActivateConversation={(project, providerId, conversation) => {
+            void controller.activateConversation(project, providerId, conversation);
+          }}
+          onAddProject={controller.addProject}
+          onCreateConversation={controller.createConversation}
+          onDeleteConversation={(project, providerId, conversation) =>
+            controller.deleteConversation(project, providerId, conversation)
+          }
+          onDeleteProject={controller.deleteProject}
+          onImportConversationFromSession={controller.importConversationFromSession}
+          onListManagedPtyHandles={controller.listManagedPtyHandles}
+          onListRecentProjectSessions={(providerId, maxSessions) => controller.listRecentProjectSessions(providerId, maxSessions)}
+          onMobileOpenChange={setMobileSidebarOpen}
+          onPickProjectDirectory={controller.pickProjectDirectory}
+          onRefreshConversation={(project, providerId, conversation) =>
+            controller.refreshConversation(project, providerId, conversation)
+          }
+          onSelectCli={controller.selectCli}
+          onSelectProject={controller.selectProject}
+          projectConversationsByKey={store.projectConversationsByKey}
+          projects={store.workspaceState.projects}
+        />
+      }
       renderHeader={() => (
-        <HeaderFeature
+        <AppHeader
           activeProviderId={workspaceDerivedState.activeProviderId}
           desktopWorkspaceBrowserEnabled={desktopWorkspaceBrowserEnabled}
           desktopWorkspaceBrowserOpen={desktopWorkspaceBrowserOpen}
@@ -287,21 +322,33 @@ export function App() {
         />
       )}
       chat={
-        <ChatFeature
-          derivedState={workspaceDerivedState}
+        <ChatPane
+          activeProviderId={workspaceDerivedState.activeProviderId}
+          canSendApprovalInput={canSendApprovalInput}
+          connected={workspaceDerivedState.connected}
+          conversationScrollKey={
+            workspaceDerivedState.activeConversation
+              ? `${workspaceDerivedState.activeProviderId ?? 'unknown'}:${workspaceDerivedState.activeConversation.conversationKey}`
+              : null
+          }
+          frameSnapshot={terminal.frameSnapshot}
+          messages={workspaceDerivedState.visibleMessages}
           onMobileJumpControlsChange={handleChatMobileJumpControlsChange}
+          onApprovalInput={terminal.sendInput}
           paneVisible={chatPaneVisible}
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
-          store={store}
-          terminal={terminal}
+          visible={store.mobilePane === 'chat'}
         />
       }
       terminal={
-        <TerminalFeature
+        <TerminalPane
+          frameSnapshot={terminal.frameSnapshot}
+          hostRef={terminal.terminalHostRef}
+          onJumpToEdge={terminal.jumpToEdge}
           onMobileJumpControlsChange={handleTerminalMobileJumpControlsChange}
           scrollToBottomRequestKey={mobilePaneScrollRequests.terminal}
-          store={store}
-          terminal={terminal}
+          viewportRef={terminal.terminalViewportRef}
+          visible={store.mobilePane === 'terminal'}
         />
       }
       workspaceBrowser={

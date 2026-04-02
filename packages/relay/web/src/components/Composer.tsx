@@ -21,7 +21,6 @@ interface ComposerProps {
   cliBadge: StatusBadge;
   conversationBadge: StatusBadge;
   footerErrorText: string;
-  onComposerHeightChange?: (height: number) => void;
   prompt: string;
   slashCommands: string[];
   socketBadge: StatusBadge;
@@ -98,7 +97,6 @@ export function Composer({
   cliBadge,
   conversationBadge,
   footerErrorText,
-  onComposerHeightChange,
   placeholder,
   prompt,
   slashCommands,
@@ -111,7 +109,6 @@ export function Composer({
   onSubmit,
   onTerminalInput
 }: ComposerProps) {
-  const formRef = useRef<HTMLFormElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingSelectionRef = useRef<number | null>(null);
@@ -227,28 +224,6 @@ export function Composer({
     setSelectedSlashIndex((current) => Math.min(current, slashSuggestions.length - 1));
   }, [slashSuggestions]);
 
-  useEffect(() => {
-    const form = formRef.current;
-    if (!form || !onComposerHeightChange) {
-      return;
-    }
-
-    const syncComposerHeight = () => {
-      onComposerHeightChange(Math.ceil(form.getBoundingClientRect().height));
-    };
-
-    syncComposerHeight();
-
-    const resizeObserver = new ResizeObserver(() => {
-      syncComposerHeight();
-    });
-    resizeObserver.observe(form);
-
-    return () => {
-      resizeObserver.disconnect();
-    };
-  }, [onComposerHeightChange]);
-
   function handleImageInputChange(event: React.ChangeEvent<HTMLInputElement>): void {
     const files = Array.from(event.target.files ?? []);
     if (files.length > 0) {
@@ -292,7 +267,6 @@ export function Composer({
 
   return (
     <form
-      ref={formRef}
       onSubmit={onSubmit}
       className="shrink-0 bg-transparent px-2 py-1 pb-[calc(env(safe-area-inset-bottom)+0.25rem)] md:mt-4 md:px-0 md:py-0"
     >

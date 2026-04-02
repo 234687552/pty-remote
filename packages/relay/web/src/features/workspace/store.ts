@@ -273,8 +273,8 @@ export function useWorkspaceStore(): WorkspaceStore {
   }, [state.workspaceState]);
 
   useEffect(() => {
-    saveProjectConversationsState(state.projectConversationsByKey, state.workspaceState.projects);
-  }, [state.projectConversationsByKey, state.workspaceState.projects]);
+    saveProjectConversationsState(state.projectConversationsByKey);
+  }, [state.projectConversationsByKey]);
 
   function patchWorkspace(updater: (current: PersistedWorkspaceState) => PersistedWorkspaceState): void {
     dispatch({ type: 'workspace/patched', updater });

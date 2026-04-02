@@ -22,7 +22,6 @@ import {
   getProjectProviderKey,
   getThreadLabel,
   hydrateConversationFromSnapshot,
-  sortConversations,
   sortProjects,
   type ProjectConversationEntry,
   type ProjectEntry
@@ -55,14 +54,7 @@ export interface WorkspaceController {
   removePendingAttachment: (localId: string) => Promise<void>;
   selectCli: (cliId: string | null) => void;
   selectProject: (project: ProjectEntry) => void;
-  reorderConversation: (
-    project: ProjectEntry,
-    providerId: ProviderId,
-    sourceConversationId: string,
-    targetConversationId: string
-  ) => Promise<void>;
   sendCommand: CliSocketController['sendCommand'];
-  selectProvider: (project: ProjectEntry, providerId: ProviderId) => void;
   setSidebarCollapsed: (collapsed: boolean) => void;
   stopMessage: () => Promise<void>;
   submitPrompt: (event: React.FormEvent) => Promise<void>;
@@ -778,9 +770,7 @@ export function useWorkspaceController({
       }
 
       const nextConversation = createDraftConversation(providerId, targetCli.cliId);
-      store.setProjectConversations(project.id, providerId, (conversations) =>
-        sortConversations([nextConversation, ...conversations])
-      );
+      store.setProjectConversations(project.id, providerId, (conversations) => [nextConversation, ...conversations]);
       await activateConversation(project, providerId, nextConversation);
     } catch (createError) {
       const message = createError instanceof Error ? createError.message : '创建会话失败';
@@ -1098,7 +1088,7 @@ export function useWorkspaceController({
 
       store.setProjectConversations(project.id, providerId, (conversations) => {
         const deduped = conversations.filter((entry) => entry.sessionId !== normalizedSession.sessionId);
-        return sortConversations([{ ...targetConversation, ownerCliId: targetCli.cliId }, ...deduped]);
+        return [{ ...targetConversation, ownerCliId: targetCli.cliId }, ...deduped];
       });
 
       await activateConversation(project, providerId, targetConversation);
@@ -1217,49 +1207,6 @@ export function useWorkspaceController({
     }));
   }
 
-  async function reorderConversation(
-    project: ProjectEntry,
-    providerId: ProviderId,
-    sourceConversationId: string,
-    targetConversationId: string
-  ): Promise<void> {
-    if (!sourceConversationId || !targetConversationId || sourceConversationId === targetConversationId) {
-      return;
-    }
-
-    store.setProjectConversations(project.id, providerId, (conversations) => {
-      const sourceIndex = conversations.findIndex((entry) => entry.id === sourceConversationId);
-      const targetIndex = conversations.findIndex((entry) => entry.id === targetConversationId);
-      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) {
-        return conversations;
-      }
-
-      const next = [...conversations];
-      const [moved] = next.splice(sourceIndex, 1);
-      if (!moved) {
-        return conversations;
-      }
-      next.splice(targetIndex, 0, moved);
-      return next;
-    });
-  }
-
-  function selectProvider(project: ProjectEntry, providerId: ProviderId): void {
-    const targetCli = getConnectedCliForProvider(clis, providerId, store.workspaceState.activeCliId);
-    const conversations = store.projectConversationsByKey[getProjectProviderKey(project.id, providerId)] ?? [];
-
-    store.patchWorkspace((current) => ({
-      ...current,
-      activeCliId: targetCli?.cliId ?? current.activeCliId,
-      activeProjectId: project.id,
-      activeProviderId: providerId,
-      activeConversationId:
-        current.activeProjectId === project.id && current.activeProviderId === providerId
-          ? current.activeConversationId
-          : conversations[0]?.id ?? null
-    }));
-  }
-
   function setSidebarCollapsed(collapsed: boolean): void {
     store.patchWorkspace((current) => ({ ...current, sidebarCollapsed: collapsed }));
   }
@@ -1343,11 +1290,9 @@ export function useWorkspaceController({
     pickProjectDirectory,
     refreshConversation,
     removePendingAttachment,
-    reorderConversation,
     sendCommand,
     selectCli,
     selectProject,
-    selectProvider,
     setSidebarCollapsed,
     stopMessage,
     submitPrompt

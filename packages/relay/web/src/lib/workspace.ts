@@ -142,7 +142,7 @@ function normalizeConversationsRecord(value: unknown): Record<string, ProjectCon
 
     const conversations = rawConversations.map(normalizeConversationEntry).filter(Boolean) as ProjectConversationEntry[];
     if (conversations.length > 0) {
-      normalized[key] = sortConversations(conversations);
+      normalized[key] = conversations;
     }
   }
   return normalized;
@@ -162,12 +162,8 @@ export function loadProjectConversationsState(): Record<string, ProjectConversat
   }
 }
 
-export function saveProjectConversationsState(
-  state: Record<string, ProjectConversationEntry[]>,
-  projects: ProjectEntry[] = []
-): void {
+export function saveProjectConversationsState(state: Record<string, ProjectConversationEntry[]>): void {
   const normalizedByProject = normalizeConversationsRecord(state);
-  void projects;
   window.localStorage.setItem(PROJECT_CONVERSATIONS_STORAGE_KEY, JSON.stringify(normalizedByProject));
 }
 
@@ -250,42 +246,6 @@ export function createConversationFromSession(
     messageCount: session.messageCount,
     draft: false
   };
-}
-
-export function sortConversations(conversations: ProjectConversationEntry[]): ProjectConversationEntry[] {
-  return [...conversations];
-}
-
-export function mergeProjectConversations(
-  existingConversations: ProjectConversationEntry[],
-  sessions: ProjectSessionSummary[],
-  providerId: ProviderId
-): ProjectConversationEntry[] {
-  const drafts = existingConversations.filter((conversation) => conversation.draft && !conversation.sessionId);
-  const existingBySessionId = new Map<string, ProjectConversationEntry>();
-  for (const conversation of existingConversations) {
-    if (!conversation.sessionId || conversation.providerId !== providerId || existingBySessionId.has(conversation.sessionId)) {
-      continue;
-    }
-    existingBySessionId.set(conversation.sessionId, conversation);
-  }
-
-  const merged = sessions.map((session) => {
-    const existing = existingBySessionId.get(session.sessionId);
-    return {
-      ...(existing ?? createConversationFromSession(session)),
-      providerId,
-      conversationKey: existing?.conversationKey ?? session.sessionId,
-      sessionId: session.sessionId,
-      title: session.title,
-      preview: session.preview,
-      updatedAt: session.updatedAt,
-      messageCount: session.messageCount,
-      draft: false
-    };
-  });
-
-  return sortConversations([...drafts, ...merged]);
 }
 
 export function sortProjects(projects: ProjectEntry[]): ProjectEntry[] {
