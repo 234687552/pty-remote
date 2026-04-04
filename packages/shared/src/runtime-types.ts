@@ -13,6 +13,8 @@ export const BUILTIN_SLASH_COMMANDS: Record<ProviderId, string[]> = {
   codex: ['review', 'new', 'compat', 'undo', 'diff', 'status', 'permissions']
 };
 
+export const DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX = 80;
+
 export interface TextChatMessageBlock {
   id: string;
   type: 'text';
@@ -77,6 +79,7 @@ export interface CliProviderRuntimeDescriptor {
   conversationKey: string | null;
   status: RuntimeStatus;
   sessionId: string | null;
+  supportsTerminal: boolean;
 }
 
 export interface CliDescriptor {

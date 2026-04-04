@@ -11,8 +11,13 @@ import type {
   CliRegisterPayload,
   CliRegisterResult,
   CliStatusPayload,
+  HydrateConversationResultPayload,
+  MessageDeltaPayload,
   MessagesUpsertPayload,
   RuntimeMetaPayload,
+  RuntimeRequestPayload,
+  RuntimeRequestResolvedPayload,
+  RuntimeRequestResponsePayload,
   RuntimeSubscriptionPayload,
   RuntimeSnapshotPayload,
   TerminalFramePatchPayload,
@@ -20,6 +25,7 @@ import type {
   TerminalFrameSyncResultPayload,
   TerminalInputPayload,
   TerminalSessionEvictedPayload,
+  TerminalVisibilityPayload,
   TerminalResizePayload,
   WebCommandEnvelope,
   WebInitPayload
@@ -32,6 +38,7 @@ import type {
   RuntimeSnapshot,
   RuntimeStatus
 } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import { DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import {
   applyTerminalFramePatch,
   cloneTerminalFrameSnapshot,
@@ -54,6 +61,7 @@ const PORT = Number.parseInt(process.env.PORT ?? String(relayConfig.port), 10);
 const HOST = process.env.HOST ?? relayConfig.host;
 const SOCKET_MAX_HTTP_BUFFER_SIZE = relayConfig.socketMaxHttpBufferSize;
 const CLI_COMMAND_TIMEOUT_MS = relayConfig.cliCommandTimeoutMs;
+const HYDRATE_CONVERSATION_MESSAGES_MAX = 80;
 const TERMINAL_FRAME_PATCH_HISTORY_LIMIT = 256;
 const TERMINAL_SESSION_CACHE_MAX = 8;
 
@@ -106,6 +114,7 @@ interface RelaySnapshotCacheEntry {
 
 const relayReplayBuffers = new Map<string, RelayReplayBuffer>();
 const relaySnapshotCache = new Map<string, RelaySnapshotCacheEntry>();
+const pendingConversationHydrations = new Map<string, Promise<void>>();
 
 let httpServer: http.Server | null = null;
 
@@ -262,6 +271,37 @@ function getCachedSnapshotPayload(cacheKey: string): RuntimeSnapshotPayload | nu
   return relaySnapshotCache.get(cacheKey)?.payload ?? null;
 }
 
+function compareMessageChronology(left: ChatMessage, right: ChatMessage): number {
+  const leftTimestamp = new Date(left.createdAt).getTime();
+  const rightTimestamp = new Date(right.createdAt).getTime();
+  const normalizedLeftTimestamp = Number.isFinite(leftTimestamp) ? leftTimestamp : 0;
+  const normalizedRightTimestamp = Number.isFinite(rightTimestamp) ? rightTimestamp : 0;
+  if (normalizedLeftTimestamp !== normalizedRightTimestamp) {
+    return normalizedLeftTimestamp - normalizedRightTimestamp;
+  }
+
+  const leftSequence = Number.isFinite(left.sequence) ? (left.sequence as number) : Number.MAX_SAFE_INTEGER;
+  const rightSequence = Number.isFinite(right.sequence) ? (right.sequence as number) : Number.MAX_SAFE_INTEGER;
+  if (leftSequence !== rightSequence) {
+    return leftSequence - rightSequence;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+function trimRuntimeMessages(messages: ChatMessage[]): { messages: ChatMessage[]; hasOlderMessages: boolean } {
+  if (messages.length <= DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX) {
+    return {
+      messages,
+      hasOlderMessages: false
+    };
+  }
+  return {
+    messages: messages.slice(-DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX),
+    hasOlderMessages: true
+  };
+}
+
 function cacheSnapshotFromMessages(cliId: string, payload: MessagesUpsertPayload): RuntimeSnapshotPayload | null {
   const providerId = payload.providerId ?? null;
   const cacheKey = resolveConversationCacheKey(cliId, providerId, payload.conversationKey ?? null, payload.sessionId ?? null);
@@ -274,7 +314,8 @@ function cacheSnapshotFromMessages(cliId: string, payload: MessagesUpsertPayload
   for (const message of payload.upserts) {
     messagesById.set(message.id, cloneValue(message));
   }
-  const messages = payload.recentMessageIds.filter((messageId): messageId is string => typeof messageId === 'string').map((messageId) => messagesById.get(messageId)).filter((message): message is ChatMessage => Boolean(message));
+  const sortedMessages = [...messagesById.values()].sort(compareMessageChronology);
+  const trimmed = trimRuntimeMessages(sortedMessages);
 
   const snapshotPayload = {
     cliId,
@@ -284,9 +325,79 @@ function cacheSnapshotFromMessages(cliId: string, payload: MessagesUpsertPayload
       conversationKey: payload.conversationKey ?? null,
       status: previousSnapshot?.status ?? 'idle',
       sessionId: payload.sessionId ?? null,
-      messages,
-      hasOlderMessages: payload.hasOlderMessages,
+      messages: trimmed.messages,
+      hasOlderMessages: payload.hasOlderMessages || trimmed.hasOlderMessages,
       lastError: previousSnapshot?.lastError ?? null
+    }
+  } satisfies RuntimeSnapshotPayload;
+
+  cacheSnapshot(snapshotPayload);
+  return snapshotPayload;
+}
+
+function cacheSnapshotFromMessageDelta(cliId: string, payload: MessageDeltaPayload): RuntimeSnapshotPayload | null {
+  const providerId = payload.providerId ?? null;
+  const cacheKey = resolveConversationCacheKey(cliId, providerId, payload.conversationKey ?? null, payload.sessionId ?? null);
+  if (!cacheKey || !providerId) {
+    return null;
+  }
+
+  const previousSnapshot = getCachedSnapshotPayload(cacheKey)?.snapshot ?? null;
+  if (!previousSnapshot) {
+    return null;
+  }
+
+  const messages: ChatMessage[] = previousSnapshot.messages.map((message): ChatMessage => {
+    if (message.id !== payload.messageId) {
+      return cloneValue(message);
+    }
+
+    const blocks = message.blocks.slice();
+    const blockIndex = blocks.findIndex((block) => block.id === payload.blockId);
+    if (blockIndex >= 0) {
+      const block = blocks[blockIndex];
+      if (payload.blockType === 'text' && block.type === 'text') {
+        blocks[blockIndex] = {
+          ...block,
+          text: `${block.text}${payload.delta}`
+        };
+      } else if (payload.blockType === 'tool_result' && block.type === 'tool_result') {
+        blocks[blockIndex] = {
+          ...block,
+          content: `${block.content}${payload.delta}`
+        };
+      }
+    } else if (payload.blockType === 'text') {
+      blocks.push({
+        id: payload.blockId,
+        type: 'text',
+        text: payload.delta
+      });
+    } else {
+      blocks.push({
+        id: payload.blockId,
+        type: 'tool_result',
+        toolCallId: payload.messageId,
+        content: payload.delta,
+        isError: false
+      });
+    }
+
+    return {
+      ...message,
+      blocks,
+      status: message.status === 'error' ? 'error' : 'streaming'
+    };
+  });
+  const trimmed = trimRuntimeMessages(messages.sort(compareMessageChronology));
+
+  const snapshotPayload = {
+    cliId,
+    providerId,
+    snapshot: {
+      ...previousSnapshot,
+      messages: trimmed.messages,
+      hasOlderMessages: previousSnapshot.hasOlderMessages || trimmed.hasOlderMessages
     }
   } satisfies RuntimeSnapshotPayload;
 
@@ -397,6 +508,15 @@ function emitCachedSnapshotToSocket(socket: Socket, subscription: RuntimeSubscri
   return true;
 }
 
+function getSubscriptionCacheKey(subscription: RuntimeSubscriptionPayload): string | null {
+  return resolveConversationCacheKey(
+    subscription.targetCliId,
+    subscription.targetProviderId,
+    subscription.conversationKey,
+    subscription.sessionId
+  );
+}
+
 function replayMessagesToSocket(socket: Socket, subscription: RuntimeSubscriptionPayload): boolean {
   if (!hasRuntimeSubscriptionTarget(subscription) || !hasRuntimeSubscriptionConversation(subscription)) {
     return false;
@@ -441,7 +561,8 @@ function createProviderRuntimeDescriptor(
     cwd: registration?.cwd ?? payload.cwd,
     conversationKey: registration?.conversationKey ?? null,
     status: 'idle',
-    sessionId: registration?.sessionId ?? null
+    sessionId: registration?.sessionId ?? null,
+    supportsTerminal: registration?.supportsTerminal ?? true
   };
 }
 
@@ -795,6 +916,25 @@ function matchesMessagesUpsertSubscription(subscription: RuntimeSubscriptionPayl
   return true;
 }
 
+function matchesRuntimeRequestSubscription(subscription: RuntimeSubscriptionPayload, payload: RuntimeRequestPayload): boolean {
+  if (!hasRuntimeSubscriptionTarget(subscription)) {
+    return false;
+  }
+  if (!hasRuntimeSubscriptionConversation(subscription)) {
+    return false;
+  }
+  if (payload.cliId !== subscription.targetCliId || payload.providerId !== subscription.targetProviderId) {
+    return false;
+  }
+  if (subscription.conversationKey !== null && payload.conversationKey !== subscription.conversationKey) {
+    return false;
+  }
+  if (subscription.sessionId !== null && payload.sessionId !== subscription.sessionId) {
+    return false;
+  }
+  return true;
+}
+
 function matchesTerminalFramePatchSubscription(subscription: RuntimeSubscriptionPayload, payload: TerminalFramePatchPayload): boolean {
   if (subscription.terminalEnabled !== true) {
     return false;
@@ -872,6 +1012,57 @@ function emitMessagesUpsertToSubscribers(io: SocketIOServer, payload: MessagesUp
   }
 }
 
+function emitMessageDeltaToSubscribers(io: SocketIOServer, payload: MessageDeltaPayload): void {
+  for (const socket of io.of('/web').sockets.values()) {
+    const subscription = webRuntimeSubscriptions.get(socket.id);
+    if (!subscription) {
+      continue;
+    }
+    if (
+      payload.cliId !== subscription.targetCliId ||
+      payload.providerId !== subscription.targetProviderId
+    ) {
+      continue;
+    }
+    if (subscription.conversationKey !== null && payload.conversationKey !== subscription.conversationKey) {
+      continue;
+    }
+    socket.emit('runtime:message-delta', payload);
+  }
+}
+
+function emitRuntimeRequestToSubscribers(io: SocketIOServer, payload: RuntimeRequestPayload): void {
+  for (const socket of io.of('/web').sockets.values()) {
+    const subscription = webRuntimeSubscriptions.get(socket.id);
+    if (!subscription || !matchesRuntimeRequestSubscription(subscription, payload)) {
+      continue;
+    }
+    socket.emit('runtime:request', payload);
+  }
+}
+
+function emitRuntimeRequestResolvedToSubscribers(io: SocketIOServer, payload: RuntimeRequestResolvedPayload): void {
+  for (const socket of io.of('/web').sockets.values()) {
+    const subscription = webRuntimeSubscriptions.get(socket.id);
+    if (!subscription) {
+      continue;
+    }
+    if (
+      payload.cliId !== subscription.targetCliId ||
+      payload.providerId !== subscription.targetProviderId
+    ) {
+      continue;
+    }
+    if (subscription.conversationKey !== null && payload.conversationKey !== subscription.conversationKey) {
+      continue;
+    }
+    if (subscription.sessionId !== null && payload.sessionId !== subscription.sessionId) {
+      continue;
+    }
+    socket.emit('runtime:request-resolved', payload);
+  }
+}
+
 function emitTerminalFramePatchToSubscribers(io: SocketIOServer, payload: TerminalFramePatchPayload): void {
   for (const socket of io.of('/web').sockets.values()) {
     const subscription = webRuntimeSubscriptions.get(socket.id);
@@ -942,6 +1133,69 @@ function emitCliStatus(io: SocketIOServer): void {
   io.of('/web').emit('cli:update', {
     clis: listCliDescriptors()
   } satisfies CliStatusPayload);
+}
+
+function forwardTerminalVisibility(payload: TerminalVisibilityPayload): void {
+  const record = getConnectedCliRecord(payload.targetCliId);
+  if (!record) {
+    return;
+  }
+
+  record.socket.emit('cli:terminal-visibility', {
+    targetProviderId: payload.targetProviderId,
+    conversationKey: payload.conversationKey,
+    sessionId: payload.sessionId,
+    visible: payload.visible
+  } satisfies Omit<TerminalVisibilityPayload, 'targetCliId'>);
+}
+
+function syncTerminalVisibility(previous: RuntimeSubscriptionPayload | null, next: RuntimeSubscriptionPayload): void {
+  const previousVisible =
+    previous?.terminalEnabled === true &&
+    previous.targetCliId !== null &&
+    previous.targetProviderId !== null &&
+    (previous.conversationKey !== null || previous.sessionId !== null);
+  const nextVisible =
+    next.terminalEnabled === true &&
+    next.targetCliId !== null &&
+    next.targetProviderId !== null &&
+    (next.conversationKey !== null || next.sessionId !== null);
+
+  if (previousVisible) {
+    const unchanged =
+      nextVisible &&
+      previous?.targetCliId === next.targetCliId &&
+      previous?.targetProviderId === next.targetProviderId &&
+      previous?.conversationKey === next.conversationKey &&
+      previous?.sessionId === next.sessionId;
+    if (!unchanged) {
+      forwardTerminalVisibility({
+        targetCliId: previous?.targetCliId ?? null,
+        targetProviderId: previous?.targetProviderId ?? null,
+        conversationKey: previous?.conversationKey ?? null,
+        sessionId: previous?.sessionId ?? null,
+        visible: false
+      });
+    }
+  }
+
+  if (nextVisible) {
+    const unchanged =
+      previousVisible &&
+      previous?.targetCliId === next.targetCliId &&
+      previous?.targetProviderId === next.targetProviderId &&
+      previous?.conversationKey === next.conversationKey &&
+      previous?.sessionId === next.sessionId;
+    if (!unchanged) {
+      forwardTerminalVisibility({
+        targetCliId: next.targetCliId,
+        targetProviderId: next.targetProviderId,
+        conversationKey: next.conversationKey,
+        sessionId: next.sessionId,
+        visible: true
+      });
+    }
+  }
 }
 
 async function handleHttpRequest(req: IncomingMessage, res: ServerResponse<IncomingMessage>): Promise<void> {
@@ -1050,7 +1304,8 @@ async function routeWebCommand(command: WebCommandEnvelope, io: SocketIOServer):
                 conversationKey:
                   payload?.conversationKey ?? (command.payload as { conversationKey?: string }).conversationKey ?? null,
                 sessionId: payload?.sessionId ?? null,
-                status: currentRuntime?.status ?? 'idle'
+                status: currentRuntime?.status ?? 'idle',
+                supportsTerminal: currentRuntime?.supportsTerminal ?? true
               }
             },
       lastSeenAt: new Date().toISOString()
@@ -1059,6 +1314,93 @@ async function routeWebCommand(command: WebCommandEnvelope, io: SocketIOServer):
   }
 
   return result;
+}
+
+function cacheHydratedSnapshotPayload(cliId: string, payload: HydrateConversationResultPayload): RuntimeSnapshotPayload | null {
+  const snapshotPayload = {
+    cliId,
+    providerId: payload.providerId,
+    snapshot: cloneValue(payload.snapshot)
+  } satisfies RuntimeSnapshotPayload;
+
+  cacheSnapshot(snapshotPayload);
+  const record = cliRecords.get(cliId) ?? null;
+  const providerRecord = record ? getProviderRecord(record, payload.providerId) : null;
+  if (
+    record &&
+    providerRecord &&
+    record.descriptor.runtimes[payload.providerId]?.conversationKey === payload.snapshot.conversationKey &&
+    record.descriptor.runtimes[payload.providerId]?.sessionId === payload.snapshot.sessionId
+  ) {
+    providerRecord.snapshot = cloneValue(payload.snapshot);
+  }
+  return snapshotPayload;
+}
+
+function ensureConversationHydrated(io: SocketIOServer, subscription: RuntimeSubscriptionPayload): boolean {
+  if (!hasRuntimeSubscriptionTarget(subscription) || !hasRuntimeSubscriptionConversation(subscription)) {
+    return false;
+  }
+
+  const cacheKey = getSubscriptionCacheKey(subscription);
+  if (!cacheKey) {
+    return false;
+  }
+  if (pendingConversationHydrations.has(cacheKey)) {
+    return true;
+  }
+
+  const record = getConnectedCliRecord(subscription.targetCliId);
+  const providerId = subscription.targetProviderId;
+  if (!record || !providerId) {
+    return false;
+  }
+
+  const runtimeDescriptor = record.descriptor.runtimes[providerId];
+  if (!runtimeDescriptor?.cwd) {
+    return false;
+  }
+
+  const hydrationPromise = (async () => {
+    const result = await forwardCliCommand(record, {
+      requestId: randomUUID(),
+      targetProviderId: providerId,
+      name: 'hydrate-conversation',
+      payload: {
+        cwd: runtimeDescriptor.cwd,
+        conversationKey: subscription.conversationKey ?? subscription.sessionId ?? '',
+        sessionId: subscription.sessionId,
+        maxMessages: HYDRATE_CONVERSATION_MESSAGES_MAX
+      }
+    } satisfies CliCommandEnvelope<'hydrate-conversation'>);
+
+    if (!result.ok || !result.payload) {
+      return;
+    }
+
+    const snapshotPayload = cacheHydratedSnapshotPayload(
+      record.descriptor.cliId,
+      result.payload as HydrateConversationResultPayload
+    );
+    if (!snapshotPayload) {
+      return;
+    }
+    emitRuntimeSnapshotToSubscribers(io, snapshotPayload);
+  })()
+    .catch((error) => {
+      logRelay('warn', 'conversation hydration failed', {
+        cacheKey,
+        error: relayErrorMessage(error, 'Failed to hydrate conversation'),
+        providerId,
+        targetCliId: record.descriptor.cliId
+      });
+    })
+    .finally(() => {
+      pendingConversationHydrations.delete(cacheKey);
+    });
+
+  pendingConversationHydrations.set(cacheKey, hydrationPromise);
+  return true;
 }
 
 function buildWebInitPayload(): WebInitPayload {
@@ -1153,8 +1495,47 @@ export async function startSocketServer(): Promise<void> {
         basePayload.sessionId ?? null
       );
       const messagesPayload = cacheKey ? recordReplayEntry(cacheKey, basePayload) : basePayload;
-      cacheSnapshotFromMessages(cliId, messagesPayload);
+      const snapshotPayload = cacheSnapshotFromMessages(cliId, messagesPayload);
+      const providerRecord = payload.providerId ? getProviderRecord(record, payload.providerId) : null;
+      if (
+        snapshotPayload &&
+        providerRecord &&
+        record.descriptor.runtimes[payload.providerId!]?.conversationKey === snapshotPayload.snapshot.conversationKey &&
+        record.descriptor.runtimes[payload.providerId!]?.sessionId === snapshotPayload.snapshot.sessionId
+      ) {
+        providerRecord.snapshot = cloneValue(snapshotPayload.snapshot);
+      }
       emitMessagesUpsertToSubscribers(io, messagesPayload);
+    });
+
+    socket.on('cli:message-delta', (payload: MessageDeltaPayload) => {
+      const cliId = getSocketCliId(socket);
+      if (!cliId) {
+        return;
+      }
+      const record = cliRecords.get(cliId) ?? null;
+      if (!record || record.socket.id !== socket.id) {
+        return;
+      }
+
+      record.descriptor.connected = true;
+      record.disconnectedAt = null;
+      record.descriptor.lastSeenAt = new Date().toISOString();
+      const basePayload = {
+        ...cloneValue(payload),
+        cliId
+      } satisfies MessageDeltaPayload;
+      const snapshotPayload = cacheSnapshotFromMessageDelta(cliId, basePayload);
+      const providerRecord = payload.providerId ? getProviderRecord(record, payload.providerId) : null;
+      if (
+        snapshotPayload &&
+        providerRecord &&
+        record.descriptor.runtimes[payload.providerId!]?.conversationKey === snapshotPayload.snapshot.conversationKey &&
+        record.descriptor.runtimes[payload.providerId!]?.sessionId === snapshotPayload.snapshot.sessionId
+      ) {
+        providerRecord.snapshot = cloneValue(snapshotPayload.snapshot);
+      }
+      emitMessageDeltaToSubscribers(io, basePayload);
     });
 
     socket.on('cli:runtime-meta', (payload: RuntimeMetaPayload) => {
@@ -1194,6 +1575,44 @@ export async function startSocketServer(): Promise<void> {
 
       emitRuntimeSnapshotToSubscribers(io, snapshotPayload);
       emitCliStatus(io);
+    });
+
+    socket.on('cli:runtime-request', (payload: RuntimeRequestPayload) => {
+      const cliId = getSocketCliId(socket);
+      if (!cliId) {
+        return;
+      }
+      const record = cliRecords.get(cliId) ?? null;
+      if (!record || record.socket.id !== socket.id) {
+        return;
+      }
+
+      record.descriptor.connected = true;
+      record.disconnectedAt = null;
+      record.descriptor.lastSeenAt = new Date().toISOString();
+      emitRuntimeRequestToSubscribers(io, {
+        ...payload,
+        cliId
+      });
+    });
+
+    socket.on('cli:runtime-request-resolved', (payload: RuntimeRequestResolvedPayload) => {
+      const cliId = getSocketCliId(socket);
+      if (!cliId) {
+        return;
+      }
+      const record = cliRecords.get(cliId) ?? null;
+      if (!record || record.socket.id !== socket.id) {
+        return;
+      }
+
+      record.descriptor.connected = true;
+      record.disconnectedAt = null;
+      record.descriptor.lastSeenAt = new Date().toISOString();
+      emitRuntimeRequestResolvedToSubscribers(io, {
+        ...payload,
+        cliId
+      });
     });
 
     socket.on('cli:terminal-frame-patch', (payload: TerminalFramePatchPayload) => {
@@ -1261,7 +1680,8 @@ export async function startSocketServer(): Promise<void> {
                 cwd: record.descriptor.cwd,
                 conversationKey: null,
                 sessionId: null,
-                status: 'idle' as RuntimeStatus
+                status: 'idle' as RuntimeStatus,
+                supportsTerminal: true
               }),
               status: 'idle' as RuntimeStatus
             }
@@ -1279,12 +1699,17 @@ export async function startSocketServer(): Promise<void> {
     socket.emit('web:init', buildWebInitPayload());
 
     socket.on('web:runtime-subscribe', (payload: RuntimeSubscriptionPayload) => {
+      const previous = webRuntimeSubscriptions.get(socket.id) ?? null;
       const subscription = normalizeRuntimeSubscription(payload);
       webRuntimeSubscriptions.set(socket.id, subscription);
+      syncTerminalVisibility(previous, subscription);
       if (replayMessagesToSocket(socket, subscription)) {
         return;
       }
       if (emitCachedSnapshotToSocket(socket, subscription)) {
+        return;
+      }
+      if (ensureConversationHydrated(io, subscription)) {
         return;
       }
       const emptySnapshot = createEmptySnapshotPayload(subscription);
@@ -1350,7 +1775,35 @@ export async function startSocketServer(): Promise<void> {
       );
     });
 
+    socket.on(
+      'web:runtime-request-response',
+      (payload: RuntimeRequestResponsePayload, callback?: (result: { ok: boolean; error?: string }) => void) => {
+        const record = getConnectedCliRecord(payload.targetCliId);
+        if (!record) {
+          callback?.({ ok: false, error: 'CLI is not connected' });
+          return;
+        }
+
+        record.socket.emit(
+          'cli:runtime-request-response',
+          {
+            targetProviderId: payload.targetProviderId,
+            requestId: payload.requestId,
+            result: payload.result,
+            error: payload.error ?? null
+          } satisfies Omit<RuntimeRequestResponsePayload, 'targetCliId'>,
+          (result?: { ok: boolean; error?: string }) => {
+            callback?.(result ?? { ok: false, error: 'No response from runtime request relay' });
+          }
+        );
+      }
+    );
+
     socket.on('disconnect', () => {
+      const previous = webRuntimeSubscriptions.get(socket.id) ?? null;
+      if (previous) {
+        syncTerminalVisibility(previous, normalizeRuntimeSubscription());
+      }
       webRuntimeSubscriptions.delete(socket.id);
       pruneRelayState(io);
     });

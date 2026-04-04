@@ -1,4 +1,4 @@
-import xtermHeadless from '@xterm/headless';
+import * as xtermHeadlessNs from '@xterm/headless';
 import type { IBufferCell, IBufferLine } from '@xterm/headless';
 
 import {
@@ -20,6 +20,7 @@ const STYLE_FLAG_INVISIBLE = 1 << 6;
 const STYLE_FLAG_STRIKETHROUGH = 1 << 7;
 const STYLE_FLAG_OVERLINE = 1 << 8;
 const DEFAULT_SCROLLBACK = 500;
+const xtermHeadless = (xtermHeadlessNs as unknown as { default?: typeof xtermHeadlessNs }).default ?? xtermHeadlessNs;
 const { Terminal } = xtermHeadless;
 type HeadlessTerminal = InstanceType<typeof xtermHeadless.Terminal>;
 

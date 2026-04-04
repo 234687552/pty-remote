@@ -21,6 +21,7 @@ interface ComposerFeatureProps {
   onMobilePaneChange: (pane: WorkspacePane) => void;
   onSidebarOpen: () => void;
   store: WorkspaceStore;
+  terminalSupported: boolean;
   terminal: TerminalBridge;
   viewModel: ComposerViewModel;
 }
@@ -35,6 +36,7 @@ export function ComposerFeature({
   onMobilePaneChange,
   onSidebarOpen,
   store,
+  terminalSupported,
   terminal,
   viewModel
 }: ComposerFeatureProps) {
@@ -42,7 +44,7 @@ export function ComposerFeature({
   const [mobileFileBrowserOpen, setMobileFileBrowserOpen] = useState(false);
   const mobileAgentLabel =
     store.workspaceState.activeProviderId ? PROVIDER_LABELS[store.workspaceState.activeProviderId] : 'agent';
-  const canSendTerminalInput = Boolean(viewModel.activeCliId && viewModel.activeProviderId && derivedState.connected);
+  const canSendTerminalInput = terminalSupported && Boolean(viewModel.activeCliId && viewModel.activeProviderId && derivedState.connected);
   const canOpenFiles = Boolean(derivedState.activeProject?.cwd && derivedState.activeCliId && derivedState.connected);
 
   useEffect(() => {
@@ -116,6 +118,7 @@ export function ComposerFeature({
             mobileProjectTitle={mobileProjectTitle}
             mobileSidebarOpen={mobileSidebarOpen}
             statusBadges={[viewModel.conversationBadge, viewModel.socketBadge, viewModel.cliBadge]}
+            terminalSupported={terminalSupported}
             onFilesOpen={() => {
               setMobileFileBrowserOpen(true);
             }}

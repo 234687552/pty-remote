@@ -75,6 +75,9 @@ npm run dev:cli:claude
 
 # 只启动 codex provider
 npm run dev:cli:codex
+
+# Codex 默认使用 app-server backend
+npm run dev:cli:codex
 ```
 
 本地开发下的访问方式：
@@ -169,6 +172,7 @@ SOCKET_URL=http://127.0.0.1:3001 npx -y @lzdi/pty-remote-cli
 
 - relay: `HOST`, `PORT`
 - cli: `SOCKET_URL`, `PTY_REMOTE_PROVIDERS`, `PTY_REMOTE_PROVIDER`, `PTY_REMOTE_CLI_ID`
+- codex app-server: `CODEX_HOME`, `CODEX_APP_SERVER_READY_TIMEOUT_MS`, `CODEX_APP_SERVER_POLL_IDLE_MS`, `CODEX_APP_SERVER_POLL_RUNNING_MS`, `CODEX_APP_SERVER_PORT`
 - web: `VITE_SOCKET_URL`
 
 Claude / Codex PTY 默认通过当前用户的登录交互 shell 启动，因此会尽量复用 `~/.zshrc`、`alias claude=...`、`alias codex=...`、shell function 和代理环境。

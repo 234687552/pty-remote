@@ -498,7 +498,7 @@ function FileBrowserDirectoryNode({
   onToggleDirectory,
   path,
   selectedPath
-}: Required<Omit<FileBrowserDirectoryTreeProps, 'absolutePath'>> & { absolutePath: string }) {
+}: Omit<FileBrowserDirectoryTreeProps, 'absolutePath'> & { absolutePath: string }) {
   const isExpanded = expandedPaths.has(path);
   const directoryState = directoryStateByPath[path];
   const depth = path ? path.split('/').length : 0;
@@ -575,7 +575,7 @@ function FileBrowserDirectoryNode({
                 entry={entry}
                 onFileSelect={onFileSelect}
                 onPathLongPress={onPathLongPress}
-                selectedPath={selectedPath}
+                selectedPath={selectedPath ?? null}
               />
             ))}
 

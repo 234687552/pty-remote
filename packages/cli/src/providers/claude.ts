@@ -1,8 +1,9 @@
 import type { ProjectSessionSummary } from '@lzdi/pty-remote-protocol/protocol.ts';
 
 import { listClaudeRecentSessions } from './claude-history.ts';
+import { ClaudeWsManager } from './claude-ws-runtime.ts';
 import { listProviderSlashCommands } from './slash-commands.ts';
-import { PtyManager, type PtyManagerOptions } from '../cli/pty-manager.ts';
+import type { PtyManagerOptions } from '../cli/pty-manager.ts';
 
 import type { ProviderRuntime, ProviderRuntimeCallbacks, ProviderRuntimeSelection } from './provider-runtime.ts';
 
@@ -10,7 +11,21 @@ export function createClaudeProviderRuntime(
   options: PtyManagerOptions,
   callbacks: ProviderRuntimeCallbacks
 ): ProviderRuntime {
-  const manager = new PtyManager(options, callbacks);
+  const manager = new ClaudeWsManager(
+    {
+      defaultCwd: options.defaultCwd,
+      permissionMode: options.permissionMode,
+      snapshotMessagesMax: options.snapshotMessagesMax,
+      claudeReadyTimeoutMs: options.claudeReadyTimeoutMs,
+      gcIntervalMs: options.gcIntervalMs,
+      terminalCols: options.terminalCols,
+      terminalRows: options.terminalRows,
+      terminalFrameScrollback: options.terminalFrameScrollback,
+      model: process.env.CLAUDE_MODEL?.trim() || null,
+      verbose: process.env.CLAUDE_WS_VERBOSE === '1'
+    },
+    callbacks
+  );
 
   return {
     providerId: 'claude',
@@ -29,6 +44,9 @@ export function createClaudeProviderRuntime(
     getRegistrationPayload() {
       return manager.getRegistrationPayload();
     },
+    hydrateConversation(selection) {
+      return manager.hydrateConversation(selection);
+    },
     listSlashCommands() {
       return listProviderSlashCommands('claude');
     },
@@ -38,8 +56,14 @@ export function createClaudeProviderRuntime(
     listManagedPtyHandles() {
       return Promise.resolve(manager.listManagedPtyHandles());
     },
+    resolveRuntimeRequest(payload) {
+      return manager.resolveRuntimeRequest(payload);
+    },
     resetActiveConversation() {
       return manager.resetActiveThread();
+    },
+    setTerminalVisibility(payload) {
+      return manager.setTerminalVisibility(payload);
     },
     sendTerminalInput(input: string) {
       return manager.sendTerminalInput(input);

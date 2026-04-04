@@ -1,8 +1,8 @@
 import { useEffect, useReducer } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
-import type { MessagesUpsertPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
-import type { ChatMessage, RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import type { MessageDeltaPayload, MessagesUpsertPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
+import { DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX, type ChatMessage, type RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import { createEmptySnapshot, sortChronologicalMessages } from '@/lib/runtime.ts';
 import {
@@ -82,6 +82,10 @@ type WorkspaceAction =
       type: 'runtime/reset-for-draft-thread';
     }
   | {
+      type: 'runtime/message-delta-received';
+      payload: MessageDeltaPayload;
+    }
+  | {
       type: 'runtime/messages-upserted';
       payload: MessagesUpsertPayload;
     };
@@ -97,6 +101,7 @@ export interface WorkspaceStore {
   sentAttachmentBindingsByConversationId: Record<string, SentAttachmentBinding[]>;
   snapshot: RuntimeSnapshot;
   workspaceState: PersistedWorkspaceState;
+  applyMessageDelta: (payload: MessageDeltaPayload) => void;
   applyMessagesUpsert: (payload: MessagesUpsertPayload) => void;
   dispatch: Dispatch<WorkspaceAction>;
   patchWorkspace: (updater: (current: PersistedWorkspaceState) => PersistedWorkspaceState) => void;
@@ -124,6 +129,19 @@ function resolveStateUpdate<T>(current: T, value: SetStateAction<T>): T {
   return typeof value === 'function' ? (value as (current: T) => T)(current) : value;
 }
 
+function trimRuntimeMessages(messages: ChatMessage[]): { messages: ChatMessage[]; hasOlderMessages: boolean } {
+  if (messages.length <= DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX) {
+    return {
+      messages,
+      hasOlderMessages: false
+    };
+  }
+  return {
+    messages: messages.slice(-DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX),
+    hasOlderMessages: true
+  };
+}
+
 function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPayload): RuntimeSnapshot {
   const isSameConversation =
     current.providerId === payload.providerId && current.conversationKey === payload.conversationKey;
@@ -147,14 +165,71 @@ function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPa
     messagesById.set(message.id, message);
   }
 
+  const trimmed = trimRuntimeMessages(sortChronologicalMessages([...messagesById.values()]));
+
   return {
     ...baseSnapshot,
-    messages: sortChronologicalMessages(
-      payload.recentMessageIds
-        .map((messageId) => messagesById.get(messageId))
-        .filter(Boolean) as ChatMessage[]
-    ),
-    hasOlderMessages: payload.hasOlderMessages
+    messages: trimmed.messages,
+    hasOlderMessages: payload.hasOlderMessages || trimmed.hasOlderMessages
+  };
+}
+
+function applyMessageDelta(current: RuntimeSnapshot, payload: MessageDeltaPayload): RuntimeSnapshot {
+  const isSameConversation =
+    current.providerId === payload.providerId && current.conversationKey === payload.conversationKey;
+  if (!isSameConversation) {
+    return current;
+  }
+
+  const messages: ChatMessage[] = current.messages.map((message): ChatMessage => {
+    if (message.id !== payload.messageId) {
+      return message;
+    }
+
+    const blocks = message.blocks.slice();
+    const blockIndex = blocks.findIndex((block) => block.id === payload.blockId);
+    if (blockIndex >= 0) {
+      const block = blocks[blockIndex];
+      if (payload.blockType === 'text' && block.type === 'text') {
+        blocks[blockIndex] = {
+          ...block,
+          text: `${block.text}${payload.delta}`
+        };
+      } else if (payload.blockType === 'tool_result' && block.type === 'tool_result') {
+        blocks[blockIndex] = {
+          ...block,
+          content: `${block.content}${payload.delta}`
+        };
+      }
+    } else if (payload.blockType === 'text') {
+      blocks.push({
+        id: payload.blockId,
+        type: 'text',
+        text: payload.delta
+      });
+    } else {
+      blocks.push({
+        id: payload.blockId,
+        type: 'tool_result',
+        toolCallId: payload.messageId,
+        content: payload.delta,
+        isError: false
+      });
+    }
+
+    return {
+      ...message,
+      blocks,
+      status: message.status === 'error' ? 'error' : 'streaming'
+    };
+  });
+
+  const trimmed = trimRuntimeMessages(sortChronologicalMessages(messages));
+
+  return {
+    ...current,
+    messages: trimmed.messages,
+    hasOlderMessages: current.hasOlderMessages || trimmed.hasOlderMessages
   };
 }
 
@@ -253,6 +328,11 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
         ...state,
         snapshot: createEmptySnapshot()
       };
+    case 'runtime/message-delta-received':
+      return {
+        ...state,
+        snapshot: applyMessageDelta(state.snapshot, action.payload)
+      };
     case 'runtime/messages-upserted': {
       const nextSnapshot = applyMessagesUpsert(state.snapshot, action.payload);
       return {
@@ -335,6 +415,10 @@ export function useWorkspaceStore(): WorkspaceStore {
     dispatch({ type: 'runtime/messages-upserted', payload });
   }
 
+  function applyRuntimeMessageDelta(payload: MessageDeltaPayload): void {
+    dispatch({ type: 'runtime/message-delta-received', payload });
+  }
+
   return {
     error: state.error,
     mobilePane: state.mobilePane,
@@ -346,6 +430,7 @@ export function useWorkspaceStore(): WorkspaceStore {
     sentAttachmentBindingsByConversationId: state.sentAttachmentBindingsByConversationId,
     snapshot: state.snapshot,
     workspaceState: state.workspaceState,
+    applyMessageDelta: applyRuntimeMessageDelta,
     applyMessagesUpsert: applyRuntimeMessagesUpsert,
     dispatch,
     patchWorkspace,

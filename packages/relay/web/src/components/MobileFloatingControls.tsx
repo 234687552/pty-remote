@@ -18,6 +18,7 @@ interface MobileFloatingControlsProps {
   mobileProjectTitle: string;
   mobileSidebarOpen: boolean;
   statusBadges: MobileStatusBadge[];
+  terminalSupported: boolean;
   onFilesOpen: () => void;
   onMobilePaneChange: (pane: WorkspacePane) => void;
   onSidebarOpen: () => void;
@@ -231,6 +232,7 @@ export function MobileFloatingControls({
   mobileProjectTitle,
   mobileSidebarOpen,
   statusBadges,
+  terminalSupported,
   onFilesOpen,
   onMobilePaneChange,
   onSidebarOpen,
@@ -276,6 +278,9 @@ export function MobileFloatingControls({
   }, [isTerminalPane, openPanel]);
 
   function handlePaneSwitch(): void {
+    if (!terminalSupported) {
+      return;
+    }
     onMobilePaneChange(targetPane);
     setOpenPanel('none');
   }
@@ -344,13 +349,15 @@ export function MobileFloatingControls({
             {isTerminalPane ? <JumpToBottomIcon /> : <NextQuestionIcon />}
           </ActionButton>
 
-          <ActionButton
-            active
-            label={targetPane === 'terminal' ? '切到终端' : '切到会话'}
-            onClick={handlePaneSwitch}
-          >
-            <PaneSwitchIcon targetPane={targetPane} />
-          </ActionButton>
+          {terminalSupported ? (
+            <ActionButton
+              active
+              label={targetPane === 'terminal' ? '切到终端' : '切到会话'}
+              onClick={handlePaneSwitch}
+            >
+              <PaneSwitchIcon targetPane={targetPane} />
+            </ActionButton>
+          ) : null}
 
           <ActionButton disabled={!canOpenFiles} label="文件浏览" onClick={handleFilesOpen}>
             <FilesIcon />

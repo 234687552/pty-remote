@@ -5,7 +5,7 @@ interface AppShellProps {
   composer: ReactNode;
   renderHeader: () => ReactNode;
   sidebar: ReactNode;
-  terminal: ReactNode;
+  terminal?: ReactNode;
   workspaceBrowser?: ReactNode;
   workspaceBrowserOpen?: boolean;
 }
@@ -24,11 +24,13 @@ export function AppShell({ chat, composer, renderHeader, sidebar, terminal, work
                 className={
                   workspaceBrowserOpen
                     ? 'hidden'
-                    : 'flex min-h-0 flex-1 flex-col gap-0 overflow-hidden lg:grid lg:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)] lg:gap-4'
+                    : terminal
+                      ? 'flex min-h-0 flex-1 flex-col gap-0 overflow-hidden lg:grid lg:grid-cols-[minmax(0,1.08fr)_minmax(0,0.92fr)] lg:gap-4'
+                      : 'flex min-h-0 flex-1 flex-col gap-0 overflow-hidden'
                 }
               >
                 {chat}
-                {terminal}
+                {terminal ?? null}
               </div>
 
               {workspaceBrowser ? (

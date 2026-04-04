@@ -1,4 +1,4 @@
-import { Children, memo, useEffect, useMemo, useRef, useState } from 'react';
+import { Children, memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 
 import ReactMarkdown from 'react-markdown';
@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm';
 import type { Mermaid as MermaidApi } from 'mermaid';
 import type { PanZoom as PanZoomInstance } from 'panzoom';
 import type { TerminalFrameLine, TerminalFrameSnapshot } from '@lzdi/pty-remote-protocol/terminal-frame.ts';
+import type { RuntimeRequestPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
 
 import type {
   ChatAttachment,
@@ -31,6 +32,25 @@ interface SvgDimensions {
   width: number;
   height: number;
 }
+
+interface MermaidRenderSnapshot {
+  bindFunctions: ((element: Element) => void) | null;
+  error: string;
+  svg: string;
+  svgDimensions: SvgDimensions | null;
+}
+
+type MarkdownRenderSegment =
+  | {
+      content: string;
+      key: string;
+      type: 'text';
+    }
+  | {
+      definition: string;
+      key: string;
+      type: 'mermaid';
+    };
 
 interface ToolCallMeta {
   resultBlock?: ToolResultChatMessageBlock;
@@ -106,7 +126,9 @@ interface ChatPaneProps {
   messages: ChatMessage[];
   onMobileJumpControlsChange?: (controls: MobileJumpControls | null) => void;
   onApprovalInput?: (input: string) => void;
+  onRespondRuntimeRequest?: (payload: { error?: string | null; requestId: string | number; result?: unknown }) => Promise<void> | void;
   paneVisible: boolean;
+  runtimeRequests?: RuntimeRequestPayload[];
   scrollToBottomRequestKey: number;
   visible: boolean;
 }
@@ -115,8 +137,16 @@ const QUESTION_JUMP_LONG_PRESS_DELAY_MS = 420;
 const SCROLL_BOTTOM_THRESHOLD_PX = 12;
 const KNOWN_TERMINAL_APPROVAL_OPTION_LABELS = ['allow', 'allow for this session', 'always allow', 'cancel'] as const;
 
+const EMPTY_MERMAID_RENDER_SNAPSHOT: MermaidRenderSnapshot = {
+  bindFunctions: null,
+  error: '',
+  svg: '',
+  svgDimensions: null
+};
+
 let mermaidRenderSequence = 0;
 let mermaidLoader: Promise<MermaidApi> | null = null;
+const mermaidRenderCache = new Map<string, MermaidRenderSnapshot & { promise: Promise<MermaidRenderSnapshot> | null }>();
 let panzoomLoader: Promise<typeof import('panzoom').default> | null = null;
 
 function loadMermaid(): Promise<MermaidApi> {
@@ -154,6 +184,473 @@ function loadPanzoom(): Promise<typeof import('panzoom').default> {
   return panzoomLoader;
 }
 
+function getCachedMermaidRenderSnapshot(definition: string): MermaidRenderSnapshot | null {
+  const cached = mermaidRenderCache.get(definition);
+  if (!cached || (!cached.svg && !cached.error)) {
+    return null;
+  }
+
+  return {
+    bindFunctions: cached.bindFunctions,
+    error: cached.error,
+    svg: cached.svg,
+    svgDimensions: cached.svgDimensions
+  };
+}
+
+function setCachedMermaidRenderSnapshot(
+  definition: string,
+  snapshot: MermaidRenderSnapshot,
+  promise: Promise<MermaidRenderSnapshot> | null
+): void {
+  mermaidRenderCache.set(definition, {
+    ...snapshot,
+    promise
+  });
+}
+
+function stringifyRuntimeRequestValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  if (value === null || value === undefined) {
+    return '';
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function runtimeDecisionLabel(decision: unknown): string {
+  if (decision === 'accept') {
+    return 'Allow';
+  }
+  if (decision === 'acceptForSession') {
+    return 'Allow This Session';
+  }
+  if (decision === 'decline') {
+    return 'Decline';
+  }
+  if (decision === 'cancel') {
+    return 'Cancel';
+  }
+  if (decision && typeof decision === 'object') {
+    if ('acceptWithExecpolicyAmendment' in decision) {
+      return 'Allow and Remember Rule';
+    }
+    if ('applyNetworkPolicyAmendment' in decision) {
+      return 'Apply Network Rule';
+    }
+  }
+  return 'Confirm';
+}
+
+function buildRuntimeRequestContext(request: RuntimeRequestPayload): string[] {
+  const params = (request.params ?? null) as Record<string, unknown> | null;
+  if (!params) {
+    return [];
+  }
+
+  switch (request.method) {
+    case 'item/commandExecution/requestApproval': {
+      const lines = [
+        typeof params.reason === 'string' ? params.reason.trim() : '',
+        typeof params.command === 'string' ? `$ ${params.command}` : '',
+        typeof params.cwd === 'string' ? `cwd: ${params.cwd}` : ''
+      ].filter(Boolean);
+      return lines;
+    }
+    case 'item/fileChange/requestApproval':
+      return [typeof params.reason === 'string' ? params.reason.trim() : '', typeof params.grantRoot === 'string' ? `root: ${params.grantRoot}` : ''].filter(Boolean);
+    case 'item/permissions/requestApproval':
+      return [
+        typeof params.reason === 'string' ? params.reason.trim() : '',
+        stringifyRuntimeRequestValue(params.permissions)
+      ].filter(Boolean);
+    case 'item/tool/requestApproval':
+      return [
+        typeof params.toolName === 'string' ? `tool: ${params.toolName}` : '',
+        stringifyRuntimeRequestValue(params.input)
+      ].filter(Boolean);
+    case 'item/tool/requestUserInput':
+      return [];
+    case 'item/tool/requestStructuredInput':
+      return [typeof params.message === 'string' ? params.message.trim() : '', stringifyRuntimeRequestValue(params.requestedSchema)].filter(Boolean);
+    default:
+      return [stringifyRuntimeRequestValue(params)].filter(Boolean);
+  }
+}
+
+function buildGrantedPermissions(permissions: unknown): Record<string, unknown> {
+  if (!permissions || typeof permissions !== 'object') {
+    return {};
+  }
+  const normalized = permissions as { network?: unknown; fileSystem?: unknown };
+  const result: Record<string, unknown> = {};
+  if (normalized.network !== null && normalized.network !== undefined) {
+    result.network = normalized.network;
+  }
+  if (normalized.fileSystem !== null && normalized.fileSystem !== undefined) {
+    result.fileSystem = normalized.fileSystem;
+  }
+  return result;
+}
+
+function RuntimeRequestNotice({
+  canRespond,
+  onRespond,
+  request
+}: {
+  canRespond: boolean;
+  onRespond?: (payload: { error?: string | null; requestId: string | number; result?: unknown }) => Promise<void> | void;
+  request: RuntimeRequestPayload;
+}) {
+  const [submitting, setSubmitting] = useState(false);
+  const [errorText, setErrorText] = useState('');
+  const [toolAnswers, setToolAnswers] = useState<Record<string, string[]>>({});
+  const params = (request.params ?? null) as Record<string, unknown> | null;
+  const contextLines = buildRuntimeRequestContext(request);
+
+  async function submit(payload: { error?: string | null; result?: unknown }): Promise<void> {
+    if (!onRespond || !canRespond) {
+      return;
+    }
+    setSubmitting(true);
+    setErrorText('');
+    try {
+      await onRespond({
+        requestId: request.requestId,
+        ...payload
+      });
+    } catch (error) {
+      setErrorText(error instanceof Error ? error.message : 'Failed to respond');
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  function renderCommandApproval(): React.ReactNode {
+    const availableDecisions = Array.isArray(params?.availableDecisions) && params?.availableDecisions.length > 0
+      ? params.availableDecisions
+      : ['accept', 'acceptForSession', 'decline', 'cancel'];
+
+    return (
+      <div className="space-y-2">
+        {availableDecisions.map((decision, index) => (
+          <button
+            key={`${request.requestId}:${index}`}
+            type="button"
+            disabled={!canRespond || submitting}
+            onClick={() => {
+              void submit({ result: { decision } });
+            }}
+            className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-3 text-left text-sm font-medium text-zinc-900 transition hover:border-amber-300 hover:bg-amber-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+          >
+            {runtimeDecisionLabel(decision)}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  function renderFileChangeApproval(): React.ReactNode {
+    const decisions = ['accept', 'acceptForSession', 'decline', 'cancel'];
+    return (
+      <div className="space-y-2">
+        {decisions.map((decision) => (
+          <button
+            key={`${request.requestId}:${decision}`}
+            type="button"
+            disabled={!canRespond || submitting}
+            onClick={() => {
+              void submit({ result: { decision } });
+            }}
+            className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-3 text-left text-sm font-medium text-zinc-900 transition hover:border-amber-300 hover:bg-amber-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+          >
+            {runtimeDecisionLabel(decision)}
+          </button>
+        ))}
+      </div>
+    );
+  }
+
+  function renderPermissionsApproval(): React.ReactNode {
+    return (
+      <div className="space-y-2">
+        {(['turn', 'session'] as const).map((scope) => (
+          <button
+            key={`${request.requestId}:${scope}`}
+            type="button"
+            disabled={!canRespond || submitting}
+            onClick={() => {
+              void submit({
+                result: {
+                  permissions: buildGrantedPermissions(params?.permissions),
+                  scope
+                }
+              });
+            }}
+            className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-3 text-left text-sm font-medium text-zinc-900 transition hover:border-amber-300 hover:bg-amber-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+          >
+            {scope === 'turn' ? 'Grant For This Turn' : 'Grant For This Session'}
+          </button>
+        ))}
+        <button
+          type="button"
+          disabled={!canRespond || submitting}
+          onClick={() => {
+            void submit({ error: 'declined' });
+          }}
+          className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-3 text-left text-sm font-medium text-zinc-900 transition hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+        >
+          Decline
+        </button>
+      </div>
+    );
+  }
+
+  function renderToolRequestUserInput(): React.ReactNode {
+    const questions = Array.isArray(params?.questions) ? (params.questions as Array<Record<string, unknown>>) : [];
+    return (
+      <form
+        className="space-y-4"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const answers = Object.fromEntries(
+            questions
+              .map((question) => {
+                const questionId = typeof question.id === 'string' ? question.id : '';
+                if (!questionId) {
+                  return null;
+                }
+                const selectedAnswers = toolAnswers[questionId] ?? [];
+                return [
+                  questionId,
+                  {
+                    answers: selectedAnswers
+                  }
+                ];
+              })
+              .filter(Boolean) as Array<[string, { answers: string[] }]>
+          );
+          void submit({
+            result: {
+              answers
+            }
+          });
+        }}
+      >
+        {questions.map((question, questionIndex) => {
+          const questionId = typeof question.id === 'string' ? question.id : `q-${questionIndex}`;
+          const header = typeof question.header === 'string' ? question.header : 'Question';
+          const prompt = typeof question.question === 'string' ? question.question : '';
+          const isOther = question.isOther === true;
+          const options = Array.isArray(question.options) ? (question.options as Array<Record<string, unknown>>) : [];
+          const selected = toolAnswers[questionId] ?? [];
+
+          return (
+            <div key={questionId} className="space-y-2 rounded-xl border border-zinc-200 bg-white px-3 py-3">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">{header}</div>
+              <div className="text-sm font-medium text-zinc-900">{prompt}</div>
+              {options.length > 0 ? (
+                <div className="space-y-2">
+                  {options.map((option, optionIndex) => {
+                    const label = typeof option.label === 'string' ? option.label : `Option ${optionIndex + 1}`;
+                    const checked = selected.includes(label);
+                    return (
+                      <label key={`${questionId}:${label}`} className="flex cursor-pointer items-start gap-3 rounded-lg border border-zinc-200 px-3 py-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(event) => {
+                            setToolAnswers((current) => {
+                              const existing = current[questionId] ?? [];
+                              const nextAnswers = event.target.checked
+                                ? [...existing, label]
+                                : existing.filter((entry) => entry !== label);
+                              return {
+                                ...current,
+                                [questionId]: nextAnswers
+                              };
+                            });
+                          }}
+                        />
+                        <div className="min-w-0">
+                          <div className="font-medium text-zinc-900">{label}</div>
+                          {typeof option.description === 'string' && option.description.trim() ? (
+                            <div className="mt-0.5 text-xs text-zinc-500">{option.description}</div>
+                          ) : null}
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              ) : null}
+              {isOther || options.length === 0 ? (
+                <textarea
+                  value={selected.join('\n')}
+                  onChange={(event) => {
+                    setToolAnswers((current) => ({
+                      ...current,
+                      [questionId]: event.target.value
+                        .split('\n')
+                        .map((entry) => entry.trim())
+                        .filter(Boolean)
+                    }));
+                  }}
+                  rows={3}
+                  className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm outline-none transition focus:border-zinc-400"
+                  placeholder="Enter your answer"
+                />
+              ) : null}
+            </div>
+          );
+        })}
+        <button
+          type="submit"
+          disabled={!canRespond || submitting}
+          className="w-full rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-3 text-left text-sm font-semibold text-emerald-900 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:border-zinc-200 disabled:bg-zinc-100 disabled:text-zinc-400"
+        >
+          Submit Answers
+        </button>
+      </form>
+    );
+  }
+
+  function renderClaudeToolApproval(): React.ReactNode {
+    return (
+      <div className="space-y-2">
+        <button
+          type="button"
+          disabled={!canRespond || submitting}
+          onClick={() => {
+            void submit({ result: { behavior: 'allow' } });
+          }}
+          className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-3 text-left text-sm font-medium text-zinc-900 transition hover:border-emerald-300 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+        >
+          Allow
+        </button>
+        <button
+          type="button"
+          disabled={!canRespond || submitting}
+          onClick={() => {
+            void submit({ result: { behavior: 'deny', message: 'Denied by operator' } });
+          }}
+          className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-3 text-left text-sm font-medium text-zinc-900 transition hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+        >
+          Deny
+        </button>
+      </div>
+    );
+  }
+
+  function renderClaudeElicitation(): React.ReactNode {
+    const value = toolAnswers.__claude_json__?.join('\n') ?? '';
+    return (
+      <form
+        className="space-y-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!value.trim()) {
+            void submit({ result: { action: 'cancel' } });
+            return;
+          }
+          try {
+            void submit({
+              result: {
+                action: 'submit',
+                content: JSON.parse(value)
+              }
+            });
+          } catch (error) {
+            setErrorText(error instanceof Error ? error.message : 'Invalid JSON');
+          }
+        }}
+      >
+        <textarea
+          value={value}
+          onChange={(event) => {
+            setToolAnswers((current) => ({
+              ...current,
+              __claude_json__: [event.target.value]
+            }));
+          }}
+          rows={6}
+          className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm outline-none transition focus:border-zinc-400"
+          placeholder="Enter JSON response, or leave empty to cancel"
+        />
+        <button
+          type="submit"
+          disabled={!canRespond || submitting}
+          className="w-full rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-3 text-left text-sm font-semibold text-emerald-900 transition hover:bg-emerald-100 disabled:cursor-not-allowed disabled:border-zinc-200 disabled:bg-zinc-100 disabled:text-zinc-400"
+        >
+          Submit JSON
+        </button>
+        <button
+          type="button"
+          disabled={!canRespond || submitting}
+          onClick={() => {
+            void submit({ result: { action: 'cancel' } });
+          }}
+          className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-3 text-left text-sm font-medium text-zinc-900 transition hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+        >
+          Cancel
+        </button>
+      </form>
+    );
+  }
+
+  function renderActions(): React.ReactNode {
+    switch (request.method) {
+      case 'item/commandExecution/requestApproval':
+        return renderCommandApproval();
+      case 'item/fileChange/requestApproval':
+        return renderFileChangeApproval();
+      case 'item/permissions/requestApproval':
+        return renderPermissionsApproval();
+      case 'item/tool/requestApproval':
+        return renderClaudeToolApproval();
+      case 'item/tool/requestUserInput':
+        return renderToolRequestUserInput();
+      case 'item/tool/requestStructuredInput':
+        return renderClaudeElicitation();
+      default:
+        return (
+          <button
+            type="button"
+            disabled={!canRespond || submitting}
+            onClick={() => {
+              void submit({ error: `unsupported request method: ${request.method}` });
+            }}
+            className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-3 text-left text-sm font-medium text-zinc-900 transition hover:border-red-300 hover:bg-red-50 disabled:cursor-not-allowed disabled:bg-zinc-100 disabled:text-zinc-400"
+          >
+            Dismiss Unsupported Request
+          </button>
+        );
+    }
+  }
+
+  return (
+    <section className="overflow-hidden rounded-2xl border border-emerald-200 bg-emerald-50/85 shadow-sm">
+      <div className="border-b border-emerald-200/80 px-4 py-3">
+        <div className="text-sm font-semibold text-zinc-950">Pending runtime request</div>
+        <div className="mt-1 text-xs leading-5 text-zinc-600">{request.method}</div>
+      </div>
+      <div className="space-y-3 px-4 py-4">
+        {contextLines.length > 0 ? (
+          <pre className="overflow-auto rounded-xl border border-zinc-200 bg-white px-3 py-2 text-[11px] leading-5 whitespace-pre-wrap break-all text-zinc-700">
+            {contextLines.join('\n')}
+          </pre>
+        ) : null}
+        {renderActions()}
+        {errorText ? <div className="text-xs text-red-600">{errorText}</div> : null}
+      </div>
+    </section>
+  );
+}
+
 function normalizeClassName(className: unknown): string {
   if (typeof className === 'string') {
     return className;
@@ -177,30 +674,92 @@ function getMarkdownTextContent(children: React.ReactNode): string {
     .join('');
 }
 
-function getMarkdownNodeText(node: MarkdownNode | undefined): string {
-  if (!node) {
-    return '';
-  }
-
-  if (typeof node.value === 'string') {
-    return node.value;
-  }
-
-  return node.children?.map((child) => getMarkdownNodeText(child)).join('') ?? '';
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function getMermaidDefinition(node: MarkdownNode | undefined): string | null {
-  const codeNode = node?.children?.find((child) => child.tagName === 'code');
-  if (!codeNode) {
-    return null;
+function containsMermaidFence(markdown: string): boolean {
+  return /^ {0,3}(`{3,}|~{3,})[ \t]*mermaid(?:[ \t].*)?$/im.test(markdown);
+}
+
+function getMarkdownLineRanges(markdown: string): Array<{ content: string; end: number; start: number }> {
+  const ranges: Array<{ content: string; end: number; start: number }> = [];
+  let lineStart = 0;
+
+  while (lineStart < markdown.length) {
+    const lineBreakIndex = markdown.indexOf('\n', lineStart);
+    const lineEnd = lineBreakIndex === -1 ? markdown.length : lineBreakIndex + 1;
+    const line = markdown.slice(lineStart, lineEnd);
+    ranges.push({
+      content: line.replace(/\r?\n$/, ''),
+      end: lineEnd,
+      start: lineStart
+    });
+    lineStart = lineEnd;
   }
 
-  const language = getMarkdownCodeLanguage(normalizeClassName(codeNode.properties?.className));
-  if (language !== 'mermaid') {
-    return null;
+  return ranges;
+}
+
+function getMarkdownRenderSegments(markdown: string): MarkdownRenderSegment[] {
+  if (!markdown) {
+    return [];
   }
 
-  return getMarkdownNodeText(codeNode).trimEnd();
+  const lineRanges = getMarkdownLineRanges(markdown);
+  const segments: MarkdownRenderSegment[] = [];
+  let cursor = 0;
+
+  for (let index = 0; index < lineRanges.length; index += 1) {
+    const openingMatch = lineRanges[index]?.content.match(/^ {0,3}(`{3,}|~{3,})[ \t]*mermaid(?:[ \t].*)?$/i);
+    if (!openingMatch) {
+      continue;
+    }
+
+    const openingFence = openingMatch[1];
+    const closingFencePattern = new RegExp(`^ {0,3}${escapeRegExp(openingFence[0])}{${openingFence.length},}[ \\t]*$`);
+    let closingIndex = -1;
+
+    for (let cursorIndex = index + 1; cursorIndex < lineRanges.length; cursorIndex += 1) {
+      if (closingFencePattern.test(lineRanges[cursorIndex]?.content ?? '')) {
+        closingIndex = cursorIndex;
+        break;
+      }
+    }
+
+    if (closingIndex === -1) {
+      break;
+    }
+
+    const openingLine = lineRanges[index];
+    const closingLine = lineRanges[closingIndex];
+    if (cursor < openingLine.start) {
+      segments.push({
+        content: markdown.slice(cursor, openingLine.start),
+        key: `text:${cursor}`,
+        type: 'text'
+      });
+    }
+
+    segments.push({
+      definition: markdown.slice(openingLine.end, closingLine.start).trimEnd(),
+      key: `mermaid:${openingLine.start}`,
+      type: 'mermaid'
+    });
+
+    cursor = closingLine.end;
+    index = closingIndex;
+  }
+
+  if (cursor < markdown.length) {
+    segments.push({
+      content: markdown.slice(cursor),
+      key: `text:${cursor}`,
+      type: 'text'
+    });
+  }
+
+  return segments;
 }
 
 function getSvgDimensions(svg: string): SvgDimensions | null {
@@ -247,16 +806,62 @@ function createMermaidRenderHost(): HTMLDivElement {
   return renderHost;
 }
 
+async function renderMermaidDefinition(definition: string): Promise<MermaidRenderSnapshot> {
+  const cached = mermaidRenderCache.get(definition);
+  if (cached?.promise) {
+    return cached.promise;
+  }
+
+  const cachedSnapshot = getCachedMermaidRenderSnapshot(definition);
+  if (cachedSnapshot) {
+    return cachedSnapshot;
+  }
+
+  const pendingSnapshot = { ...EMPTY_MERMAID_RENDER_SNAPSHOT };
+  const promise = (async () => {
+    const renderHost = createMermaidRenderHost();
+
+    try {
+      const mermaidApi = await loadMermaid();
+      const renderId = `mermaid-diagram-${++mermaidRenderSequence}`;
+      const { svg, bindFunctions } = await mermaidApi.render(renderId, definition, renderHost);
+      const nextSnapshot: MermaidRenderSnapshot = {
+        bindFunctions: bindFunctions ?? null,
+        error: '',
+        svg,
+        svgDimensions: getSvgDimensions(svg)
+      };
+
+      setCachedMermaidRenderSnapshot(definition, nextSnapshot, null);
+      return nextSnapshot;
+    } catch (renderError) {
+      const errorSnapshot: MermaidRenderSnapshot = {
+        ...EMPTY_MERMAID_RENDER_SNAPSHOT,
+        error: renderError instanceof Error ? renderError.message : 'Mermaid could not render this diagram.'
+      };
+
+      setCachedMermaidRenderSnapshot(definition, errorSnapshot, null);
+      return errorSnapshot;
+    } finally {
+      renderHost.remove();
+    }
+  })();
+
+  setCachedMermaidRenderSnapshot(definition, pendingSnapshot, promise);
+  return promise;
+}
+
 function MermaidDiagram({ definition }: { definition: string }) {
+  const cachedRenderSnapshot = getCachedMermaidRenderSnapshot(definition);
   const inlineContainerRef = useRef<HTMLDivElement | null>(null);
   const expandedViewportRef = useRef<HTMLDivElement | null>(null);
   const expandedPanTargetRef = useRef<HTMLDivElement | null>(null);
   const expandedContentRef = useRef<HTMLDivElement | null>(null);
   const expandedPanzoomRef = useRef<PanZoomInstance | null>(null);
-  const bindFunctionsRef = useRef<((element: Element) => void) | null>(null);
-  const [svg, setSvg] = useState('');
-  const [svgDimensions, setSvgDimensions] = useState<SvgDimensions | null>(null);
-  const [error, setError] = useState('');
+  const bindFunctionsRef = useRef<((element: Element) => void) | null>(cachedRenderSnapshot?.bindFunctions ?? null);
+  const [svg, setSvg] = useState(cachedRenderSnapshot?.svg ?? '');
+  const [svgDimensions, setSvgDimensions] = useState<SvgDimensions | null>(cachedRenderSnapshot?.svgDimensions ?? null);
+  const [error, setError] = useState(cachedRenderSnapshot?.error ?? '');
   const [isExpanded, setIsExpanded] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
 
@@ -269,10 +874,45 @@ function MermaidDiagram({ definition }: { definition: string }) {
     let cancelled = false;
     let frameId = 0;
 
+    const applyRenderSnapshot = (snapshot: MermaidRenderSnapshot) => {
+      bindFunctionsRef.current = snapshot.bindFunctions;
+      setSvg(snapshot.svg);
+      setSvgDimensions(snapshot.svgDimensions);
+      setError(snapshot.error);
+    };
+
+    const queueBindFunctions = () => {
+      const bindFunctions = bindFunctionsRef.current;
+      if (!bindFunctions) {
+        return;
+      }
+
+      frameId = window.requestAnimationFrame(() => {
+        if (!cancelled && inlineContainerRef.current) {
+          bindFunctions(inlineContainerRef.current);
+        }
+      });
+    };
+
     if (!definition.trim()) {
       setSvg('');
       setSvgDimensions(null);
       setError('Diagram is empty.');
+      bindFunctionsRef.current = null;
+      return () => {
+        if (frameId) {
+          window.cancelAnimationFrame(frameId);
+        }
+      };
+    }
+
+    const cachedSnapshot = getCachedMermaidRenderSnapshot(definition);
+    if (cachedSnapshot) {
+      applyRenderSnapshot(cachedSnapshot);
+      if (cachedSnapshot.svg) {
+        queueBindFunctions();
+      }
+
       return () => {
         if (frameId) {
           window.cancelAnimationFrame(frameId);
@@ -281,38 +921,26 @@ function MermaidDiagram({ definition }: { definition: string }) {
     }
 
     setSvg('');
+    setSvgDimensions(null);
     setError('');
+    bindFunctionsRef.current = null;
 
     const renderDiagram = async () => {
-      const renderHost = createMermaidRenderHost();
-
       try {
-        const mermaidApi = await loadMermaid();
-        const renderId = `mermaid-diagram-${++mermaidRenderSequence}`;
-        const { svg: nextSvg, bindFunctions } = await mermaidApi.render(renderId, definition, renderHost);
+        const nextSnapshot = await renderMermaidDefinition(definition);
         if (cancelled) {
           return;
         }
 
-        setSvg(nextSvg);
-        setSvgDimensions(getSvgDimensions(nextSvg));
-        bindFunctionsRef.current = bindFunctions ?? null;
-        frameId = window.requestAnimationFrame(() => {
-          if (!cancelled && bindFunctions && inlineContainerRef.current) {
-            bindFunctions(inlineContainerRef.current);
-          }
+        applyRenderSnapshot(nextSnapshot);
+        if (nextSnapshot.svg) {
+          queueBindFunctions();
+        }
+      } catch {
+        applyRenderSnapshot({
+          ...EMPTY_MERMAID_RENDER_SNAPSHOT,
+          error: 'Mermaid could not render this diagram.'
         });
-      } catch (renderError) {
-        if (cancelled) {
-          return;
-        }
-
-        setSvg('');
-        setSvgDimensions(null);
-        bindFunctionsRef.current = null;
-        setError(renderError instanceof Error ? renderError.message : 'Mermaid could not render this diagram.');
-      } finally {
-        renderHost.remove();
       }
     };
 
@@ -535,7 +1163,7 @@ function MermaidDiagram({ definition }: { definition: string }) {
   );
 }
 
-const MessageMarkdown = memo(function MessageMarkdown({
+const MarkdownTextSegment = memo(function MarkdownTextSegment({
   content,
   tone = 'default'
 }: {
@@ -546,125 +1174,154 @@ const MessageMarkdown = memo(function MessageMarkdown({
   const isMuted = tone === 'muted';
 
   return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      components={{
+        a: ({ ...props }) => (
+          <a
+            {...props}
+            className={
+              isInverse
+                ? 'text-sky-900 underline underline-offset-2'
+                : isMuted
+                  ? 'text-zinc-500 underline underline-offset-2'
+                  : 'text-blue-700 underline underline-offset-2'
+            }
+            target="_blank"
+            rel="noreferrer"
+          />
+        ),
+        blockquote: ({ ...props }) => (
+          <blockquote
+            {...props}
+            className={
+              isInverse
+                ? 'border-l-2 border-sky-300 pl-3 leading-[1.5] text-zinc-700'
+                : isMuted
+                  ? 'border-l-2 border-zinc-200 pl-3 leading-[1.5] text-zinc-500'
+                  : 'border-l-2 border-zinc-300 pl-3 leading-[1.5] text-zinc-600'
+            }
+          />
+        ),
+        code: ({ children, className, ...props }) => {
+          const codeContent = getMarkdownTextContent(children);
+          const isBlock = Boolean(className) || codeContent.includes('\n');
+          if (isBlock) {
+            const codeClassName = [
+              className,
+              isInverse
+                ? 'block overflow-x-auto rounded-xl border border-sky-200 bg-sky-100 px-4 py-3 text-xs leading-5 text-zinc-900'
+                : isMuted
+                  ? 'block overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-3 text-xs leading-5 text-zinc-600 not-italic'
+                  : 'block overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-3 text-xs leading-5 text-zinc-800'
+            ]
+              .filter(Boolean)
+              .join(' ');
+
+            return (
+              <code {...props} className={codeClassName}>
+                {children}
+              </code>
+            );
+          }
+
+          return (
+            <code
+              {...props}
+              className={
+                isInverse
+                  ? 'rounded bg-sky-100 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
+                  : isMuted
+                    ? 'rounded bg-zinc-100 px-1.5 py-0.5 text-[0.85em] text-zinc-600 not-italic'
+                    : 'rounded bg-zinc-200 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
+              }
+            >
+              {children}
+            </code>
+          );
+        },
+        h1: ({ ...props }) => (
+          <h1
+            {...props}
+            className={isMuted ? 'text-lg font-semibold leading-tight text-zinc-600 italic' : 'text-lg font-semibold leading-tight text-zinc-950'}
+          />
+        ),
+        h2: ({ ...props }) => (
+          <h2
+            {...props}
+            className={isMuted ? 'text-base font-semibold leading-tight text-zinc-600 italic' : 'text-base font-semibold leading-tight text-zinc-950'}
+          />
+        ),
+        h3: ({ ...props }) => (
+          <h3
+            {...props}
+            className={isMuted ? 'text-sm font-semibold leading-tight text-zinc-600 italic' : 'text-sm font-semibold leading-tight text-zinc-950'}
+          />
+        ),
+        li: ({ ...props }) => <li {...props} className="ml-5 list-item leading-[1.45]" />,
+        ol: ({ ...props }) => <ol {...props} className="list-decimal space-y-0 pl-5" />,
+        p: ({ ...props }) => <p {...props} className="whitespace-pre-wrap break-words leading-[1.5]" />,
+        pre: ({ ...props }) => (
+          <pre
+            {...props}
+            className={
+              isInverse
+                ? 'overflow-x-auto rounded-xl border border-sky-200 bg-sky-100'
+                : isMuted
+                  ? 'overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 text-zinc-600 not-italic'
+                  : 'overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100'
+            }
+          />
+        ),
+        ul: ({ ...props }) => <ul {...props} className="list-disc space-y-0 pl-5" />
+      }}
+    >
+      {content}
+    </ReactMarkdown>
+  );
+});
+
+const MessageMarkdown = memo(function MessageMarkdown({
+  content,
+  tone = 'default'
+}: {
+  content: string;
+  tone?: 'default' | 'inverse' | 'muted';
+}) {
+  const isInverse = tone === 'inverse';
+  const isMuted = tone === 'muted';
+  const hasMermaidFence = useMemo(() => containsMermaidFence(content), [content]);
+  const renderSegments = useMemo(() => getMarkdownRenderSegments(content), [content]);
+
+  useLayoutEffect(() => {
+    if (!hasMermaidFence) {
+      return;
+    }
+
+    void loadMermaid();
+    for (const segment of renderSegments) {
+      if (segment.type === 'mermaid') {
+        void renderMermaidDefinition(segment.definition);
+      }
+    }
+  }, [hasMermaidFence, renderSegments]);
+
+  return (
     <div
       className={[
         'markdown-body max-w-full space-y-1.5 leading-[1.5]',
         isInverse ? 'text-zinc-950' : isMuted ? 'text-zinc-500 italic' : 'text-zinc-800'
       ].join(' ')}
     >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          a: ({ ...props }) => (
-            <a
-              {...props}
-              className={
-                isInverse
-                  ? 'text-sky-900 underline underline-offset-2'
-                  : isMuted
-                    ? 'text-zinc-500 underline underline-offset-2'
-                    : 'text-blue-700 underline underline-offset-2'
-              }
-              target="_blank"
-              rel="noreferrer"
-            />
-          ),
-          blockquote: ({ ...props }) => (
-            <blockquote
-              {...props}
-              className={
-                isInverse
-                  ? 'border-l-2 border-sky-300 pl-3 leading-[1.5] text-zinc-700'
-                  : isMuted
-                    ? 'border-l-2 border-zinc-200 pl-3 leading-[1.5] text-zinc-500'
-                    : 'border-l-2 border-zinc-300 pl-3 leading-[1.5] text-zinc-600'
-              }
-            />
-          ),
-          code: ({ children, className, ...props }) => {
-            const codeContent = getMarkdownTextContent(children);
-            const isBlock = Boolean(className) || codeContent.includes('\n');
-            if (isBlock) {
-              const codeClassName = [
-                className,
-                isInverse
-                  ? 'block overflow-x-auto rounded-xl border border-sky-200 bg-sky-100 px-4 py-3 text-xs leading-5 text-zinc-900'
-                  : isMuted
-                    ? 'block overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-3 text-xs leading-5 text-zinc-600 not-italic'
-                    : 'block overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-3 text-xs leading-5 text-zinc-800'
-              ]
-                .filter(Boolean)
-                .join(' ');
-
-              return (
-                <code {...props} className={codeClassName}>
-                  {children}
-                </code>
-              );
-            }
-
-            return (
-              <code
-                {...props}
-                className={
-                  isInverse
-                    ? 'rounded bg-sky-100 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
-                    : isMuted
-                      ? 'rounded bg-zinc-100 px-1.5 py-0.5 text-[0.85em] text-zinc-600 not-italic'
-                      : 'rounded bg-zinc-200 px-1.5 py-0.5 text-[0.85em] text-zinc-900'
-                }
-              >
-                {children}
-              </code>
-            );
-          },
-          h1: ({ ...props }) => (
-            <h1
-              {...props}
-              className={isMuted ? 'text-lg font-semibold leading-tight text-zinc-600 italic' : 'text-lg font-semibold leading-tight text-zinc-950'}
-            />
-          ),
-          h2: ({ ...props }) => (
-            <h2
-              {...props}
-              className={isMuted ? 'text-base font-semibold leading-tight text-zinc-600 italic' : 'text-base font-semibold leading-tight text-zinc-950'}
-            />
-          ),
-          h3: ({ ...props }) => (
-            <h3
-              {...props}
-              className={isMuted ? 'text-sm font-semibold leading-tight text-zinc-600 italic' : 'text-sm font-semibold leading-tight text-zinc-950'}
-            />
-          ),
-          li: ({ ...props }) => <li {...props} className="ml-5 list-item leading-[1.45]" />,
-          ol: ({ ...props }) => <ol {...props} className="list-decimal space-y-0 pl-5" />,
-          p: ({ ...props }) => <p {...props} className="whitespace-pre-wrap break-words leading-[1.5]" />,
-          pre: ({ children, node, ...props }) => {
-            const mermaidDefinition = getMermaidDefinition(node as MarkdownNode | undefined);
-            if (mermaidDefinition) {
-              return <MermaidDiagram definition={mermaidDefinition} />;
-            }
-
-            return (
-              <pre
-                {...props}
-                className={
-                  isInverse
-                    ? 'overflow-x-auto rounded-xl border border-sky-200 bg-sky-100'
-                    : isMuted
-                      ? 'overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100 text-zinc-600 not-italic'
-                      : 'overflow-x-auto rounded-xl border border-zinc-200 bg-zinc-100'
-                }
-              >
-                {children}
-              </pre>
-            );
-          },
-          ul: ({ ...props }) => <ul {...props} className="list-disc space-y-0 pl-5" />
-        }}
-      >
-        {content}
-      </ReactMarkdown>
+      {renderSegments.length === 0
+        ? null
+        : renderSegments.map((segment) =>
+            segment.type === 'mermaid' ? (
+              <MermaidDiagram key={segment.key} definition={segment.definition} />
+            ) : (
+              <MarkdownTextSegment key={segment.key} content={segment.content} tone={tone} />
+            )
+          )}
     </div>
   );
 });
@@ -1870,7 +2527,9 @@ export function ChatPane({
   messages,
   onMobileJumpControlsChange,
   onApprovalInput,
+  onRespondRuntimeRequest,
   paneVisible,
+  runtimeRequests = [],
   scrollToBottomRequestKey,
   visible
 }: ChatPaneProps) {
@@ -1892,9 +2551,10 @@ export function ChatPane({
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
   const displayItems = useMemo<ChatPaneDisplayItem[]>(
     () =>
-      activeProviderId === 'codex'
-        ? buildCodexDisplayItems(renderableMessages)
-        : renderableMessages.map((message) => ({ type: 'message' as const, message })),
+      // Keep Codex tool activity as stable message entries instead of regrouping
+      // them into synthetic cards during streaming. Regrouping changes React keys
+      // mid-turn and makes the UI look like cards are being replaced.
+      renderableMessages.map((message) => ({ type: 'message' as const, message })),
     [activeProviderId, renderableMessages]
   );
   // Tool results can arrive as standalone user messages in Claude transcripts.
@@ -2180,6 +2840,14 @@ export function ChatPane({
           onScroll={handleMessagesScroll}
           className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
         >
+          {runtimeRequests.map((request) => (
+            <RuntimeRequestNotice
+              key={`${request.method}:${request.requestId}`}
+              canRespond={connected}
+              onRespond={onRespondRuntimeRequest}
+              request={request}
+            />
+          ))}
           {mergedToolState.interruptedNotice ? <TerminalInterruptedBanner interrupted={mergedToolState.interruptedNotice} /> : null}
           {mergedToolState.approvalNotice ? (
             <TerminalApprovalInlineNotice

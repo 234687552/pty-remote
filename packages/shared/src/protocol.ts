@@ -14,6 +14,7 @@ export interface ProviderRuntimeRegistration {
   cwd: string;
   sessionId: string | null;
   conversationKey: string | null;
+  supportsTerminal: boolean;
 }
 
 export interface CliRegisterResult {
@@ -60,6 +61,7 @@ export type CliCommandName =
   | 'list-project-conversations'
   | 'list-managed-pty-handles'
   | 'select-conversation'
+  | 'hydrate-conversation'
   | 'cleanup-project'
   | 'cleanup-conversation';
 
@@ -109,6 +111,12 @@ export interface CliCommandPayloadMap {
     sessionId: string | null;
     clientRequestId?: string | null;
   };
+  'hydrate-conversation': {
+    cwd: string;
+    conversationKey: string;
+    sessionId: string | null;
+    maxMessages?: number;
+  };
   'cleanup-project': {
     cwd: string;
   };
@@ -143,6 +151,11 @@ export interface SelectConversationResultPayload {
   conversationKey: string;
   sessionId: string | null;
   clientRequestId?: string | null;
+}
+
+export interface HydrateConversationResultPayload {
+  providerId: ProviderId;
+  snapshot: RuntimeSnapshot;
 }
 
 export interface UploadAttachmentResultPayload {
@@ -228,6 +241,7 @@ export interface CliCommandResultPayloadMap {
   'list-project-conversations': ListProjectSessionsResultPayload;
   'list-managed-pty-handles': ListManagedPtyHandlesResultPayload;
   'select-conversation': SelectConversationResultPayload;
+  'hydrate-conversation': HydrateConversationResultPayload;
   'cleanup-project': null;
   'cleanup-conversation': null;
 }
@@ -289,6 +303,14 @@ export interface TerminalInputPayload {
   input: string;
 }
 
+export interface TerminalVisibilityPayload {
+  targetCliId: string | null;
+  targetProviderId: ProviderId | null;
+  conversationKey: string | null;
+  sessionId: string | null;
+  visible: boolean;
+}
+
 export interface TerminalFrameSyncResultPayload {
   ok: boolean;
   error?: string;
@@ -315,6 +337,32 @@ export interface RuntimeMetaPayload {
   status: RuntimeStatus;
 }
 
+export interface RuntimeRequestPayload {
+  cliId: string;
+  providerId: ProviderId | null;
+  conversationKey: string | null;
+  sessionId: string | null;
+  requestId: string | number;
+  method: string;
+  params: unknown;
+}
+
+export interface RuntimeRequestResolvedPayload {
+  cliId: string;
+  providerId: ProviderId | null;
+  conversationKey: string | null;
+  sessionId: string | null;
+  requestId: string | number;
+}
+
+export interface RuntimeRequestResponsePayload {
+  targetCliId: string | null;
+  targetProviderId: ProviderId | null;
+  requestId: string | number;
+  result?: unknown;
+  error?: string | null;
+}
+
 export interface MessagesUpsertPayload {
   cliId: string;
   providerId: ProviderId | null;
@@ -324,6 +372,17 @@ export interface MessagesUpsertPayload {
   recentMessageIds: string[];
   hasOlderMessages: boolean;
   seq?: number;
+}
+
+export interface MessageDeltaPayload {
+  cliId: string;
+  providerId: ProviderId | null;
+  conversationKey: string | null;
+  sessionId: string | null;
+  messageId: string;
+  blockId: string;
+  blockType: 'text' | 'tool_result';
+  delta: string;
 }
 
 export interface WebInitPayload {

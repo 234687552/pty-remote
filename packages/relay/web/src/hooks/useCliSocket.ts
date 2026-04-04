@@ -7,7 +7,11 @@ import type {
   CliCommandPayloadMap,
   CliCommandResult,
   CliStatusPayload,
+  MessageDeltaPayload,
   MessagesUpsertPayload,
+  RuntimeRequestPayload,
+  RuntimeRequestResolvedPayload,
+  RuntimeRequestResponsePayload,
   RuntimeSubscriptionPayload,
   RuntimeSnapshotPayload,
   TerminalFramePatchPayload,
@@ -17,7 +21,6 @@ import type {
 import type { CliDescriptor, ProviderId, RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import { getSocketBaseUrl } from '@/lib/runtime.ts';
-import { readCachedLastSeq } from '@/lib/messages-cache.ts';
 
 interface UseCliSocketOptions {
   activeCliId: string | null;
@@ -28,9 +31,12 @@ interface UseCliSocketOptions {
   socketRef?: MutableRefObject<Socket | null>;
   onConnect?: () => void;
   onDisconnect?: () => void;
+  onMessageDelta?: (payload: MessageDeltaPayload) => void;
   onSnapshot?: (snapshot: RuntimeSnapshot) => void;
   onMessagesUpsert?: (payload: MessagesUpsertPayload) => void;
   onTerminalFramePatch?: (payload: TerminalFramePatchPayload) => void;
+  onRuntimeRequest?: (payload: RuntimeRequestPayload) => void;
+  onRuntimeRequestResolved?: (payload: RuntimeRequestResolvedPayload) => void;
 }
 
 export interface CliSocketController {
@@ -43,6 +49,10 @@ export interface CliSocketController {
     targetCliId?: string | null,
     targetProviderId?: ProviderId | null
   ) => Promise<CliCommandResult<TName>>;
+  sendRuntimeRequestResponse: (
+    payload: Omit<RuntimeRequestResponsePayload, 'targetCliId'>,
+    targetCliId?: string | null
+  ) => Promise<{ ok: boolean; error?: string }>;
 }
 
 export function useCliSocket({
@@ -54,9 +64,12 @@ export function useCliSocket({
   socketRef: externalSocketRef,
   onConnect,
   onDisconnect,
+  onMessageDelta,
   onSnapshot,
   onMessagesUpsert,
-  onTerminalFramePatch
+  onTerminalFramePatch,
+  onRuntimeRequest,
+  onRuntimeRequestResolved
 }: UseCliSocketOptions): CliSocketController {
   const [socketConnected, setSocketConnected] = useState(false);
   const [clis, setClis] = useState<CliDescriptor[]>([]);
@@ -69,10 +82,14 @@ export function useCliSocket({
   const terminalEnabledRef = useRef(Boolean(terminalEnabled));
   const onConnectRef = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
+  const onMessageDeltaRef = useRef(onMessageDelta);
   const onSnapshotRef = useRef(onSnapshot);
   const onMessagesUpsertRef = useRef(onMessagesUpsert);
   const onTerminalFramePatchRef = useRef(onTerminalFramePatch);
+  const onRuntimeRequestRef = useRef(onRuntimeRequest);
+  const onRuntimeRequestResolvedRef = useRef(onRuntimeRequestResolved);
   const sendCommandRef = useRef<CliSocketController['sendCommand'] | null>(null);
+  const sendRuntimeRequestResponseRef = useRef<CliSocketController['sendRuntimeRequestResponse'] | null>(null);
 
   activeCliIdRef.current = activeCliId ?? null;
   activeProviderIdRef.current = activeProviderId ?? null;
@@ -81,26 +98,23 @@ export function useCliSocket({
   terminalEnabledRef.current = Boolean(terminalEnabled);
   onConnectRef.current = onConnect;
   onDisconnectRef.current = onDisconnect;
+  onMessageDeltaRef.current = onMessageDelta;
   onSnapshotRef.current = onSnapshot;
   onMessagesUpsertRef.current = onMessagesUpsert;
   onTerminalFramePatchRef.current = onTerminalFramePatch;
+  onRuntimeRequestRef.current = onRuntimeRequest;
+  onRuntimeRequestResolvedRef.current = onRuntimeRequestResolved;
 
   useEffect(() => {
     function emitRuntimeSubscription(socket: Socket | null): void {
       if (!socket?.connected) {
         return;
       }
-      const lastSeq = readCachedLastSeq(
-        activeProviderIdRef.current,
-        activeConversationKeyRef.current,
-        activeSessionIdRef.current
-      );
       socket.emit('web:runtime-subscribe', {
         targetCliId: activeCliIdRef.current,
         targetProviderId: activeProviderIdRef.current,
         conversationKey: activeConversationKeyRef.current,
         sessionId: activeSessionIdRef.current,
-        lastSeq,
         terminalEnabled: terminalEnabledRef.current
       } satisfies RuntimeSubscriptionPayload);
     }
@@ -153,6 +167,16 @@ export function useCliSocket({
       onMessagesUpsertRef.current?.(payload);
     });
 
+    socket.on('runtime:message-delta', (payload: MessageDeltaPayload) => {
+      if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
+        return;
+      }
+      if (activeConversationKeyRef.current && payload.conversationKey !== activeConversationKeyRef.current) {
+        return;
+      }
+      onMessageDeltaRef.current?.(payload);
+    });
+
     socket.on('terminal:frame-patch', (payload: TerminalFramePatchPayload) => {
       if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
         return;
@@ -161,6 +185,26 @@ export function useCliSocket({
         return;
       }
       onTerminalFramePatchRef.current?.(payload);
+    });
+
+    socket.on('runtime:request', (payload: RuntimeRequestPayload) => {
+      if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
+        return;
+      }
+      if (activeConversationKeyRef.current && payload.conversationKey !== activeConversationKeyRef.current) {
+        return;
+      }
+      onRuntimeRequestRef.current?.(payload);
+    });
+
+    socket.on('runtime:request-resolved', (payload: RuntimeRequestResolvedPayload) => {
+      if (payload.cliId !== activeCliIdRef.current || payload.providerId !== activeProviderIdRef.current) {
+        return;
+      }
+      if (activeConversationKeyRef.current && payload.conversationKey !== activeConversationKeyRef.current) {
+        return;
+      }
+      onRuntimeRequestResolvedRef.current?.(payload);
     });
 
     return () => {
@@ -180,7 +224,6 @@ export function useCliSocket({
       targetProviderId: activeProviderId,
       conversationKey: activeConversationKey,
       sessionId: activeSessionId,
-      lastSeq: readCachedLastSeq(activeProviderId, activeConversationKey, activeSessionId),
       terminalEnabled
     } satisfies RuntimeSubscriptionPayload);
   }, [activeCliId, activeProviderId, activeConversationKey, activeSessionId, socketRef, terminalEnabled]);
@@ -218,10 +261,39 @@ export function useCliSocket({
     };
   }
 
+  if (!sendRuntimeRequestResponseRef.current) {
+    sendRuntimeRequestResponseRef.current = async function sendRuntimeRequestResponse(
+      payload: Omit<RuntimeRequestResponsePayload, 'targetCliId'>,
+      targetCliId = activeCliIdRef.current
+    ): Promise<{ ok: boolean; error?: string }> {
+      const socket = socketRef.current;
+      if (!socket?.connected) {
+        throw new Error('Socket is not connected');
+      }
+      if (!targetCliId) {
+        throw new Error('CLI is not selected');
+      }
+
+      return await new Promise<{ ok: boolean; error?: string }>((resolve) => {
+        socket.emit(
+          'web:runtime-request-response',
+          {
+            targetCliId,
+            ...payload
+          } satisfies RuntimeRequestResponsePayload,
+          (ack?: { ok: boolean; error?: string }) => {
+            resolve(ack ?? { ok: false, error: 'No response from runtime request relay' });
+          }
+        );
+      });
+    };
+  }
+
   return {
     socketConnected,
     clis,
     socketRef,
-    sendCommand: sendCommandRef.current
+    sendCommand: sendCommandRef.current,
+    sendRuntimeRequestResponse: sendRuntimeRequestResponseRef.current
   };
 }

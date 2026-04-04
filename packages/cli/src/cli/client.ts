@@ -16,10 +16,16 @@ import type {
   ListGitStatusFilesResultPayload,
   ListSlashCommandsResultPayload,
   ListManagedPtyHandlesResultPayload,
+  MessageDeltaPayload,
   ListProjectSessionsResultPayload,
   PickProjectDirectoryResultPayload,
   ReadProjectFileResultPayload,
+  HydrateConversationResultPayload,
   RuntimeMetaPayload,
+  RuntimeRequestPayload,
+  RuntimeRequestResolvedPayload,
+  RuntimeRequestResponsePayload,
+  TerminalVisibilityPayload,
   UploadAttachmentResultPayload,
   TerminalFramePatchPayload,
   TerminalInputPayload,
@@ -77,11 +83,14 @@ const execFileAsync = promisify(execFile);
 const SUPPORTED_PROVIDERS = resolveSupportedProviders(resolveProvidersConfigValue());
 const CLI_ID = resolveCliId();
 const CLI_LABEL = resolveCliLabel();
-const PTY_BACKEND_NAME = 'node-pty';
+const RUNTIME_BACKEND_NAME = resolveRuntimeBackendName();
 const TERMINAL_FRAME_SCROLLBACK = getConfigInt('TERMINAL_FRAME_SCROLLBACK', 500, 50);
 const RECENT_OUTPUT_MAX_CHARS = getConfigInt('RECENT_OUTPUT_MAX_CHARS', 12_000, 1);
 const CLAUDE_READY_TIMEOUT_MS = getConfigInt('CLAUDE_READY_TIMEOUT_MS', 20_000, 0);
-const CODEX_READY_TIMEOUT_MS = getConfigInt('CODEX_READY_TIMEOUT_MS', 20_000, 0);
+const CODEX_APP_SERVER_READY_TIMEOUT_MS = getConfigInt('CODEX_APP_SERVER_READY_TIMEOUT_MS', 15_000, 0);
+const CODEX_APP_SERVER_POLL_IDLE_MS = getConfigInt('CODEX_APP_SERVER_POLL_IDLE_MS', 2_500, 100);
+const CODEX_APP_SERVER_POLL_RUNNING_MS = getConfigInt('CODEX_APP_SERVER_POLL_RUNNING_MS', 700, 100);
+const CODEX_APP_SERVER_PORT = getConfigInt('CODEX_APP_SERVER_PORT', 0, 0);
 const PROMPT_SUBMIT_DELAY_MS = getConfigInt('PROMPT_SUBMIT_DELAY_MS', 120, 0);
 const JSONL_REFRESH_DEBOUNCE_MS = getConfigInt('JSONL_REFRESH_DEBOUNCE_MS', 120, 0);
 const SNAPSHOT_MESSAGES_MAX = getConfigInt('SNAPSHOT_MESSAGES_MAX', 40, 1);
@@ -122,18 +131,11 @@ const codexRuntimeOptions: CodexProviderRuntimeOptions = {
   terminalCols: TERMINAL_COLS,
   terminalRows: TERMINAL_ROWS,
   terminalFrameScrollback: TERMINAL_FRAME_SCROLLBACK,
-  recentOutputMaxChars: RECENT_OUTPUT_MAX_CHARS,
-  codexReadyTimeoutMs: CODEX_READY_TIMEOUT_MS,
-  promptSubmitDelayMs: PROMPT_SUBMIT_DELAY_MS,
-  jsonlRefreshDebounceMs: JSONL_REFRESH_DEBOUNCE_MS,
   snapshotMessagesMax: SNAPSHOT_MESSAGES_MAX,
-  gcIntervalMs: GC_INTERVAL_MS,
-  detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
-  detachedJsonlMissingTtlMs: DETACHED_JSONL_MISSING_TTL_MS,
-  detachedPtyTtlMs: DETACHED_PTY_TTL_MS,
-  maxDetachedPtys: MAX_DETACHED_PTYS,
-  historyPath: getConfigValue('CODEX_HISTORY_PATH')?.trim() || undefined,
-  sessionsRootPath: getConfigValue('CODEX_SESSIONS_ROOT_PATH')?.trim() || undefined
+  appServerReadyTimeoutMs: CODEX_APP_SERVER_READY_TIMEOUT_MS,
+  appServerPollIdleMs: CODEX_APP_SERVER_POLL_IDLE_MS,
+  appServerPollRunningMs: CODEX_APP_SERVER_POLL_RUNNING_MS,
+  appServerPort: CODEX_APP_SERVER_PORT || undefined
 };
 
 function cliErrorMessage(error: unknown, fallback: string): string {
@@ -151,6 +153,15 @@ function logCli(level: 'info' | 'warn' | 'error', message: string, details?: Rec
 
 function createRuntime(providerId: ProviderId): ProviderRuntime {
   const callbacks = {
+    emitMessageDelta(payload: Omit<MessageDeltaPayload, 'cliId'>) {
+      if (!socketClient?.connected) {
+        return;
+      }
+      socketClient.emit('cli:message-delta', {
+        ...payload,
+        cliId: CLI_ID
+      } satisfies MessageDeltaPayload);
+    },
     emitMessagesUpsert(payload: {
       providerId: ProviderId | null;
       conversationKey: string | null;
@@ -175,6 +186,24 @@ function createRuntime(providerId: ProviderId): ProviderRuntime {
         ...payload,
         cliId: CLI_ID
       } satisfies RuntimeMetaPayload);
+    },
+    emitRuntimeRequest(payload: Omit<RuntimeRequestPayload, 'cliId'>) {
+      if (!socketClient?.connected) {
+        return;
+      }
+      socketClient.emit('cli:runtime-request', {
+        ...payload,
+        cliId: CLI_ID
+      } satisfies RuntimeRequestPayload);
+    },
+    emitRuntimeRequestResolved(payload: Omit<RuntimeRequestResolvedPayload, 'cliId'>) {
+      if (!socketClient?.connected) {
+        return;
+      }
+      socketClient.emit('cli:runtime-request-resolved', {
+        ...payload,
+        cliId: CLI_ID
+      } satisfies RuntimeRequestResolvedPayload);
     },
     emitTerminalFramePatch(payload: { conversationKey: string | null; patch: TerminalFramePatchPayload['patch'] }) {
       if (!socketClient?.connected) {
@@ -264,6 +293,22 @@ function sanitizePermissionMode(value: string | undefined): string {
     return value;
   }
   return 'bypassPermissions';
+}
+
+function resolveRuntimeBackendName(): string {
+  if (SUPPORTED_PROVIDERS.length === 1 && SUPPORTED_PROVIDERS[0] === 'claude') {
+    return 'claude-ws';
+  }
+
+  if (SUPPORTED_PROVIDERS.length === 1 && SUPPORTED_PROVIDERS[0] === 'codex') {
+    return 'codex-app-server';
+  }
+
+  if (SUPPORTED_PROVIDERS.includes('codex')) {
+    return 'mixed';
+  }
+
+  return 'node-pty';
 }
 
 function resolveProvidersConfigValue(): string | undefined {
@@ -444,6 +489,33 @@ async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCom
       };
     }
 
+    if (envelope.name === 'hydrate-conversation') {
+      const payload = envelope.payload as {
+        cwd: string;
+        conversationKey: string;
+        sessionId: string | null;
+        maxMessages?: number;
+      };
+      const runtime = getRuntime(requireTargetProviderId(envelope));
+      const snapshot = await runtime.hydrateConversation({
+        cwd: payload.cwd,
+        label: path.basename(payload.cwd) || payload.cwd,
+        sessionId: payload.sessionId ?? null,
+        conversationKey: payload.conversationKey,
+        maxMessages: payload.maxMessages
+      });
+      if (!snapshot) {
+        return { ok: false, error: 'Conversation snapshot is unavailable' };
+      }
+      return {
+        ok: true,
+        payload: {
+          providerId: runtime.providerId,
+          snapshot
+        } satisfies HydrateConversationResultPayload
+      };
+    }
+
     if (envelope.name === 'cleanup-project') {
       const payload = envelope.payload as { cwd: string };
       const providerId = requireTargetProviderId(envelope);
@@ -577,7 +649,7 @@ function connectSocketClient(): void {
         cwd: primaryRegistration?.cwd ?? DEFAULT_ROOT_DIR,
         supportedProviders: SUPPORTED_PROVIDERS,
         runtimes: registrations,
-        runtimeBackend: PTY_BACKEND_NAME
+        runtimeBackend: RUNTIME_BACKEND_NAME
       } satisfies CliRegisterPayload,
       (result: CliRegisterResult) => {
         if (!result.ok) {
@@ -607,6 +679,18 @@ function connectSocketClient(): void {
     getRuntime(providerId).updateTerminalSize(payload.cols, payload.rows);
   });
 
+  socket.on('cli:terminal-visibility', async (payload: Omit<TerminalVisibilityPayload, 'targetCliId'>) => {
+    const providerId = payload.targetProviderId ?? null;
+    if (!providerId) {
+      return;
+    }
+    await getRuntime(providerId).setTerminalVisibility({
+      conversationKey: payload.conversationKey ?? null,
+      sessionId: payload.sessionId ?? null,
+      visible: payload.visible === true
+    });
+  });
+
   socket.on(
     'cli:terminal-input',
     async (payload: Omit<TerminalInputPayload, 'targetCliId'>, callback?: (result: { ok: boolean; error?: string }) => void) => {
@@ -621,6 +705,29 @@ function connectSocketClient(): void {
         callback?.({
           ok: false,
           error: error instanceof Error ? error.message : 'Failed to send terminal input'
+        });
+      }
+    }
+  );
+
+  socket.on(
+    'cli:runtime-request-response',
+    async (payload: Omit<RuntimeRequestResponsePayload, 'targetCliId'>, callback?: (result: { ok: boolean; error?: string }) => void) => {
+      try {
+        const providerId = payload.targetProviderId ?? null;
+        if (!providerId) {
+          throw new Error('Provider is not selected');
+        }
+        await getRuntime(providerId).resolveRuntimeRequest({
+          error: payload.error ?? null,
+          requestId: payload.requestId,
+          result: payload.result
+        });
+        callback?.({ ok: true });
+      } catch (error) {
+        callback?.({
+          ok: false,
+          error: error instanceof Error ? error.message : 'Failed to resolve runtime request'
         });
       }
     }

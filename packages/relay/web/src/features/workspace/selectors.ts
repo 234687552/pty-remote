@@ -30,6 +30,7 @@ export interface WorkspaceDerivedState {
   canSend: boolean;
   canStop: boolean;
   connected: boolean;
+  terminalSupported: boolean;
   visibleMessages: ChatMessage[];
 }
 
@@ -185,6 +186,7 @@ export function selectWorkspaceDerivedState(
     activeProviderId
   );
   const activeConversation = selectActiveConversation(store.workspaceState, activeProjectConversations);
+  const terminalSupported = activeProviderId ? activeCli?.runtimes[activeProviderId]?.supportsTerminal !== false : false;
   const conversationMatchesRuntime =
     Boolean(activeConversation) &&
     store.snapshot.providerId === activeProviderId &&
@@ -221,11 +223,12 @@ export function selectWorkspaceDerivedState(
     canSend,
     canStop: connected && busy && Boolean(activeProject && activeConversation && activeProviderId),
     connected,
+    terminalSupported,
     visibleMessages
   };
 }
 
-export function selectFooterErrorText(store: WorkspaceStore): string {
+export function selectFooterErrorText(store: Pick<WorkspaceStore, 'error' | 'snapshot'>): string {
   const candidates = [store.error, store.snapshot.lastError];
   const next = candidates.find(
     (message) => message && !isCliOfflineMessage(message) && !isCliCommandTimeoutMessage(message)

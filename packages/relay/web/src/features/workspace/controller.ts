@@ -15,7 +15,7 @@ import { PROVIDER_LABELS, type CliDescriptor, type ProviderId, type RuntimeSnaps
 
 import type { CliSocketController } from '@/hooks/useCliSocket.ts';
 import type { TerminalBridge } from '@/hooks/useTerminalBridge.ts';
-import { readConversationCache } from '@/lib/messages-cache.ts';
+import { createEmptySnapshot } from '@/lib/runtime.ts';
 import {
   createConversationFromSession,
   createDraftConversation,
@@ -286,25 +286,12 @@ export function useWorkspaceController({
       return;
     }
 
-    const cached = readConversationCache(
-      activeProviderId,
-      activeConversation.conversationKey,
-      activeConversation.sessionId
-    );
-    if (!cached || cached.messages.length === 0) {
-      return;
-    }
-
-    const cachedSnapshot: RuntimeSnapshot = {
+    store.setSnapshot({
+      ...createEmptySnapshot(),
       providerId: activeProviderId,
       conversationKey: activeConversation.conversationKey,
-      sessionId: activeConversation.sessionId ?? cached.sessionId ?? null,
-      status: 'idle',
-      messages: cached.messages,
-      hasOlderMessages: activeConversation.messageCount > cached.messages.length,
-      lastError: null
-    };
-    store.setSnapshot(cachedSnapshot);
+      sessionId: activeConversation.sessionId
+    });
   }, [activeConversation, activeProviderId, store, store.snapshot.conversationKey, store.snapshot.providerId]);
 
   useEffect(() => {
@@ -649,19 +636,12 @@ export function useWorkspaceController({
         )
       );
 
-      const cached = readConversationCache(providerId, conversation.conversationKey, conversation.sessionId);
-      if (cached && cached.messages.length > 0) {
-        const cachedSnapshot: RuntimeSnapshot = {
-          providerId,
-          conversationKey: conversation.conversationKey,
-          sessionId: conversation.sessionId ?? cached.sessionId ?? null,
-          status: 'idle',
-          messages: cached.messages,
-          hasOlderMessages: conversation.messageCount > cached.messages.length,
-          lastError: null
-        };
-        store.setSnapshot(cachedSnapshot);
-      }
+      store.setSnapshot({
+        ...createEmptySnapshot(),
+        providerId,
+        conversationKey: conversation.conversationKey,
+        sessionId: conversation.sessionId
+      });
 
       const result = await sendCommand(
         'select-conversation',

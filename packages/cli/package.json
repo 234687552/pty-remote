@@ -26,10 +26,12 @@
     "@xterm/headless": "^6.0.0",
     "node-pty": "^1.1.0",
     "socket.io-client": "^4.8.3",
+    "ws": "^8.18.3",
     "tsx": "^4.20.6"
   },
   "devDependencies": {
     "@types/node": "^24.5.2",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.9.3"
   },
   "bin": {
@@ -38,7 +40,6 @@
   "files": [
     "bin",
     "cli.conf",
-    "codex_template.jsonl",
     "scripts",
     "src"
   ]

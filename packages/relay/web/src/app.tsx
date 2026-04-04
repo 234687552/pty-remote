@@ -21,8 +21,8 @@ import { useWorkspaceStore } from '@/features/workspace/store.ts';
 import { useCliSocket } from '@/hooks/useCliSocket.ts';
 import { useTerminalBridge } from '@/hooks/useTerminalBridge.ts';
 import { getProjectProviderKey } from '@/lib/workspace.ts';
-import { applyCachedMessagesUpsert, readCachedLastSeq, updateCachedLastSeq, writeConversationCache } from '@/lib/messages-cache.ts';
 import type { MobileJumpControls } from '@/features/workspace/types.ts';
+import type { RuntimeRequestPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
 
 export function App() {
   const store = useWorkspaceStore();
@@ -60,6 +60,7 @@ export function App() {
   const isDesktopLayout = desktopTerminalVisible;
   const socketRef = useRef<Socket | null>(null);
   const lastTerminalSyncKeyRef = useRef<string | null>(null);
+  const [runtimeRequests, setRuntimeRequests] = useState<RuntimeRequestPayload[]>([]);
 
   const handleChatMobileJumpControlsChange = useCallback((controls: MobileJumpControls | null) => {
     setMobileJumpControlsByPane((current) => ({
@@ -107,7 +108,7 @@ export function App() {
     terminalVisible
   });
 
-  const { socketConnected, clis, sendCommand } = useCliSocket({
+  const { socketConnected, clis, sendCommand, sendRuntimeRequestResponse } = useCliSocket({
     activeCliId,
     activeProviderId,
     activeConversationKey,
@@ -121,36 +122,32 @@ export function App() {
     onDisconnect: () => {
       terminal.handleSocketDisconnected();
     },
+    onMessageDelta: (payload) => {
+      store.applyMessageDelta(payload);
+    },
     onMessagesUpsert: (payload) => {
       store.applyMessagesUpsert(payload);
-      applyCachedMessagesUpsert(payload);
-      if (payload.seq != null) {
-        updateCachedLastSeq(payload.providerId ?? null, payload.conversationKey ?? null, payload.sessionId ?? null, payload.seq);
-      }
     },
     onSnapshot: (nextSnapshot) => {
       store.setSnapshot(nextSnapshot);
-      if (nextSnapshot.providerId) {
-        const lastSeq = readCachedLastSeq(
-          nextSnapshot.providerId,
-          nextSnapshot.conversationKey ?? null,
-          nextSnapshot.sessionId ?? null
-        );
-        writeConversationCache({
-          providerId: nextSnapshot.providerId,
-          conversationKey: nextSnapshot.conversationKey ?? null,
-          sessionId: nextSnapshot.sessionId ?? null,
-          messages: nextSnapshot.messages,
-          lastSeq
-        });
-      }
     },
     onTerminalFramePatch: (payload) => {
       terminal.handleTerminalFramePatch(payload);
+    },
+    onRuntimeRequest: (payload) => {
+      setRuntimeRequests((current) => {
+        const next = current.filter((entry) => entry.requestId !== payload.requestId);
+        next.push(payload);
+        return next;
+      });
+    },
+    onRuntimeRequestResolved: (payload) => {
+      setRuntimeRequests((current) => current.filter((entry) => entry.requestId !== payload.requestId));
     }
   });
   const activeCli = activeCliId ? clis.find((cli) => cli.cliId === activeCliId) ?? null : null;
   const activeRuntime = activeProviderId ? activeCli?.runtimes[activeProviderId] ?? null : null;
+  const terminalSupported = activeProviderId ? activeRuntime?.supportsTerminal !== false : false;
   const workspaceDerivedState = useMemo(
     () => selectWorkspaceDerivedState(store, clis, socketConnected),
     [
@@ -172,6 +169,16 @@ export function App() {
   );
   const canSendApprovalInput = Boolean(
     workspaceDerivedState.activeCliId && workspaceDerivedState.activeProviderId && workspaceDerivedState.connected
+  );
+  const activeRuntimeRequests = useMemo(
+    () =>
+      runtimeRequests.filter(
+        (request) =>
+          request.cliId === activeCliId &&
+          request.providerId === activeProviderId &&
+          (!activeConversationKey || request.conversationKey === activeConversationKey)
+      ),
+    [activeCliId, activeConversationKey, activeProviderId, runtimeRequests]
   );
   const desktopWorkspaceBrowserEnabled = Boolean(
     workspaceDerivedState.activeProject?.cwd && workspaceDerivedState.activeCliId && workspaceDerivedState.connected
@@ -220,8 +227,20 @@ export function App() {
   }, [desktopWorkspaceBrowserOpen]);
 
   useEffect(() => {
+    if (terminalSupported || store.mobilePane !== 'terminal') {
+      return;
+    }
+    store.setMobilePane('chat');
+  }, [store, store.mobilePane, terminalSupported]);
+
+  useEffect(() => {
     if (!terminalVisible || !socketConnected || !activeCliId || !activeProviderId || !activeConversation) {
       lastTerminalSyncKeyRef.current = null;
+      return;
+    }
+    if (!terminalSupported) {
+      lastTerminalSyncKeyRef.current = null;
+      terminal.clearTerminal();
       return;
     }
     if (
@@ -260,6 +279,7 @@ export function App() {
     store.snapshot.providerId,
     store.setError,
     terminal,
+    terminalSupported,
     terminalVisible
   ]);
 
@@ -335,21 +355,36 @@ export function App() {
           messages={workspaceDerivedState.visibleMessages}
           onMobileJumpControlsChange={handleChatMobileJumpControlsChange}
           onApprovalInput={terminal.sendInput}
+          onRespondRuntimeRequest={async (payload) => {
+            const result = await sendRuntimeRequestResponse(
+              {
+                ...payload,
+                targetProviderId: activeProviderId
+              },
+              activeCliId
+            );
+            if (!result.ok) {
+              throw new Error(result.error || 'Failed to respond to runtime request');
+            }
+          }}
           paneVisible={chatPaneVisible}
+          runtimeRequests={activeRuntimeRequests}
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
           visible={store.mobilePane === 'chat'}
         />
       }
       terminal={
-        <TerminalPane
-          frameSnapshot={terminal.frameSnapshot}
-          hostRef={terminal.terminalHostRef}
-          onJumpToEdge={terminal.jumpToEdge}
-          onMobileJumpControlsChange={handleTerminalMobileJumpControlsChange}
-          scrollToBottomRequestKey={mobilePaneScrollRequests.terminal}
-          viewportRef={terminal.terminalViewportRef}
-          visible={store.mobilePane === 'terminal'}
-        />
+        terminalSupported ? (
+          <TerminalPane
+            frameSnapshot={terminal.frameSnapshot}
+            hostRef={terminal.terminalHostRef}
+            onJumpToEdge={terminal.jumpToEdge}
+            onMobileJumpControlsChange={handleTerminalMobileJumpControlsChange}
+            scrollToBottomRequestKey={mobilePaneScrollRequests.terminal}
+            viewportRef={terminal.terminalViewportRef}
+            visible={store.mobilePane === 'terminal'}
+          />
+        ) : null
       }
       workspaceBrowser={
         <DesktopWorkspaceBrowser
@@ -374,6 +409,7 @@ export function App() {
           onMobilePaneChange={store.setMobilePane}
           onSidebarOpen={handleMobileSidebarOpen}
           store={store}
+          terminalSupported={terminalSupported}
           terminal={terminal}
           viewModel={composerViewModel}
         />

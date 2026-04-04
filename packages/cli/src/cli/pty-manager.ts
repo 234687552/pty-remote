@@ -205,12 +205,14 @@ export class PtyManager {
     cwd: string;
     sessionId: string | null;
     conversationKey: string | null;
+    supportsTerminal: boolean;
   } {
     const handle = this.getActiveHandle();
     return {
       cwd: handle?.cwd ?? this.currentCwd,
       sessionId: handle?.sessionId ?? null,
-      conversationKey: handle?.threadKey ?? null
+      conversationKey: handle?.threadKey ?? null,
+      supportsTerminal: true
     };
   }
 
@@ -283,6 +285,7 @@ export class PtyManager {
     handle.jsonlMissingSince = null;
 
     await this.refreshMessagesFromJsonl(handle);
+    this.emitCurrentMessagesUpsert(handle);
 
     if (!handle.pty) {
       this.startHandleSession(handle);
@@ -769,6 +772,20 @@ export class PtyManager {
       recentMessageIds: nextIds,
       hasOlderMessages
     };
+  }
+
+  private emitCurrentMessagesUpsert(handle: PtyHandle): void {
+    const upsertPayload = this.createMessagesUpsertPayload(
+      handle,
+      [],
+      handle.runtime.messages,
+      false,
+      handle.runtime.hasOlderMessages
+    );
+    if (!upsertPayload) {
+      return;
+    }
+    this.callbacks.emitMessagesUpsert(upsertPayload);
   }
 
   private async readJsonlTail(filePath: string, startOffset: number): Promise<{ size: number; text: string }> {
