@@ -12,7 +12,7 @@ import type {
   SelectConversationResultPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { TerminalFramePatchPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
-import type { ChatMessage, ChatMessageBlock, MessageStatus, RuntimeSnapshot, RuntimeStatus } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import type { ChatMessage, ChatMessageBlock, MessageStatus, RuntimeSnapshot, RuntimeStatus, RuntimeTransientNotice } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import { CodexAppServerClient } from './codex-app-server-client.ts';
 import {
@@ -30,7 +30,8 @@ import type {
   CodexAppServerThreadReadResponse,
   CodexAppServerThreadStartResponse,
   CodexAppServerTurn,
-  CodexAppServerTurnStartResponse
+  CodexAppServerTurnStartResponse,
+  CodexAppServerErrorNotificationParams
 } from './codex-app-server-protocol.ts';
 import { HeadlessTerminalFrameState } from '../terminal/frame-state.ts';
 
@@ -121,6 +122,42 @@ function cloneValue<T>(value: T): T {
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof Error ? error.message : fallback;
+}
+
+function sameTransientNotice(
+  left: RuntimeTransientNotice | null | undefined,
+  right: RuntimeTransientNotice | null | undefined
+): boolean {
+  if (!left && !right) {
+    return true;
+  }
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.kind === right.kind &&
+    left.message === right.message &&
+    (left.details ?? null) === (right.details ?? null) &&
+    Boolean(left.retrying) === Boolean(right.retrying)
+  );
+}
+
+function errorNotificationThreadId(params: unknown): string | null {
+  const normalized = params as { threadId?: unknown; thread_id?: unknown } | undefined;
+  return typeof normalized?.threadId === 'string'
+    ? normalized.threadId
+    : typeof normalized?.thread_id === 'string'
+      ? normalized.thread_id
+      : null;
+}
+
+function errorNotificationTurnId(params: unknown): string | null {
+  const normalized = params as { turnId?: unknown; turn_id?: unknown } | undefined;
+  return typeof normalized?.turnId === 'string'
+    ? normalized.turnId
+    : typeof normalized?.turn_id === 'string'
+      ? normalized.turn_id
+      : null;
 }
 
 function isThreadNotFoundError(error: unknown): boolean {
@@ -479,7 +516,11 @@ function upsertStreamingToolResultMessage(
 
 function notificationThreadId(notification: CodexAppServerNotification): string | null {
   const params = notification.params as Record<string, unknown> | undefined;
-  return typeof params?.threadId === 'string' ? params.threadId : null;
+  return typeof params?.threadId === 'string'
+    ? params.threadId
+    : typeof params?.thread_id === 'string'
+      ? params.thread_id
+      : null;
 }
 
 function applyNotificationDelta(messages: ChatMessage[], notification: CodexAppServerNotification): ChatMessage[] {
@@ -1455,6 +1496,50 @@ export class CodexAppServerManager {
       return;
     }
 
+    if (notification.method === 'error') {
+      const errorParams = notification.params as CodexAppServerErrorNotificationParams | undefined;
+      const errorThreadId = errorNotificationThreadId(notification.params);
+      const errorTurnId = errorNotificationTurnId(notification.params);
+      const handle =
+        (errorThreadId ? this.getHandleBySessionId(errorThreadId) : null) ??
+        (errorTurnId
+          ? [...this.handles.values()].find((candidate) => candidate.activeTurnId === errorTurnId) ?? null
+          : null);
+
+      this.log('info', 'received codex app-server error notification', {
+        errorMessage: errorParams?.error?.message ?? null,
+        resolvedBy: errorThreadId ? 'threadId' : errorTurnId ? 'turnId' : 'none',
+        threadId: errorThreadId,
+        turnId: errorTurnId,
+        willRetry: errorParams?.willRetry === true
+      });
+
+      if (!handle) {
+        this.log('warn', 'codex app-server error notification could not be matched to a handle', {
+          errorMessage: errorParams?.error?.message ?? null,
+          threadId: errorThreadId,
+          turnId: errorTurnId,
+          willRetry: errorParams?.willRetry === true
+        });
+        return;
+      }
+
+      if (errorParams?.willRetry) {
+        this.markHandleActive(handle);
+        const nextNotice: RuntimeTransientNotice = {
+          kind: 'warning',
+          message: errorParams.error?.message?.trim() || 'Reconnecting...',
+          details: errorParams.error?.additionalDetails?.trim() || null,
+          retrying: true
+        };
+        if (!sameTransientNotice(handle.runtime.transientNotice, nextNotice)) {
+          handle.runtime.transientNotice = nextNotice;
+          this.emitRuntimeMeta(handle);
+        }
+      }
+      return;
+    }
+
     if (!threadId) {
       return;
     }
@@ -1644,7 +1729,8 @@ export class CodexAppServerManager {
       allMessages: [],
       messages: [],
       hasOlderMessages: false,
-      lastError: null
+      lastError: null,
+      transientNotice: null
     };
   }
 
@@ -1665,7 +1751,8 @@ export class CodexAppServerManager {
       hasOlderMessages: normalizedMaxMessages
         ? handle.runtime.allMessages.length > allMessages.length
         : handle.runtime.hasOlderMessages,
-      lastError: handle.runtime.lastError
+      lastError: handle.runtime.lastError,
+      transientNotice: handle.runtime.transientNotice
     } satisfies RuntimeSnapshot);
   }
 
@@ -1676,7 +1763,8 @@ export class CodexAppServerManager {
       cwd: handle.cwd,
       lastError: handle.runtime.lastError,
       sessionId: handle.runtime.sessionId,
-      status: handle.runtime.status
+      status: handle.runtime.status,
+      transientNotice: handle.runtime.transientNotice
     });
   }
 
@@ -1766,6 +1854,11 @@ export class CodexAppServerManager {
     const previousHasOlderMessages = handle.runtime.hasOlderMessages;
     const previousStatus = handle.runtime.status;
     const previousLastError = handle.runtime.lastError;
+    const previousTransientNotice = handle.runtime.transientNotice;
+
+    if (notification.method !== 'error' && handle.runtime.transientNotice) {
+      handle.runtime.transientNotice = null;
+    }
 
     switch (notification.method) {
       case 'turn/started': {
@@ -1837,7 +1930,11 @@ export class CodexAppServerManager {
       this.emitCurrentMessagesUpsert(handle);
     }
 
-    if (previousStatus !== handle.runtime.status || previousLastError !== handle.runtime.lastError) {
+    if (
+      previousStatus !== handle.runtime.status ||
+      previousLastError !== handle.runtime.lastError ||
+      !sameTransientNotice(previousTransientNotice, handle.runtime.transientNotice)
+    ) {
       this.emitRuntimeMeta(handle);
     }
 

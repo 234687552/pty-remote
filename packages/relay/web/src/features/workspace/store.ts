@@ -153,7 +153,8 @@ function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPa
         conversationKey: payload.conversationKey,
         sessionId: payload.sessionId,
         messages: [],
-        hasOlderMessages: false
+        hasOlderMessages: false,
+        transientNotice: null
       };
 
   if (isSameConversation && payload.sessionId && baseSnapshot.sessionId !== payload.sessionId) {

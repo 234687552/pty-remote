@@ -8,6 +8,7 @@ import path from 'node:path';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import type {
   ManagedPtyHandleSummary,
+  MessageDeltaPayload,
   RuntimeMetaPayload,
   RuntimeRequestPayload,
   RuntimeRequestResolvedPayload,
@@ -166,6 +167,8 @@ interface ActiveTerminalSession {
   token: number;
 }
 
+type OutboundMessageDeltaPayload = Omit<MessageDeltaPayload, 'cliId'>;
+
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
 }
@@ -279,20 +282,21 @@ function messagesEqual(left: ChatMessage[], right: ChatMessage[]): boolean {
   if (left.length !== right.length) {
     return false;
   }
-  return left.every((message, index) => {
-    const next = right[index];
-    if (!next) {
-      return false;
-    }
-    return (
-      message.id === next.id &&
-      message.role === next.role &&
-      message.status === next.status &&
-      message.createdAt === next.createdAt &&
-      message.sequence === next.sequence &&
-      blocksEqual(message.blocks, next.blocks)
-    );
-  });
+  return left.every((message, index) => messageEqual(message, right[index]));
+}
+
+function messageEqual(left: ChatMessage | undefined, right: ChatMessage | undefined): boolean {
+  if (!left || !right) {
+    return false;
+  }
+  return (
+    left.id === right.id &&
+    left.role === right.role &&
+    left.status === right.status &&
+    left.createdAt === right.createdAt &&
+    left.sequence === right.sequence &&
+    blocksEqual(left.blocks, right.blocks)
+  );
 }
 
 function extractContentBlocks(baseId: string, rawContent: string | ClaudeContentBlock[] | undefined): ChatMessageBlock[] {
@@ -398,6 +402,206 @@ function mergeMessages(baseMessages: ChatMessage[], upserts: ChatMessage[]): Cha
         (left!.sequence ?? 0) - (right!.sequence ?? 0) ||
         left!.id.localeCompare(right!.id)
     ) as ChatMessage[];
+}
+
+function createTextDeltaPayload(params: {
+  conversationKey: string;
+  sessionId: string | null;
+  messageId: string;
+  blockId: string;
+  delta: string;
+}): OutboundMessageDeltaPayload {
+  return {
+    providerId: 'claude',
+    conversationKey: params.conversationKey,
+    sessionId: params.sessionId,
+    messageId: params.messageId,
+    blockId: params.blockId,
+    blockType: 'text',
+    delta: params.delta
+  };
+}
+
+function createToolResultDeltaPayload(params: {
+  conversationKey: string;
+  sessionId: string | null;
+  messageId: string;
+  blockId: string;
+  delta: string;
+}): OutboundMessageDeltaPayload {
+  return {
+    providerId: 'claude',
+    conversationKey: params.conversationKey,
+    sessionId: params.sessionId,
+    messageId: params.messageId,
+    blockId: params.blockId,
+    blockType: 'tool_result',
+    delta: params.delta
+  };
+}
+
+function createAppendOnlyDeltaPayload(
+  handle: Pick<ClaudeWsHandle, 'threadKey' | 'sessionId'>,
+  messageId: string,
+  previousBlock: ChatMessageBlock | null,
+  nextBlock: ChatMessageBlock
+): OutboundMessageDeltaPayload | null | false {
+  if (nextBlock.type === 'tool_use') {
+    if (previousBlock?.type !== 'tool_use') {
+      return false;
+    }
+    return previousBlock.toolCallId === nextBlock.toolCallId &&
+        previousBlock.toolName === nextBlock.toolName &&
+        previousBlock.input === nextBlock.input
+      ? null
+      : false;
+  }
+
+  if (!previousBlock) {
+    if (nextBlock.type === 'text') {
+      return nextBlock.text
+        ? createTextDeltaPayload({
+            conversationKey: handle.threadKey,
+            sessionId: handle.sessionId,
+            messageId,
+            blockId: nextBlock.id,
+            delta: nextBlock.text
+          })
+        : null;
+    }
+    if (nextBlock.isError) {
+      return false;
+    }
+    return nextBlock.content
+      ? createToolResultDeltaPayload({
+          conversationKey: handle.threadKey,
+          sessionId: handle.sessionId,
+          messageId,
+          blockId: nextBlock.id,
+          delta: nextBlock.content
+        })
+      : null;
+  }
+
+  if (previousBlock.type !== nextBlock.type) {
+    return false;
+  }
+
+  if (nextBlock.type === 'text' && previousBlock.type === 'text') {
+    if (nextBlock.text === previousBlock.text) {
+      return null;
+    }
+    if (!nextBlock.text.startsWith(previousBlock.text)) {
+      return false;
+    }
+    const delta = nextBlock.text.slice(previousBlock.text.length);
+    return delta
+      ? createTextDeltaPayload({
+          conversationKey: handle.threadKey,
+          sessionId: handle.sessionId,
+          messageId,
+          blockId: nextBlock.id,
+          delta
+        })
+      : null;
+  }
+
+  if (nextBlock.type === 'tool_result' && previousBlock.type === 'tool_result') {
+    if (nextBlock.isError !== previousBlock.isError) {
+      return false;
+    }
+    if (nextBlock.content === previousBlock.content) {
+      return null;
+    }
+    if (!nextBlock.content.startsWith(previousBlock.content)) {
+      return false;
+    }
+    const delta = nextBlock.content.slice(previousBlock.content.length);
+    return delta
+      ? createToolResultDeltaPayload({
+          conversationKey: handle.threadKey,
+          sessionId: handle.sessionId,
+          messageId,
+          blockId: nextBlock.id,
+          delta
+        })
+      : null;
+  }
+
+  return false;
+}
+
+function createAppendOnlyMessageDeltaPayloads(
+  handle: Pick<ClaudeWsHandle, 'threadKey' | 'sessionId'>,
+  previousMessage: ChatMessage | undefined,
+  nextMessage: ChatMessage
+): OutboundMessageDeltaPayload[] | null {
+  if (!previousMessage) {
+    return null;
+  }
+  if (previousMessage.role !== 'assistant' || nextMessage.role !== 'assistant') {
+    return null;
+  }
+  if (previousMessage.status !== 'streaming' || nextMessage.status !== 'streaming') {
+    return null;
+  }
+
+  const previousBlockById = new Map(previousMessage.blocks.map((block) => [block.id, block]));
+  const payloads: OutboundMessageDeltaPayload[] = [];
+  let previousIndex = 0;
+
+  for (const nextBlock of nextMessage.blocks) {
+    const previousBlock = previousMessage.blocks[previousIndex];
+    if (previousBlock?.id === nextBlock.id) {
+      const payload = createAppendOnlyDeltaPayload(handle, nextMessage.id, previousBlock, nextBlock);
+      if (payload === false) {
+        return null;
+      }
+      if (payload) {
+        payloads.push(payload);
+      }
+      previousIndex += 1;
+      continue;
+    }
+
+    if (previousBlockById.has(nextBlock.id) || previousIndex !== previousMessage.blocks.length) {
+      return null;
+    }
+
+    const payload = createAppendOnlyDeltaPayload(handle, nextMessage.id, null, nextBlock);
+    if (payload === false) {
+      return null;
+    }
+    if (payload) {
+      payloads.push(payload);
+    }
+  }
+
+  if (previousIndex !== previousMessage.blocks.length) {
+    return null;
+  }
+
+  return payloads;
+}
+
+function createStreamingMessageDeltaPayloads(
+  handle: Pick<ClaudeWsHandle, 'threadKey' | 'sessionId'>,
+  previousMessages: ChatMessage[],
+  nextMessages: ChatMessage[],
+  previousHasOlderMessages: boolean,
+  nextHasOlderMessages: boolean
+): OutboundMessageDeltaPayload[] | null {
+  if (previousHasOlderMessages !== nextHasOlderMessages) {
+    return null;
+  }
+
+  const previousMessagesById = new Map(previousMessages.map((message) => [message.id, message]));
+  const changedMessages = nextMessages.filter((message) => !messageEqual(previousMessagesById.get(message.id), message));
+  if (changedMessages.length !== 1) {
+    return null;
+  }
+
+  return createAppendOnlyMessageDeltaPayloads(handle, previousMessagesById.get(changedMessages[0]!.id), changedMessages[0]!);
 }
 
 function finalizeStreamingMessages(messages: ChatMessage[]): ChatMessage[] {
@@ -882,7 +1086,8 @@ export class ClaudeWsManager {
       sessionId,
       messages: [],
       hasOlderMessages: false,
-      lastError: null
+      lastError: null,
+      transientNotice: null
     };
   }
 
@@ -896,7 +1101,8 @@ export class ClaudeWsManager {
       sessionId: handle.sessionId,
       messages,
       hasOlderMessages: handle.runtime.hasOlderMessages || handle.runtime.messages.length > messages.length,
-      lastError: handle.runtime.lastError
+      lastError: handle.runtime.lastError,
+      transientNotice: handle.runtime.transientNotice
     } satisfies RuntimeSnapshot);
   }
 
@@ -907,7 +1113,8 @@ export class ClaudeWsManager {
       cwd: handle.cwd,
       lastError: handle.runtime.lastError,
       sessionId: handle.sessionId,
-      status: handle.runtime.status
+      status: handle.runtime.status,
+      transientNotice: handle.runtime.transientNotice
     } satisfies Omit<RuntimeMetaPayload, 'cliId'>);
   }
 
@@ -943,12 +1150,25 @@ export class ClaudeWsManager {
     const normalizedMaxMessages = Math.max(1, this.options.snapshotMessagesMax);
     const nextMessages = selectRecentMessages(messages, normalizedMaxMessages);
     const nextHasOlderMessages = hasOlderMessages || messages.length > nextMessages.length;
+    const deltaPayloads = createStreamingMessageDeltaPayloads(
+      handle,
+      previousMessages,
+      nextMessages,
+      previousHasOlderMessages,
+      nextHasOlderMessages
+    );
 
     handle.runtime.messages = nextMessages;
     handle.runtime.hasOlderMessages = nextHasOlderMessages;
     handle.initialized = handle.initialized || nextMessages.length > 0 || nextHasOlderMessages;
 
     if (!messagesEqual(previousMessages, nextMessages) || previousHasOlderMessages !== nextHasOlderMessages) {
+      if (deltaPayloads && deltaPayloads.length > 0) {
+        for (const payload of deltaPayloads) {
+          this.callbacks.emitMessageDelta(payload);
+        }
+        return;
+      }
       this.emitIncrementalMessagesUpsert(handle, previousMessages, nextMessages, previousHasOlderMessages, nextHasOlderMessages);
     }
   }

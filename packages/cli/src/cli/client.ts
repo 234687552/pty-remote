@@ -753,11 +753,16 @@ async function shutdownCliClient(reason: string, exitCode = 0): Promise<void> {
   shuttingDown = true;
   shutdownPromise = (async () => {
     console.log(`shutting down cli client (${reason})`);
+    const socket = socketClient;
+    socketClient = null;
+    if (socket) {
+      socket.io.opts.reconnection = false;
+      socket.removeAllListeners();
+      socket.disconnect();
+    }
+
     await Promise.all(SUPPORTED_PROVIDERS.map((providerId) => getRuntime(providerId).shutdown()));
     await attachmentManager.shutdown();
-    socketClient?.removeAllListeners();
-    socketClient?.disconnect();
-    socketClient = null;
   })();
 
   try {

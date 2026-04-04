@@ -117,6 +117,9 @@ const relaySnapshotCache = new Map<string, RelaySnapshotCacheEntry>();
 const pendingConversationHydrations = new Map<string, Promise<void>>();
 
 let httpServer: http.Server | null = null;
+let ioServer: SocketIOServer | null = null;
+let relayGcTimer: NodeJS.Timeout | null = null;
+let relayShutdownPromise: Promise<void> | null = null;
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
@@ -141,6 +144,34 @@ function json(res: ServerResponse<IncomingMessage>, statusCode: number, payload:
     'Cache-Control': 'no-store'
   });
   res.end(JSON.stringify(payload));
+}
+
+async function closeHttpServer(server: http.Server): Promise<void> {
+  if (!server.listening) {
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+async function closeSocketIoServer(server: SocketIOServer): Promise<void> {
+  for (const namespace of [server.of('/cli'), server.of('/web')]) {
+    for (const socket of namespace.sockets.values()) {
+      socket.disconnect(true);
+    }
+  }
+  await new Promise<void>((resolve) => {
+    server.close(() => {
+      resolve();
+    });
+  });
 }
 
 async function serveStaticFile(res: ServerResponse<IncomingMessage>, filePath: string): Promise<void> {
@@ -327,7 +358,8 @@ function cacheSnapshotFromMessages(cliId: string, payload: MessagesUpsertPayload
       sessionId: payload.sessionId ?? null,
       messages: trimmed.messages,
       hasOlderMessages: payload.hasOlderMessages || trimmed.hasOlderMessages,
-      lastError: previousSnapshot?.lastError ?? null
+      lastError: previousSnapshot?.lastError ?? null,
+      transientNotice: previousSnapshot?.transientNotice ?? null
     }
   } satisfies RuntimeSnapshotPayload;
 
@@ -423,7 +455,8 @@ function cacheSnapshotFromRuntimeMeta(payload: RuntimeMetaPayload): RuntimeSnaps
       sessionId: payload.sessionId,
       messages: sessionChanged ? [] : cloneValue(previousSnapshot?.messages ?? []),
       hasOlderMessages: sessionChanged ? false : (previousSnapshot?.hasOlderMessages ?? false),
-      lastError: payload.lastError
+      lastError: payload.lastError,
+      transientNotice: payload.transientNotice
     }
   } satisfies RuntimeSnapshotPayload;
 
@@ -452,7 +485,8 @@ function createEmptySnapshotPayload(subscription: RuntimeSubscriptionPayload): R
       sessionId: subscription.sessionId,
       messages: [],
       hasOlderMessages: false,
-      lastError: null
+      lastError: null,
+      transientNotice: null
     }
   } satisfies RuntimeSnapshotPayload;
 }
@@ -1433,6 +1467,7 @@ export async function startSocketServer(): Promise<void> {
       credentials: true
     }
   });
+  ioServer = io;
 
   io.of('/cli').on('connection', (socket) => {
     socket.on('cli:register', (payload: CliRegisterPayload, callback?: (result: CliRegisterResult) => void) => {
@@ -1809,7 +1844,7 @@ export async function startSocketServer(): Promise<void> {
     });
   });
 
-  const relayGcTimer = setInterval(() => {
+  relayGcTimer = setInterval(() => {
     pruneRelayState(io);
   }, relayConfig.cacheGcIntervalMs);
   relayGcTimer.unref();
@@ -1820,4 +1855,46 @@ export async function startSocketServer(): Promise<void> {
       resolve();
     });
   });
+}
+
+export async function stopSocketServer(reason = 'shutdown'): Promise<void> {
+  if (relayShutdownPromise) {
+    await relayShutdownPromise;
+    return;
+  }
+
+  const currentHttpServer = httpServer;
+  const currentIoServer = ioServer;
+  const currentRelayGcTimer = relayGcTimer;
+
+  if (!currentHttpServer && !currentIoServer && !currentRelayGcTimer) {
+    return;
+  }
+
+  httpServer = null;
+  ioServer = null;
+  relayGcTimer = null;
+
+  relayShutdownPromise = (async () => {
+    logRelay('info', 'stopping socket relay', { reason });
+
+    if (currentRelayGcTimer) {
+      clearInterval(currentRelayGcTimer);
+    }
+
+    if (currentIoServer) {
+      await closeSocketIoServer(currentIoServer);
+    }
+
+    if (currentHttpServer) {
+      await closeHttpServer(currentHttpServer);
+    }
+
+    webRuntimeSubscriptions.clear();
+    pendingConversationHydrations.clear();
+  })().finally(() => {
+    relayShutdownPromise = null;
+  });
+
+  await relayShutdownPromise;
 }

@@ -26,6 +26,7 @@ interface UseTerminalBridgeOptions {
   activeProviderId: ProviderId | null;
   socketRef: RefObject<Socket | null>;
   setError: Dispatch<SetStateAction<string>>;
+  terminalEnabled: boolean;
   terminalVisible: boolean;
 }
 
@@ -122,6 +123,7 @@ export function useTerminalBridge({
   activeProviderId,
   socketRef,
   setError,
+  terminalEnabled,
   terminalVisible
 }: UseTerminalBridgeOptions): TerminalBridge {
   const terminalViewportRef = useRef<HTMLDivElement | null>(null);
@@ -218,8 +220,8 @@ export function useTerminalBridge({
     if (!socket?.connected) {
       throw new Error('Socket is not connected');
     }
-    if (!terminalVisible) {
-      throw new Error('Terminal is not visible');
+    if (!terminalEnabled) {
+      throw new Error('Terminal is not enabled');
     }
 
     const currentSnapshot = frameSnapshotRef.current;
@@ -335,7 +337,7 @@ export function useTerminalBridge({
   }
 
   function handleTerminalFramePatch(payload: TerminalFramePatchPayload): void {
-    if (!terminalVisible) {
+    if (!terminalEnabled) {
       return;
     }
     if (terminalResumePendingRef.current) {
@@ -346,7 +348,7 @@ export function useTerminalBridge({
   }
 
   async function resumeSession(targetSessionId: string | null, options: ResumeOptions = {}): Promise<void> {
-    if (!terminalVisible) {
+    if (!terminalEnabled) {
       return;
     }
     if (!socketRef.current?.connected) {

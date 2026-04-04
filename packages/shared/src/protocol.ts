@@ -1,4 +1,4 @@
-import type { ChatMessage, CliDescriptor, ProviderId, RuntimeSnapshot, RuntimeStatus } from './runtime-types.ts';
+import type { ChatMessage, CliDescriptor, ProviderId, RuntimeSnapshot, RuntimeStatus, RuntimeTransientNotice } from './runtime-types.ts';
 import type { TerminalFramePatch, TerminalFrameSnapshot } from './terminal-frame.ts';
 
 export interface CliRegisterPayload {
@@ -335,6 +335,7 @@ export interface RuntimeMetaPayload {
   lastError: string | null;
   sessionId: string | null;
   status: RuntimeStatus;
+  transientNotice: RuntimeTransientNotice | null;
 }
 
 export interface RuntimeRequestPayload {

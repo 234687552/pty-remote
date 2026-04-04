@@ -148,7 +148,7 @@ export function TerminalPane({
       ].join(' ')}
     >
       <div className="hidden px-3 py-3 sm:px-4 lg:block lg:border-b lg:border-zinc-200">
-        <h2 className="text-lg font-semibold">Terminal</h2>
+        <h2 className="text-lg font-semibold">实时终端</h2>
       </div>
       <div className="terminal-shell min-w-0 flex-1 overflow-hidden bg-transparent p-0 sm:p-2 lg:rounded-b-3xl lg:bg-white lg:p-3">
         <div

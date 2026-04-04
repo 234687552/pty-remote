@@ -507,7 +507,8 @@ export class PtyManager {
       recentTerminalOutput: '',
       messages: [],
       hasOlderMessages: false,
-      lastError: null
+      lastError: null,
+      transientNotice: null
     };
   }
 
@@ -518,7 +519,8 @@ export class PtyManager {
       cwd: handle.cwd,
       lastError: handle.runtime.lastError,
       sessionId: handle.runtime.sessionId,
-      status: handle.runtime.status
+      status: handle.runtime.status,
+      transientNotice: handle.runtime.transientNotice
     } satisfies Omit<RuntimeMetaPayload, 'cliId'>);
   }
 

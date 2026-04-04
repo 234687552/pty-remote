@@ -38,9 +38,10 @@ export function App() {
     chat: 0,
     terminal: 0
   });
-  const [desktopTerminalVisible, setDesktopTerminalVisible] = useState(() =>
+  const [isDesktopLayout, setIsDesktopLayout] = useState(() =>
     typeof window === 'undefined' ? true : window.matchMedia('(min-width: 1024px)').matches
   );
+  const [desktopTerminalOpen, setDesktopTerminalOpen] = useState(false);
   const [desktopWorkspaceBrowserOpen, setDesktopWorkspaceBrowserOpen] = useState(false);
   const activeCliId = selectActiveCliId(store.workspaceState);
   const activeProviderId = selectActiveProviderId(store.workspaceState);
@@ -57,10 +58,10 @@ export function App() {
   const activeConversationKey = activeConversation?.conversationKey ?? null;
   const activeSessionId = activeConversation?.sessionId ?? null;
   const mobileJumpControls = mobileJumpControlsByPane[store.mobilePane];
-  const isDesktopLayout = desktopTerminalVisible;
   const socketRef = useRef<Socket | null>(null);
   const lastTerminalSyncKeyRef = useRef<string | null>(null);
   const [runtimeRequests, setRuntimeRequests] = useState<RuntimeRequestPayload[]>([]);
+  const terminalConnectionEnabled = Boolean(activeCliId && activeProviderId && activeConversation);
 
   const handleChatMobileJumpControlsChange = useCallback((controls: MobileJumpControls | null) => {
     setMobileJumpControlsByPane((current) => ({
@@ -83,13 +84,13 @@ export function App() {
 
     const mediaQuery = window.matchMedia('(min-width: 1024px)');
     const handleChange = (event: MediaQueryListEvent) => {
-      setDesktopTerminalVisible(event.matches);
+      setIsDesktopLayout(event.matches);
       if (!event.matches) {
         setDesktopWorkspaceBrowserOpen(false);
       }
     };
 
-    setDesktopTerminalVisible(mediaQuery.matches);
+    setIsDesktopLayout(mediaQuery.matches);
     mediaQuery.addEventListener('change', handleChange);
     return () => {
       mediaQuery.removeEventListener('change', handleChange);
@@ -97,7 +98,8 @@ export function App() {
   }, []);
 
   const desktopPrimaryWorkspaceVisible = isDesktopLayout && !desktopWorkspaceBrowserOpen;
-  const terminalVisible = desktopPrimaryWorkspaceVisible || (!isDesktopLayout && store.mobilePane === 'terminal');
+  const terminalPaneOpen = isDesktopLayout ? desktopTerminalOpen : store.mobilePane === 'terminal';
+  const terminalVisible = terminalPaneOpen && (desktopPrimaryWorkspaceVisible || !isDesktopLayout);
   const chatPaneVisible = desktopPrimaryWorkspaceVisible || (!isDesktopLayout && store.mobilePane === 'chat');
 
   const terminal = useTerminalBridge({
@@ -105,6 +107,7 @@ export function App() {
     activeProviderId,
     socketRef,
     setError: store.setError,
+    terminalEnabled: terminalConnectionEnabled,
     terminalVisible
   });
 
@@ -113,7 +116,7 @@ export function App() {
     activeProviderId,
     activeConversationKey,
     activeSessionId,
-    terminalEnabled: terminalVisible,
+    terminalEnabled: terminalConnectionEnabled,
     socketRef,
     onConnect: () => {
       terminal.handleSocketConnected();
@@ -148,6 +151,7 @@ export function App() {
   const activeCli = activeCliId ? clis.find((cli) => cli.cliId === activeCliId) ?? null : null;
   const activeRuntime = activeProviderId ? activeCli?.runtimes[activeProviderId] ?? null : null;
   const terminalSupported = activeProviderId ? activeRuntime?.supportsTerminal !== false : false;
+  const terminalSyncEnabled = terminalConnectionEnabled && terminalSupported;
   const workspaceDerivedState = useMemo(
     () => selectWorkspaceDerivedState(store, clis, socketConnected),
     [
@@ -188,7 +192,7 @@ export function App() {
     clis,
     derivedState: workspaceDerivedState,
     requestMobilePaneScrollToBottom: () => {
-      if (desktopTerminalVisible) {
+      if (isDesktopLayout) {
         return;
       }
 
@@ -208,6 +212,13 @@ export function App() {
       setDesktopWorkspaceBrowserOpen(false);
     }
   }, [desktopWorkspaceBrowserEnabled]);
+
+  useEffect(() => {
+    if (terminalSupported) {
+      return;
+    }
+    setDesktopTerminalOpen(false);
+  }, [terminalSupported]);
 
   useEffect(() => {
     if (!desktopWorkspaceBrowserOpen) {
@@ -234,13 +245,16 @@ export function App() {
   }, [store, store.mobilePane, terminalSupported]);
 
   useEffect(() => {
-    if (!terminalVisible || !socketConnected || !activeCliId || !activeProviderId || !activeConversation) {
-      lastTerminalSyncKeyRef.current = null;
+    if (terminalSyncEnabled) {
       return;
     }
-    if (!terminalSupported) {
+    lastTerminalSyncKeyRef.current = null;
+    terminal.clearTerminal();
+  }, [terminal, terminalSyncEnabled]);
+
+  useEffect(() => {
+    if (!terminalSyncEnabled || !socketConnected || !activeCliId || !activeProviderId || !activeConversation) {
       lastTerminalSyncKeyRef.current = null;
-      terminal.clearTerminal();
       return;
     }
     if (
@@ -279,6 +293,7 @@ export function App() {
     store.snapshot.providerId,
     store.setError,
     terminal,
+    terminalSyncEnabled,
     terminalSupported,
     terminalVisible
   ]);
@@ -289,6 +304,16 @@ export function App() {
 
   function handleDesktopSidebarToggle(): void {
     controller.setSidebarCollapsed(!store.workspaceState.sidebarCollapsed);
+  }
+
+  function handleDesktopTerminalToggle(): void {
+    if (!terminalSupported) {
+      return;
+    }
+    if (desktopWorkspaceBrowserOpen) {
+      setDesktopWorkspaceBrowserOpen(false);
+    }
+    setDesktopTerminalOpen((current) => !current);
   }
 
   return (
@@ -328,8 +353,11 @@ export function App() {
       renderHeader={() => (
         <AppHeader
           activeProviderId={workspaceDerivedState.activeProviderId}
+          desktopTerminalEnabled={terminalSupported}
+          desktopTerminalOpen={desktopTerminalOpen}
           desktopWorkspaceBrowserEnabled={desktopWorkspaceBrowserEnabled}
           desktopWorkspaceBrowserOpen={desktopWorkspaceBrowserOpen}
+          onDesktopTerminalToggle={handleDesktopTerminalToggle}
           onDesktopWorkspaceBrowserToggle={() => {
             if (!desktopWorkspaceBrowserEnabled) {
               return;
@@ -370,11 +398,12 @@ export function App() {
           paneVisible={chatPaneVisible}
           runtimeRequests={activeRuntimeRequests}
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
+          transientNotice={store.snapshot.transientNotice}
           visible={store.mobilePane === 'chat'}
         />
       }
       terminal={
-        terminalSupported ? (
+        terminalSupported && terminalPaneOpen ? (
           <TerminalPane
             frameSnapshot={terminal.frameSnapshot}
             hostRef={terminal.terminalHostRef}
@@ -382,7 +411,7 @@ export function App() {
             onMobileJumpControlsChange={handleTerminalMobileJumpControlsChange}
             scrollToBottomRequestKey={mobilePaneScrollRequests.terminal}
             viewportRef={terminal.terminalViewportRef}
-            visible={store.mobilePane === 'terminal'}
+            visible={terminalVisible}
           />
         ) : null
       }

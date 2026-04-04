@@ -14,6 +14,7 @@ import type {
   ChatMessageBlock,
   MessageStatus,
   ProviderId,
+  RuntimeTransientNotice,
   ToolResultChatMessageBlock,
   ToolUseChatMessageBlock
 } from '@lzdi/pty-remote-protocol/runtime-types.ts';
@@ -130,6 +131,7 @@ interface ChatPaneProps {
   paneVisible: boolean;
   runtimeRequests?: RuntimeRequestPayload[];
   scrollToBottomRequestKey: number;
+  transientNotice?: RuntimeTransientNotice | null;
   visible: boolean;
 }
 
@@ -648,6 +650,33 @@ function RuntimeRequestNotice({
         {errorText ? <div className="text-xs text-red-600">{errorText}</div> : null}
       </div>
     </section>
+  );
+}
+
+function RuntimeTransientNoticeBanner({ notice }: { notice: RuntimeTransientNotice }) {
+  const toneClass =
+    notice.kind === 'error'
+      ? 'border-red-200/80 bg-red-50/80'
+      : notice.kind === 'warning'
+        ? 'border-amber-200/80 bg-amber-50/80'
+        : 'border-sky-200/80 bg-sky-50/80';
+
+  return (
+    <div className="flex justify-start">
+      <section className="w-full max-w-[44rem]">
+        <div className={`w-fit max-w-full rounded-2xl border px-3 py-2 shadow-sm ${toneClass}`}>
+          <div className="flex items-center gap-2 text-[12px] leading-5 text-zinc-900">
+            <span className="inline-flex h-2 w-2 shrink-0 rounded-full bg-current/70 text-amber-700" />
+            <span className="min-w-0 truncate font-medium">{notice.message}</span>
+          </div>
+          {notice.details?.trim() ? (
+            <pre className="mt-1.5 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-5 text-zinc-600">
+              {notice.details.trim()}
+            </pre>
+          ) : null}
+        </div>
+      </section>
+    </div>
   );
 }
 
@@ -2531,14 +2560,19 @@ export function ChatPane({
   paneVisible,
   runtimeRequests = [],
   scrollToBottomRequestKey,
+  transientNotice = null,
   visible
 }: ChatPaneProps) {
   const messagesRef = useRef<HTMLDivElement | null>(null);
-  const autoScrollToBottomRef = useRef(true);
+  const messagesContentRef = useRef<HTMLDivElement | null>(null);
+  const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
+  const pendingFollowScrollRef = useRef(false);
+  const [isFollowingLatest, setIsFollowingLatest] = useState(true);
+  const [hasPendingNewContent, setHasPendingNewContent] = useState(false);
+  const previousContentSignatureRef = useRef<string | null>(null);
   const previousLatestRenderableMessageSignatureRef = useRef<string | null>(null);
   const previousConversationScrollKeyRef = useRef<string | null>(null);
   const previousScrollToBottomRequestKeyRef = useRef(scrollToBottomRequestKey);
-  const preserveMessagesScrollRef = useRef<{ scrollHeight: number; scrollTop: number } | null>(null);
   const reconnectMessagesScrollRef = useRef<{
     conversationScrollKey: string | null;
     scrollHeight: number;
@@ -2570,12 +2604,46 @@ export function ChatPane({
     () => mergeToolCallUiState(messages, toolCallIndex, terminalSideChannel),
     [messages, terminalSideChannel, toolCallIndex]
   );
+  const latestRenderableMessage = renderableMessages.at(-1) ?? null;
+  const latestRenderableMessageSignature = latestRenderableMessage
+    ? createMessageRenderSignature(latestRenderableMessage)
+    : null;
+  const contentSignature = useMemo(
+    () =>
+      [
+        conversationScrollKey ?? '',
+        renderableMessages.length,
+        latestRenderableMessageSignature ?? '',
+        transientNotice?.message ?? '',
+        transientNotice?.details ?? '',
+        runtimeRequests.map((request) => `${request.method}:${request.requestId}`).join('|'),
+        mergedToolState.approvalNotice?.title ?? '',
+        mergedToolState.interruptedNotice?.message ?? ''
+      ].join('::'),
+    [
+      conversationScrollKey,
+      latestRenderableMessageSignature,
+      transientNotice?.details,
+      transientNotice?.message,
+      mergedToolState.approvalNotice?.title,
+      mergedToolState.interruptedNotice?.message,
+      renderableMessages.length,
+      runtimeRequests
+    ]
+  );
   const questionMessageIds = useMemo(
     () =>
       displayItems
         .flatMap((item) => (item.type === 'message' && item.message.role === 'user' ? [item.message.id] : [])),
     [displayItems]
   );
+
+  function setFollowingLatestState(next: boolean): void {
+    setIsFollowingLatest((current) => (current === next ? current : next));
+    if (next) {
+      setHasPendingNewContent(false);
+    }
+  }
 
   useEffect(() => {
     if (!onMobileJumpControlsChange) {
@@ -2609,6 +2677,21 @@ export function ChatPane({
       }
     };
   }, []);
+
+  function scrollMessagesToBottom(options?: ScrollIntoViewOptions): void {
+    const sentinel = bottomSentinelRef.current;
+    if (!sentinel) {
+      return;
+    }
+
+    pendingFollowScrollRef.current = true;
+    setFollowingLatestState(true);
+    sentinel.scrollIntoView({
+      block: 'end',
+      inline: 'nearest',
+      behavior: options?.behavior ?? 'auto'
+    });
+  }
 
   useEffect(() => {
     const messagesElement = messagesRef.current;
@@ -2651,9 +2734,55 @@ export function ChatPane({
       return;
     }
 
-    autoScrollToBottomRef.current = true;
-    messagesElement.scrollTo({ top: messagesElement.scrollHeight });
+    scrollMessagesToBottom();
   }, [paneVisible, scrollToBottomRequestKey]);
+
+  useEffect(() => {
+    const messagesElement = messagesRef.current;
+    const sentinel = bottomSentinelRef.current;
+    if (!messagesElement || !sentinel) {
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry?.isIntersecting) {
+          return;
+        }
+
+        pendingFollowScrollRef.current = false;
+        setFollowingLatestState(true);
+      },
+      {
+        root: messagesElement,
+        threshold: 1
+      }
+    );
+
+    observer.observe(sentinel);
+    return () => {
+      observer.disconnect();
+    };
+  }, [conversationScrollKey]);
+
+  useEffect(() => {
+    const contentElement = messagesContentRef.current;
+    if (!contentElement) {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      if (!paneVisible || !isFollowingLatest) {
+        return;
+      }
+      scrollMessagesToBottom();
+    });
+
+    observer.observe(contentElement);
+    return () => {
+      observer.disconnect();
+    };
+  }, [conversationScrollKey, isFollowingLatest, paneVisible]);
 
   useEffect(() => {
     const messagesElement = messagesRef.current;
@@ -2661,42 +2790,40 @@ export function ChatPane({
       return;
     }
 
-    const latestRenderableMessage = renderableMessages.at(-1) ?? null;
-    const latestRenderableMessageSignature = latestRenderableMessage
-      ? createMessageRenderSignature(latestRenderableMessage)
-      : null;
     const hasNewUserMessage =
       latestRenderableMessage?.role === 'user' &&
       previousLatestRenderableMessageSignatureRef.current !== latestRenderableMessageSignature;
     previousLatestRenderableMessageSignatureRef.current = latestRenderableMessageSignature;
-
-    const preservedScroll = preserveMessagesScrollRef.current;
-    if (preservedScroll) {
-      messagesElement.scrollTop = preservedScroll.scrollTop + (messagesElement.scrollHeight - preservedScroll.scrollHeight);
-      preserveMessagesScrollRef.current = null;
-      autoScrollToBottomRef.current = isScrolledToBottom(messagesElement);
-      return;
-    }
+    const hasContentChanged = previousContentSignatureRef.current !== contentSignature;
+    previousContentSignatureRef.current = contentSignature;
 
     const reconnectScroll = reconnectMessagesScrollRef.current;
     if (connected && reconnectScroll && reconnectScroll.conversationScrollKey === conversationScrollKey && renderableMessages.length > 0) {
       messagesElement.scrollTop = reconnectScroll.scrollTop + (messagesElement.scrollHeight - reconnectScroll.scrollHeight);
       reconnectMessagesScrollRef.current = null;
-      autoScrollToBottomRef.current = isScrolledToBottom(messagesElement);
+      setFollowingLatestState(isScrolledToBottom(messagesElement));
       return;
     }
 
     const isConversationChanged = previousConversationScrollKeyRef.current !== conversationScrollKey;
     previousConversationScrollKeyRef.current = conversationScrollKey;
 
-    if (isConversationChanged || (hasNewUserMessage && paneVisible) || autoScrollToBottomRef.current) {
-      messagesElement.scrollTo({ top: messagesElement.scrollHeight });
-      autoScrollToBottomRef.current = true;
+    if (isConversationChanged) {
+      pendingFollowScrollRef.current = false;
+      setFollowingLatestState(true);
+      scrollMessagesToBottom();
       return;
     }
 
-    autoScrollToBottomRef.current = isScrolledToBottom(messagesElement);
-  }, [connected, conversationScrollKey, displayItems, paneVisible, renderableMessages]);
+    if (hasContentChanged && ((hasNewUserMessage && paneVisible) || isFollowingLatest)) {
+      scrollMessagesToBottom();
+      return;
+    }
+
+    if (hasContentChanged && paneVisible) {
+      setHasPendingNewContent(true);
+    }
+  }, [connected, contentSignature, conversationScrollKey, isFollowingLatest, latestRenderableMessage, latestRenderableMessageSignature, paneVisible, renderableMessages.length]);
 
   function setQuestionMessageRef(messageId: string, node: HTMLDivElement | null): void {
     if (node) {
@@ -2730,6 +2857,8 @@ export function ChatPane({
       return;
     }
 
+    setFollowingLatestState(false);
+
     const currentTop = container.scrollTop;
     const currentIndex = questionAnchors.findLastIndex((anchor) => anchor.top <= currentTop + 24);
     const normalizedCurrentIndex = currentIndex >= 0 ? currentIndex : 0;
@@ -2750,7 +2879,10 @@ export function ChatPane({
   }
 
   function handleMessagesScroll(event: React.UIEvent<HTMLDivElement>): void {
-    autoScrollToBottomRef.current = isScrolledToBottom(event.currentTarget);
+    if (pendingFollowScrollRef.current) {
+      return;
+    }
+    setFollowingLatestState(isScrolledToBottom(event.currentTarget));
   }
 
   function handleJumpToMessagesEdge(direction: 'up' | 'down'): void {
@@ -2759,12 +2891,20 @@ export function ChatPane({
       return;
     }
 
-    autoScrollToBottomRef.current = direction === 'down';
+    if (direction === 'up') {
+      setFollowingLatestState(false);
+      container.scrollTo({
+        top: 0,
+        behavior: 'smooth'
+      });
+      return;
+    }
 
-    container.scrollTo({
-      top: direction === 'up' ? 0 : container.scrollHeight,
-      behavior: 'smooth'
-    });
+    scrollMessagesToBottom({ behavior: 'smooth' });
+  }
+
+  function handleJumpToLatest(): void {
+    scrollMessagesToBottom({ behavior: 'smooth' });
   }
 
   function clearQuestionJumpPressTimeout(): void {
@@ -2838,59 +2978,77 @@ export function ChatPane({
         <div
           ref={messagesRef}
           onScroll={handleMessagesScroll}
-          className="min-h-0 min-w-0 flex-1 space-y-2 overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
+          className="min-h-0 min-w-0 flex-1 overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
         >
-          {runtimeRequests.map((request) => (
-            <RuntimeRequestNotice
-              key={`${request.method}:${request.requestId}`}
-              canRespond={connected}
-              onRespond={onRespondRuntimeRequest}
-              request={request}
-            />
-          ))}
-          {mergedToolState.interruptedNotice ? <TerminalInterruptedBanner interrupted={mergedToolState.interruptedNotice} /> : null}
-          {mergedToolState.approvalNotice ? (
-            <TerminalApprovalInlineNotice
-              approval={mergedToolState.approvalNotice}
-              canSendApprovalInput={canSendApprovalInput && connected}
-              onApprovalInput={onApprovalInput}
-            />
-          ) : null}
-          {displayItems.length === 0
-            ? null
-            : displayItems.map((item) => {
-                if (item.type === 'activity_group') {
-                  return (
-                    <ActivityGroupCard
-                      key={item.group.id}
-                      canSendApprovalInput={canSendApprovalInput && connected}
-                      group={item.group}
-                      mergedToolState={mergedToolState}
-                      onApprovalInput={onApprovalInput}
-                      toolCallIndex={toolCallIndex}
-                    />
-                  );
-                }
-
-                const { message } = item;
-                return (
-                  <div
-                    key={message.id}
-                    ref={message.role === 'user' ? (node) => setQuestionMessageRef(message.id, node) : undefined}
-                  >
-                    <MessageShell message={message}>
-                      <MessageContent
+          <div ref={messagesContentRef} className="space-y-2">
+            {runtimeRequests.map((request) => (
+              <RuntimeRequestNotice
+                key={`${request.method}:${request.requestId}`}
+                canRespond={connected}
+                onRespond={onRespondRuntimeRequest}
+                request={request}
+              />
+            ))}
+            {mergedToolState.interruptedNotice ? <TerminalInterruptedBanner interrupted={mergedToolState.interruptedNotice} /> : null}
+            {mergedToolState.approvalNotice ? (
+              <TerminalApprovalInlineNotice
+                approval={mergedToolState.approvalNotice}
+                canSendApprovalInput={canSendApprovalInput && connected}
+                onApprovalInput={onApprovalInput}
+              />
+            ) : null}
+            {displayItems.length === 0
+              ? null
+              : displayItems.map((item) => {
+                  if (item.type === 'activity_group') {
+                    return (
+                      <ActivityGroupCard
+                        key={item.group.id}
                         canSendApprovalInput={canSendApprovalInput && connected}
-                        message={message}
+                        group={item.group}
                         mergedToolState={mergedToolState}
                         onApprovalInput={onApprovalInput}
                         toolCallIndex={toolCallIndex}
                       />
-                    </MessageShell>
-                  </div>
-                );
-              })}
+                    );
+                  }
+
+                  const { message } = item;
+                  return (
+                    <div
+                      key={message.id}
+                      ref={message.role === 'user' ? (node) => setQuestionMessageRef(message.id, node) : undefined}
+                    >
+                      <MessageShell message={message}>
+                        <MessageContent
+                          canSendApprovalInput={canSendApprovalInput && connected}
+                          message={message}
+                          mergedToolState={mergedToolState}
+                          onApprovalInput={onApprovalInput}
+                          toolCallIndex={toolCallIndex}
+                        />
+                      </MessageShell>
+                    </div>
+                  );
+                })}
+            {transientNotice ? <RuntimeTransientNoticeBanner notice={transientNotice} /> : null}
+            <div ref={bottomSentinelRef} aria-hidden="true" className="h-px w-full" />
+          </div>
         </div>
+
+        {!isFollowingLatest && hasPendingNewContent ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center px-4 md:bottom-16">
+            <button
+              type="button"
+              onClick={handleJumpToLatest}
+              className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-900 shadow-[0_10px_24px_rgba(14,165,233,0.18)] transition hover:border-sky-300 hover:bg-sky-100"
+            >
+              <span>有新内容</span>
+              <span className="text-sky-500">·</span>
+              <span>跳到最新</span>
+            </button>
+          </div>
+        ) : null}
 
         {questionMessageIds.length > 0 ? (
           <div className="pointer-events-none absolute right-3 bottom-14 z-10 hidden lg:block md:right-4 md:bottom-16">

@@ -292,6 +292,13 @@ export interface CodexAppServerServerRequest {
   params?: unknown;
 }
 
+export interface CodexAppServerErrorNotificationParams {
+  error: CodexAppServerTurnError;
+  willRetry: boolean;
+  threadId: string;
+  turnId: string;
+}
+
 export type CodexAppServerIncomingMessage =
   | CodexAppServerSuccessResponse
   | CodexAppServerErrorResponse

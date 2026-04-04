@@ -2,8 +2,11 @@ import { PROVIDER_LABELS, type ProviderId } from '@lzdi/pty-remote-protocol/runt
 
 interface AppHeaderProps {
   activeProviderId: ProviderId | null;
+  desktopTerminalEnabled: boolean;
+  desktopTerminalOpen: boolean;
   desktopWorkspaceBrowserEnabled: boolean;
   desktopWorkspaceBrowserOpen: boolean;
+  onDesktopTerminalToggle: () => void;
   onDesktopWorkspaceBrowserToggle: () => void;
   onSidebarToggle: () => void;
   sidebarCollapsed: boolean;
@@ -39,10 +42,23 @@ function WorkspaceBrowserIcon() {
   );
 }
 
+function TerminalIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-[18px] w-[18px]">
+      <rect x="3.5" y="4.5" width="13" height="11" rx="2.2" stroke="currentColor" strokeWidth="1.6" />
+      <path d="M6.7 8.1 8.9 10l-2.2 1.9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M10.7 11.95h2.8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function AppHeader({
   activeProviderId,
+  desktopTerminalEnabled,
+  desktopTerminalOpen,
   desktopWorkspaceBrowserEnabled,
   desktopWorkspaceBrowserOpen,
+  onDesktopTerminalToggle,
   onDesktopWorkspaceBrowserToggle,
   onSidebarToggle,
   sidebarCollapsed,
@@ -62,6 +78,24 @@ export function AppHeader({
               aria-pressed={!sidebarCollapsed}
             >
               <SidebarToggleIcon collapsed={sidebarCollapsed} />
+            </button>
+
+            <button
+              type="button"
+              onClick={onDesktopTerminalToggle}
+              disabled={!desktopTerminalEnabled}
+              className={[
+                'flex h-10 w-10 items-center justify-center rounded-2xl border shadow-sm transition',
+                desktopTerminalOpen
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                  : 'border-zinc-300 bg-white text-zinc-700 hover:bg-zinc-50',
+                desktopTerminalEnabled ? '' : 'cursor-not-allowed opacity-45 shadow-none'
+              ].join(' ')}
+              aria-label={desktopTerminalOpen ? '关闭实时终端' : '打开实时终端'}
+              title={desktopTerminalOpen ? '关闭实时终端' : '打开实时终端'}
+              aria-pressed={desktopTerminalOpen}
+            >
+              <TerminalIcon />
             </button>
 
             <button

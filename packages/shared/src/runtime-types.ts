@@ -3,6 +3,13 @@ export type MessageStatus = 'complete' | 'streaming' | 'error';
 export type RuntimeStatus = 'idle' | 'starting' | 'running' | 'error';
 export type ProviderId = 'claude' | 'codex';
 
+export interface RuntimeTransientNotice {
+  kind: 'info' | 'warning' | 'error';
+  message: string;
+  details?: string | null;
+  retrying?: boolean;
+}
+
 export const PROVIDER_LABELS: Record<ProviderId, string> = {
   claude: 'claude',
   codex: 'codex'
@@ -72,6 +79,7 @@ export interface RuntimeSnapshot {
   messages: ChatMessage[];
   hasOlderMessages: boolean;
   lastError: string | null;
+  transientNotice: RuntimeTransientNotice | null;
 }
 
 export interface CliProviderRuntimeDescriptor {

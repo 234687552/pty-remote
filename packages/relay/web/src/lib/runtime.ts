@@ -10,7 +10,8 @@ export function createEmptySnapshot(): RuntimeSnapshot {
     sessionId: null,
     messages: [],
     hasOlderMessages: false,
-    lastError: null
+    lastError: null,
+    transientNotice: null
   };
 }
 
