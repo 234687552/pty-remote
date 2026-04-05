@@ -416,19 +416,6 @@ export function Composer({
             event.preventDefault();
             requestComposerSubmit();
           }}
-          onBeforeInput={(event) => {
-            const nativeEvent = event.nativeEvent as InputEvent;
-            if (nativeEvent.inputType !== 'insertLineBreak') {
-              return;
-            }
-
-            event.preventDefault();
-            if (isPromptComposingRef.current) {
-              return;
-            }
-
-            requestComposerSubmit();
-          }}
           onCompositionStart={() => {
             isPromptComposingRef.current = true;
           }}

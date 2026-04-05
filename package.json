@@ -9,7 +9,7 @@
     "build": "npm run build --workspaces --if-present",
     "build:relay": "npm run build --workspace @lzdi/pty-remote-relay",
     "build:cli": "npm run build --workspace @lzdi/pty-remote-cli",
-    "dev": "concurrently -k \"npm:dev:relay\" \"npm:dev:cli\"",
+    "dev": "node scripts/dev.mjs",
     "dev:relay": "npm run dev --workspace @lzdi/pty-remote-relay",
     "dev:cli": "npm run dev --workspace @lzdi/pty-remote-cli",
     "dev:cli:claude": "npm run dev:claude --workspace @lzdi/pty-remote-cli",

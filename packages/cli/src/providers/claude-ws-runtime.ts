@@ -110,9 +110,46 @@ interface ClaudeSystemEnvelope {
   permissionMode?: string;
 }
 
+interface ClaudeStreamEventMessageStart {
+  type: 'message_start';
+  message?: {
+    id?: string;
+  };
+}
+
+interface ClaudeStreamEventContentBlockDelta {
+  type: 'content_block_delta';
+  index?: number;
+  delta?: {
+    type?: string;
+    text?: string;
+  };
+}
+
+interface ClaudeStreamEventMessageStop {
+  type: 'message_stop';
+}
+
+type ClaudeStreamEvent =
+  | ClaudeStreamEventMessageStart
+  | ClaudeStreamEventContentBlockDelta
+  | ClaudeStreamEventMessageStop;
+
+interface ClaudeStreamEventEnvelope {
+  type?: string;
+  event?: ClaudeStreamEvent;
+  parent_tool_use_id?: string | null;
+}
+
 interface AgentRuntimeState extends RuntimeSnapshot {}
 
+interface ClaudeActiveAssistantStreamState {
+  messageId: string;
+  textBlockIndices: number[];
+}
+
 interface ClaudeWsConnection {
+  activeAssistantStatesByScope: Map<string, ClaudeActiveAssistantStreamState>;
   child: ChildProcess | null;
   closed: boolean;
   hostToken: string;
@@ -168,6 +205,22 @@ interface ActiveTerminalSession {
 }
 
 type OutboundMessageDeltaPayload = Omit<MessageDeltaPayload, 'cliId'>;
+
+function streamScopeKey(parentToolUseId: string | null | undefined): string {
+  return parentToolUseId?.trim() || '';
+}
+
+function resolveStreamingTextBlockIndex(
+  state: ClaudeActiveAssistantStreamState,
+  rawBlockIndex: number
+): number {
+  const existingIndex = state.textBlockIndices.indexOf(rawBlockIndex);
+  if (existingIndex >= 0) {
+    return existingIndex;
+  }
+  state.textBlockIndices.push(rawBlockIndex);
+  return state.textBlockIndices.length - 1;
+}
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
@@ -1526,6 +1579,7 @@ export class ClaudeWsManager {
     );
 
     const connection: ClaudeWsConnection = {
+      activeAssistantStatesByScope: new Map(),
       child: null,
       closed: false,
       hostToken,
@@ -1618,6 +1672,7 @@ export class ClaudeWsManager {
       'stream-json',
       '--output-format',
       'stream-json',
+      '--include-partial-messages',
       '--permission-mode',
       this.options.permissionMode
     );
@@ -1852,6 +1907,9 @@ export class ClaudeWsManager {
       case 'assistant':
         this.handleAssistantMessage(handle, message as ClaudeAssistantEnvelope);
         return;
+      case 'stream_event':
+        this.handleStreamEvent(handle, message as ClaudeStreamEventEnvelope);
+        return;
       case 'control_request':
         this.handleControlRequest(handle, message as ClaudeControlRequestEnvelope);
         return;
@@ -1864,6 +1922,105 @@ export class ClaudeWsManager {
       default:
         return;
     }
+  }
+
+  private handleStreamEvent(handle: ClaudeWsHandle, message: ClaudeStreamEventEnvelope): void {
+    const connection = handle.connection;
+    if (!connection) {
+      return;
+    }
+
+    const event = message.event;
+    if (!event || typeof event !== 'object') {
+      return;
+    }
+
+    const scope = streamScopeKey(message.parent_tool_use_id);
+    switch (event.type) {
+      case 'message_start': {
+        const messageId = event.message?.id?.trim();
+        if (!messageId) {
+          return;
+        }
+        connection.activeAssistantStatesByScope.set(scope, {
+          messageId,
+          textBlockIndices: []
+        });
+        return;
+      }
+      case 'content_block_delta': {
+        if (event.delta?.type !== 'text_delta') {
+          return;
+        }
+        const streamState = connection.activeAssistantStatesByScope.get(scope) ?? null;
+        if (!streamState) {
+          return;
+        }
+        const deltaText = event.delta.text ?? '';
+        if (!deltaText) {
+          return;
+        }
+        const rawBlockIndex =
+          typeof event.index === 'number' && Number.isFinite(event.index) && event.index >= 0
+            ? Math.floor(event.index)
+            : 0;
+        const blockIndex = resolveStreamingTextBlockIndex(streamState, rawBlockIndex);
+        this.applyStreamingTextDelta(handle, streamState.messageId, blockIndex, deltaText);
+        return;
+      }
+      case 'message_stop':
+        connection.activeAssistantStatesByScope.delete(scope);
+        return;
+      default:
+        return;
+    }
+  }
+
+  private applyStreamingTextDelta(
+    handle: ClaudeWsHandle,
+    messageId: string,
+    blockIndex: number,
+    deltaText: string
+  ): void {
+    const existingMessage = handle.runtime.messages.find((message) => message.id === messageId) ?? null;
+    const blockId = `${messageId}:text:${blockIndex}`;
+    const nextBlocks = existingMessage?.blocks.slice() ?? [];
+    const existingBlockIndex = nextBlocks.findIndex(
+      (block) => block.id === blockId && block.type === 'text'
+    );
+
+    if (existingBlockIndex >= 0) {
+      const existingBlock = nextBlocks[existingBlockIndex];
+      if (existingBlock?.type !== 'text') {
+        return;
+      }
+      nextBlocks[existingBlockIndex] = {
+        ...existingBlock,
+        text:
+          deltaText === existingBlock.text
+            ? existingBlock.text
+            : deltaText.startsWith(existingBlock.text)
+              ? deltaText
+              : `${existingBlock.text}${deltaText}`
+      };
+    } else {
+      nextBlocks.push({
+        id: blockId,
+        type: 'text',
+        text: deltaText
+      });
+    }
+
+    this.mergeHandleMessages(handle, [
+      {
+        id: messageId,
+        role: 'assistant',
+        blocks: nextBlocks,
+        status: 'streaming',
+        createdAt: existingMessage?.createdAt ?? new Date().toISOString(),
+        sequence: existingMessage?.sequence ?? this.nextSequence(handle.runtime.messages)
+      }
+    ]);
   }
 
   private handleAssistantMessage(handle: ClaudeWsHandle, message: ClaudeAssistantEnvelope): void {

@@ -137,6 +137,8 @@ interface ChatPaneProps {
 
 const QUESTION_JUMP_LONG_PRESS_DELAY_MS = 420;
 const SCROLL_BOTTOM_THRESHOLD_PX = 12;
+const TOUCH_SCROLL_INTENT_DELTA_PX = 6;
+const USER_SCROLL_INTENT_WINDOW_MS = 1200;
 const KNOWN_TERMINAL_APPROVAL_OPTION_LABELS = ['allow', 'allow for this session', 'always allow', 'cancel'] as const;
 
 const EMPTY_MERMAID_RENDER_SNAPSHOT: MermaidRenderSnapshot = {
@@ -1302,6 +1304,47 @@ const MarkdownTextSegment = memo(function MarkdownTextSegment({
             }
           />
         ),
+        table: ({ ...props }) => (
+          <div className="my-2 overflow-x-auto rounded-xl border border-zinc-200 bg-white shadow-sm">
+            <table
+              {...props}
+              className={
+                isInverse
+                  ? 'min-w-full border-collapse text-sm text-zinc-900'
+                  : isMuted
+                    ? 'min-w-full border-collapse text-sm text-zinc-600 not-italic'
+                    : 'min-w-full border-collapse text-sm text-zinc-800'
+              }
+            />
+          </div>
+        ),
+        tbody: ({ ...props }) => <tbody {...props} className={isMuted ? 'bg-zinc-50/50' : 'bg-white'} />,
+        td: ({ ...props }) => (
+          <td
+            {...props}
+            className={
+              isInverse
+                ? 'border border-sky-200 bg-white/70 px-3 py-2 align-top'
+                : isMuted
+                  ? 'border border-zinc-200 px-3 py-2 align-top text-zinc-600 not-italic'
+                  : 'border border-zinc-200 px-3 py-2 align-top'
+            }
+          />
+        ),
+        th: ({ ...props }) => (
+          <th
+            {...props}
+            className={
+              isInverse
+                ? 'border border-sky-200 bg-sky-50 px-3 py-2 text-left font-semibold text-zinc-950'
+                : isMuted
+                  ? 'border border-zinc-200 bg-zinc-100 px-3 py-2 text-left font-semibold text-zinc-700 not-italic'
+                  : 'border border-zinc-200 bg-zinc-50 px-3 py-2 text-left font-semibold text-zinc-950'
+            }
+          />
+        ),
+        thead: ({ ...props }) => <thead {...props} className="sticky top-0" />,
+        tr: ({ ...props }) => <tr {...props} className="align-top" />,
         ul: ({ ...props }) => <ul {...props} className="list-disc space-y-0 pl-5" />
       }}
     >
@@ -2577,10 +2620,13 @@ export function ChatPane({
     conversationScrollKey: string | null;
     scrollHeight: number;
     scrollTop: number;
+    wasFollowingLatest: boolean;
   } | null>(null);
   const questionJumpPressTimeoutRef = useRef<number | null>(null);
   const questionJumpLongPressTriggeredRef = useRef(false);
   const questionMessageRefs = useRef(new Map<string, HTMLDivElement>());
+  const touchScrollStartYRef = useRef<number | null>(null);
+  const userScrollIntentUntilRef = useRef(0);
 
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
   const displayItems = useMemo<ChatPaneDisplayItem[]>(
@@ -2645,6 +2691,14 @@ export function ChatPane({
     }
   }
 
+  function markUserScrollIntent(durationMs = USER_SCROLL_INTENT_WINDOW_MS): void {
+    userScrollIntentUntilRef.current = Date.now() + durationMs;
+  }
+
+  function hasRecentUserScrollIntent(): boolean {
+    return Date.now() <= userScrollIntentUntilRef.current;
+  }
+
   useEffect(() => {
     if (!onMobileJumpControlsChange) {
       return;
@@ -2706,7 +2760,8 @@ export function ChatPane({
       reconnectMessagesScrollRef.current = {
         conversationScrollKey,
         scrollHeight: messagesElement.scrollHeight,
-        scrollTop: messagesElement.scrollTop
+        scrollTop: messagesElement.scrollTop,
+        wasFollowingLatest: isFollowingLatest
       };
       return;
     }
@@ -2717,7 +2772,7 @@ export function ChatPane({
     ) {
       reconnectMessagesScrollRef.current = null;
     }
-  }, [connected, conversationScrollKey, renderableMessages.length]);
+  }, [connected, conversationScrollKey, isFollowingLatest, renderableMessages.length]);
 
   useEffect(() => {
     if (previousScrollToBottomRequestKeyRef.current === scrollToBottomRequestKey) {
@@ -2801,6 +2856,10 @@ export function ChatPane({
     if (connected && reconnectScroll && reconnectScroll.conversationScrollKey === conversationScrollKey && renderableMessages.length > 0) {
       messagesElement.scrollTop = reconnectScroll.scrollTop + (messagesElement.scrollHeight - reconnectScroll.scrollHeight);
       reconnectMessagesScrollRef.current = null;
+      if (reconnectScroll.wasFollowingLatest) {
+        scrollMessagesToBottom();
+        return;
+      }
       setFollowingLatestState(isScrolledToBottom(messagesElement));
       return;
     }
@@ -2882,7 +2941,46 @@ export function ChatPane({
     if (pendingFollowScrollRef.current) {
       return;
     }
-    setFollowingLatestState(isScrolledToBottom(event.currentTarget));
+
+    if (isScrolledToBottom(event.currentTarget)) {
+      setFollowingLatestState(true);
+      return;
+    }
+
+    if (hasRecentUserScrollIntent()) {
+      setFollowingLatestState(false);
+    }
+  }
+
+  function handleMessagesWheel(): void {
+    markUserScrollIntent();
+  }
+
+  function handleMessagesPointerDown(event: React.PointerEvent<HTMLDivElement>): void {
+    if (event.target !== event.currentTarget) {
+      return;
+    }
+    markUserScrollIntent();
+  }
+
+  function handleMessagesTouchStart(event: React.TouchEvent<HTMLDivElement>): void {
+    const touch = event.touches[0];
+    touchScrollStartYRef.current = touch ? touch.clientY : null;
+  }
+
+  function handleMessagesTouchMove(event: React.TouchEvent<HTMLDivElement>): void {
+    const touch = event.touches[0];
+    const startY = touchScrollStartYRef.current;
+    if (!touch || startY === null) {
+      return;
+    }
+    if (Math.abs(touch.clientY - startY) >= TOUCH_SCROLL_INTENT_DELTA_PX) {
+      markUserScrollIntent();
+    }
+  }
+
+  function handleMessagesTouchEnd(): void {
+    touchScrollStartYRef.current = null;
   }
 
   function handleJumpToMessagesEdge(direction: 'up' | 'down'): void {
@@ -2978,6 +3076,11 @@ export function ChatPane({
         <div
           ref={messagesRef}
           onScroll={handleMessagesScroll}
+          onWheelCapture={handleMessagesWheel}
+          onPointerDownCapture={handleMessagesPointerDown}
+          onTouchEndCapture={handleMessagesTouchEnd}
+          onTouchMoveCapture={handleMessagesTouchMove}
+          onTouchStartCapture={handleMessagesTouchStart}
           className="min-h-0 min-w-0 flex-1 overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
         >
           <div ref={messagesContentRef} className="space-y-2">
