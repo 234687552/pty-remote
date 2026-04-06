@@ -297,25 +297,22 @@ export function Composer({
         onChange={handleImageInputChange}
       />
 
-      <div className="hidden items-center justify-between gap-3 px-1 pb-1 md:flex">
-        <div className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">Composer</div>
-        <div className="flex min-w-0 items-center justify-end gap-3">
-          <div className="min-w-0 flex flex-wrap justify-end gap-1.5 text-[11px] font-medium">
-            {[conversationBadge, socketBadge, cliBadge].map((badge) => (
-              <span
-                key={badge.label}
-                className={[
-                  'min-w-0 truncate rounded-full px-2.5 py-0.5 text-center',
-                  badge.className
-                ].join(' ')}
-              >
-                {badge.label}: {badge.value}
-              </span>
-            ))}
-          </div>
-          <div className="shrink-0">
-            <TerminalQuickKeys variant="desktop" disabled={!canSendTerminalInput} onInput={onTerminalInput} />
-          </div>
+      <div className="hidden items-center justify-end gap-3 px-1 pb-1 md:flex">
+        <div className="min-w-0 flex flex-wrap justify-end gap-1.5 text-[11px] font-medium">
+          {[conversationBadge, socketBadge, cliBadge].map((badge) => (
+            <span
+              key={badge.label}
+              className={[
+                'min-w-0 truncate rounded-full px-2.5 py-0.5 text-center',
+                badge.className
+              ].join(' ')}
+            >
+              {badge.label}: {badge.value}
+            </span>
+          ))}
+        </div>
+        <div className="shrink-0">
+          <TerminalQuickKeys variant="desktop" disabled={!canSendTerminalInput} onInput={onTerminalInput} />
         </div>
       </div>
 

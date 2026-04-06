@@ -424,8 +424,6 @@ export function App() {
             }
           }}
           paneVisible={chatPaneVisible}
-          projectDescriptionLines={projectDescriptionLines}
-          rawJsonlText={rawJsonlText}
           runtimeStatus={store.snapshot.status}
           runtimeRequests={activeRuntimeRequests}
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}

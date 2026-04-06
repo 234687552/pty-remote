@@ -129,8 +129,6 @@ interface ChatPaneProps {
   onApprovalInput?: (input: string) => void;
   onRespondRuntimeRequest?: (payload: { error?: string | null; requestId: string | number; result?: unknown }) => Promise<void> | void;
   paneVisible: boolean;
-  projectDescriptionLines?: string[];
-  rawJsonlText?: string;
   runtimeStatus?: 'error' | 'idle' | 'running' | 'starting';
   runtimeRequests?: RuntimeRequestPayload[];
   scrollToBottomRequestKey: number;
@@ -2702,8 +2700,6 @@ export function ChatPane({
   onApprovalInput,
   onRespondRuntimeRequest,
   paneVisible,
-  projectDescriptionLines = [],
-  rawJsonlText = '',
   runtimeStatus = 'idle',
   runtimeRequests = [],
   scrollToBottomRequestKey,
@@ -2756,14 +2752,6 @@ export function ChatPane({
   );
   const latestRenderableMessage = renderableMessages.at(-1) ?? null;
   const showPendingAssistantTyping = (runtimeStatus === 'running' || runtimeStatus === 'starting') && latestRenderableMessage?.role === 'user';
-  const trimmedProjectDescriptionLines = useMemo(
-    () => projectDescriptionLines.map((line) => line.trim()).filter(Boolean),
-    [projectDescriptionLines]
-  );
-  const rawJsonlLineCount = useMemo(() => {
-    const trimmed = rawJsonlText.trim();
-    return trimmed ? trimmed.split('\n').length : 0;
-  }, [rawJsonlText]);
   const latestRenderableMessageSignature = latestRenderableMessage
     ? createMessageRenderSignature(latestRenderableMessage)
     : null;
@@ -3306,43 +3294,6 @@ export function ChatPane({
             ) : null}
           </div>
 
-          <section className="border-t border-zinc-200 bg-zinc-50/70">
-            <div className="flex items-center justify-between gap-3 px-4 pt-3 pb-2">
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-900">Project Description / Raw JSONL</h3>
-                <p className="text-xs text-zinc-500">项目描述已合并到这个窗口，原始内容放在消息区下方。</p>
-              </div>
-              <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]">
-                {rawJsonlLineCount} lines
-              </span>
-            </div>
-
-            <div className="grid gap-3 px-4 pb-4 lg:grid-cols-[minmax(0,0.34fr)_minmax(0,0.66fr)]">
-              <div className="rounded-2xl border border-zinc-200 bg-white/90 p-3">
-                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-400">Project Description</div>
-                {trimmedProjectDescriptionLines.length > 0 ? (
-                  <div className="space-y-2">
-                    {trimmedProjectDescriptionLines.map((line) => (
-                      <div key={line} className="rounded-xl bg-zinc-50 px-3 py-2 text-xs leading-5 text-zinc-700">
-                        {line}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="rounded-xl bg-zinc-50 px-3 py-2 text-xs leading-5 text-zinc-500">当前没有项目描述。</div>
-                )}
-              </div>
-
-              <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white/90">
-                <div className="border-b border-zinc-200 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-400">
-                  Raw JSONL
-                </div>
-                <pre className="max-h-44 overflow-auto px-3 py-3 text-[11px] leading-5 text-zinc-700 whitespace-pre-wrap break-all">
-                  {rawJsonlText.trim() || '暂无 raw jsonl 数据。'}
-                </pre>
-              </div>
-            </div>
-          </section>
         </div>
       </div>
     </div>
