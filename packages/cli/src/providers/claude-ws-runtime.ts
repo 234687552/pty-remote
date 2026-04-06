@@ -146,7 +146,9 @@ interface ClaudeStreamEventEnvelope {
   parent_tool_use_id?: string | null;
 }
 
-interface AgentRuntimeState extends RuntimeSnapshot {}
+interface AgentRuntimeState extends RuntimeSnapshot {
+  allMessages: ChatMessage[];
+}
 
 interface ClaudeActiveAssistantStreamState {
   messageId: string;
@@ -821,13 +823,14 @@ export class ClaudeWsManager {
       }
     }
 
-    if (handle.runtime.messages.length === 0 && handle.sessionId) {
+    if (handle.sessionId) {
       await this.hydrateHandleFromJsonl(handle, this.options.snapshotMessagesMax);
     }
 
     this.touchHandle(handle);
     this.activeThreadKey = handle.threadKey;
     this.currentCwd = handle.cwd;
+    this.emitCurrentMessagesUpsert(handle);
     this.emitRuntimeMeta(handle);
     this.emitPendingRuntimeRequestsForHandle(handle);
     await this.maybeEnsureVisibleTerminalSession(handle);
@@ -859,7 +862,7 @@ export class ClaudeWsManager {
       }
     }
 
-    if (handle.runtime.messages.length === 0 && handle.sessionId) {
+    if (handle.sessionId) {
       await this.hydrateHandleFromJsonl(handle, maxMessages);
     }
 
@@ -891,7 +894,7 @@ export class ClaudeWsManager {
     }
 
     this.touchHandle(handle);
-    const nextSequence = this.nextSequence(handle.runtime.messages);
+    const nextSequence = this.nextSequence(handle.runtime.allMessages);
     const createdAt = new Date().toISOString();
     this.mergeHandleMessages(handle, [
       createUserTextMessage(`claude:user:${handle.sessionId}:${nextSequence}`, trimmedContent, createdAt, nextSequence)
@@ -1141,6 +1144,7 @@ export class ClaudeWsManager {
 
   private createFreshState(conversationKey: string | null, sessionId: string | null): AgentRuntimeState {
     return {
+      allMessages: [],
       providerId: 'claude',
       conversationKey,
       status: 'idle',
@@ -1154,14 +1158,14 @@ export class ClaudeWsManager {
 
   private snapshotForHandle(handle: ClaudeWsHandle, maxMessages?: number): RuntimeSnapshot {
     const normalizedMaxMessages = normalizeMaxMessages(maxMessages, this.options.snapshotMessagesMax);
-    const messages = selectRecentMessages(handle.runtime.messages, normalizedMaxMessages);
+    const messages = selectRecentMessages(handle.runtime.allMessages, normalizedMaxMessages);
     return cloneValue({
       providerId: 'claude',
       conversationKey: handle.threadKey,
       status: handle.runtime.status,
       sessionId: handle.sessionId,
       messages,
-      hasOlderMessages: handle.runtime.hasOlderMessages || handle.runtime.messages.length > messages.length,
+      hasOlderMessages: handle.runtime.allMessages.length > messages.length || handle.runtime.hasOlderMessages,
       lastError: handle.runtime.lastError,
       transientNotice: handle.runtime.transientNotice
     } satisfies RuntimeSnapshot);
@@ -1200,17 +1204,31 @@ export class ClaudeWsManager {
       conversationKey: handle.threadKey,
       sessionId: handle.sessionId,
       upserts: cloneValue(upserts),
-      recentMessageIds: upserts.map((message) => message.id),
+      recentMessageIds: nextMessages.map((message) => message.id),
       hasOlderMessages: nextHasOlderMessages
     });
   }
 
-  private replaceHandleMessages(handle: ClaudeWsHandle, messages: ChatMessage[], hasOlderMessages: boolean): void {
+  private emitCurrentMessagesUpsert(handle: ClaudeWsHandle): void {
+    if (handle.runtime.messages.length === 0 && !handle.runtime.hasOlderMessages) {
+      return;
+    }
+    this.callbacks.emitMessagesUpsert({
+      providerId: 'claude',
+      conversationKey: handle.threadKey,
+      sessionId: handle.sessionId,
+      upserts: cloneValue(handle.runtime.messages),
+      recentMessageIds: handle.runtime.messages.map((message) => message.id),
+      hasOlderMessages: handle.runtime.hasOlderMessages
+    });
+  }
+
+  private replaceHandleMessages(handle: ClaudeWsHandle, allMessages: ChatMessage[]): void {
     const previousMessages = handle.runtime.messages;
     const previousHasOlderMessages = handle.runtime.hasOlderMessages;
     const normalizedMaxMessages = Math.max(1, this.options.snapshotMessagesMax);
-    const nextMessages = selectRecentMessages(messages, normalizedMaxMessages);
-    const nextHasOlderMessages = hasOlderMessages || messages.length > nextMessages.length;
+    const nextMessages = selectRecentMessages(allMessages, normalizedMaxMessages);
+    const nextHasOlderMessages = allMessages.length > nextMessages.length;
     const deltaPayloads = createStreamingMessageDeltaPayloads(
       handle,
       previousMessages,
@@ -1219,6 +1237,7 @@ export class ClaudeWsManager {
       nextHasOlderMessages
     );
 
+    handle.runtime.allMessages = allMessages;
     handle.runtime.messages = nextMessages;
     handle.runtime.hasOlderMessages = nextHasOlderMessages;
     handle.initialized = handle.initialized || nextMessages.length > 0 || nextHasOlderMessages;
@@ -1235,8 +1254,8 @@ export class ClaudeWsManager {
   }
 
   private mergeHandleMessages(handle: ClaudeWsHandle, upserts: ChatMessage[]): void {
-    const mergedMessages = mergeMessages(handle.runtime.messages, upserts);
-    this.replaceHandleMessages(handle, mergedMessages, handle.runtime.hasOlderMessages);
+    const mergedMessages = mergeMessages(handle.runtime.allMessages, upserts);
+    this.replaceHandleMessages(handle, mergedMessages);
   }
 
   private touchHandle(handle: ClaudeWsHandle): void {
@@ -1253,7 +1272,7 @@ export class ClaudeWsManager {
   }
 
   private isWarmHandle(handle: ClaudeWsHandle): boolean {
-    return handle.initialized || handle.connection !== null || handle.runtime.messages.length > 0;
+    return handle.initialized || handle.connection !== null || handle.runtime.allMessages.length > 0;
   }
 
   private isProtectedHandle(handle: ClaudeWsHandle): boolean {
@@ -1398,10 +1417,9 @@ export class ClaudeWsManager {
     }
 
     const parsedMessages = parseClaudeJsonlMessages(rawJsonl);
-    const limit = normalizeMaxMessages(maxMessages, this.options.snapshotMessagesMax);
     handle.runtime.status = handle.connection ? handle.runtime.status : 'idle';
     handle.runtime.lastError = null;
-    this.replaceHandleMessages(handle, selectRecentMessages(parsedMessages, limit), parsedMessages.length > limit);
+    this.replaceHandleMessages(handle, parsedMessages);
   }
 
   private async ensureHost(): Promise<ClaudeWsHost> {
@@ -2000,7 +2018,7 @@ export class ClaudeWsManager {
     blockIndex: number,
     deltaText: string
   ): void {
-    const existingMessage = handle.runtime.messages.find((message) => message.id === messageId) ?? null;
+    const existingMessage = handle.runtime.allMessages.find((message) => message.id === messageId) ?? null;
     const blockId = `${messageId}:text:${blockIndex}`;
     const nextBlocks = existingMessage?.blocks.slice() ?? [];
     const existingBlockIndex = nextBlocks.findIndex(
@@ -2036,7 +2054,7 @@ export class ClaudeWsManager {
         blocks: nextBlocks,
         status: 'streaming',
         createdAt: existingMessage?.createdAt ?? new Date().toISOString(),
-        sequence: existingMessage?.sequence ?? this.nextSequence(handle.runtime.messages)
+        sequence: existingMessage?.sequence ?? this.nextSequence(handle.runtime.allMessages)
       }
     ]);
   }
@@ -2047,7 +2065,7 @@ export class ClaudeWsManager {
       return;
     }
 
-    const baseId = message.message?.id?.trim() || `claude:assistant:${handle.sessionId ?? handle.threadKey}:${this.nextSequence(handle.runtime.messages)}`;
+    const baseId = message.message?.id?.trim() || `claude:assistant:${handle.sessionId ?? handle.threadKey}:${this.nextSequence(handle.runtime.allMessages)}`;
     const blocks = extractContentBlocks(baseId, message.message?.content);
     if (!hasVisibleBlocks(blocks)) {
       return;
@@ -2059,7 +2077,7 @@ export class ClaudeWsManager {
       blocks,
       status: message.message?.stop_reason ? deriveMessageStatus(blocks, 'complete') : deriveMessageStatus(blocks, 'streaming'),
       createdAt: new Date().toISOString(),
-      sequence: this.nextSequence(handle.runtime.messages)
+      sequence: this.nextSequence(handle.runtime.allMessages)
     };
     this.mergeHandleMessages(handle, [nextMessage]);
   }
@@ -2099,7 +2117,7 @@ export class ClaudeWsManager {
     this.touchHandle(handle);
     const previousStatus = handle.runtime.status;
     const previousLastError = handle.runtime.lastError;
-    this.replaceHandleMessages(handle, finalizeStreamingMessages(handle.runtime.messages), handle.runtime.hasOlderMessages);
+    this.replaceHandleMessages(handle, finalizeStreamingMessages(handle.runtime.allMessages));
     handle.runtime.status = 'idle';
     handle.runtime.lastError = null;
     if (typeof message.result === 'string' && message.result.toLowerCase() === 'error') {

@@ -2762,12 +2762,6 @@ export function ChatPane({
     [messages, terminalSideChannel, toolCallIndex]
   );
   const latestRenderableMessage = renderableMessages.at(-1) ?? null;
-  const isRuntimeStreaming = runtimeStatus === 'running' || runtimeStatus === 'starting';
-  const pendingAssistantIndicator = !isRuntimeStreaming
-    ? null
-    : !latestRenderableMessage || latestRenderableMessage.role === 'user'
-      ? 'thinking'
-      : 'streaming';
   const latestRenderableMessageSignature = latestRenderableMessage
     ? createMessageRenderSignature(latestRenderableMessage)
     : null;
@@ -3324,8 +3318,6 @@ export function ChatPane({
                     />
                   </MessageShell>
                 ) : null}
-                {pendingAssistantIndicator === 'thinking' ? <AssistantTypingBubble /> : null}
-                {pendingAssistantIndicator === 'streaming' ? <AssistantStreamingBubble /> : null}
                 <div ref={bottomSentinelRef} aria-hidden="true" className="h-px w-full" />
               </div>
             </div>

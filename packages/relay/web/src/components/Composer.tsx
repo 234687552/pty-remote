@@ -10,6 +10,16 @@ interface StatusBadge {
   value: string;
 }
 
+function StatusBusyDots() {
+  return (
+    <span className="inline-flex items-center gap-1 align-middle" aria-hidden="true">
+      <span className="typing-dot typing-dot-delay-0 inline-block h-1 w-1 rounded-full bg-current" />
+      <span className="typing-dot typing-dot-delay-1 inline-block h-1 w-1 rounded-full bg-current" />
+      <span className="typing-dot typing-dot-delay-2 inline-block h-1 w-1 rounded-full bg-current" />
+    </span>
+  );
+}
+
 interface ComposerProps {
   attachments: ComposerAttachment[];
   busy: boolean;
@@ -297,8 +307,8 @@ export function Composer({
         onChange={handleImageInputChange}
       />
 
-      <div className="hidden items-center justify-end gap-3 px-1 pb-1 md:flex">
-        <div className="min-w-0 flex flex-wrap justify-end gap-1.5 text-[11px] font-medium">
+      <div className="hidden items-center justify-between gap-3 px-1 pb-1 md:flex">
+        <div className="min-w-0 flex flex-wrap items-center gap-1.5 text-[11px] font-medium">
           {[conversationBadge, socketBadge, cliBadge]
             .filter((badge) => badge.label === 'status' || badge.value === 'offline')
             .map((badge) => (
@@ -309,7 +319,9 @@ export function Composer({
                 badge.className
               ].join(' ')}
             >
-              {badge.label}: {badge.value}
+              {badge.label}
+              <span className="mx-1 opacity-50">:</span>
+              {badge.label === 'status' && (badge.value === 'running' || badge.value === 'starting') ? <StatusBusyDots /> : badge.value}
             </span>
           ))}
         </div>

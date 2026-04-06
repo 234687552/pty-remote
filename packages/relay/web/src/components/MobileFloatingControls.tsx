@@ -136,6 +136,7 @@ function StatusTextBadge({
                     ? '异常'
                     : value;
   const toneClass = resolveStatusTextTone(className);
+  const showBusyDots = label === 'status' && (value === 'running' || value === 'starting');
 
   return (
     <span
@@ -148,7 +149,15 @@ function StatusTextBadge({
     >
       <span className="truncate">{compactLabel}</span>
       <span className="mx-0.5 opacity-40">·</span>
-      <span className="truncate">{compactValue}</span>
+      {showBusyDots ? (
+        <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+          <span className="typing-dot typing-dot-delay-0 inline-block h-1 w-1 rounded-full bg-current" />
+          <span className="typing-dot typing-dot-delay-1 inline-block h-1 w-1 rounded-full bg-current" />
+          <span className="typing-dot typing-dot-delay-2 inline-block h-1 w-1 rounded-full bg-current" />
+        </span>
+      ) : (
+        <span className="truncate">{compactValue}</span>
+      )}
     </span>
   );
 }
@@ -468,7 +477,7 @@ export function MobileFloatingControls({
       <div className="relative h-6 w-full transition">
         <div className="absolute inset-y-0 left-0 flex min-w-0 max-w-[calc(50%-2.6rem)] items-center gap-1 overflow-hidden">
           {statusBadges
-            .filter((badge) => badge.label === 'status')
+            .filter((badge) => badge.label === 'status' || ((badge.label === 'socket' || badge.label === 'cli') && badge.value === 'offline'))
             .map((badge) => (
               <StatusTextBadge key={badge.label} className={badge.className} label={badge.label} value={badge.value} />
             ))}
@@ -524,13 +533,6 @@ export function MobileFloatingControls({
           ) : null}
         </div>
 
-        <div className="absolute inset-y-0 right-0 flex min-w-0 max-w-[calc(50%-2.6rem)] items-center justify-end gap-1 overflow-hidden">
-          {statusBadges
-            .filter((badge) => (badge.label === 'socket' || badge.label === 'cli') && badge.value === 'offline')
-            .map((badge) => (
-              <StatusTextBadge key={badge.label} className={badge.className} label={badge.label} value={badge.value} />
-            ))}
-        </div>
       </div>
     </div>
   );
