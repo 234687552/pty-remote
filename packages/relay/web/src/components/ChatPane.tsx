@@ -656,7 +656,13 @@ function RuntimeRequestNotice({
   );
 }
 
-function RuntimeTransientNoticeBanner({ notice }: { notice: RuntimeTransientNotice }) {
+function RuntimeTransientNoticeBanner({
+  notice,
+  onDismiss
+}: {
+  notice: RuntimeTransientNotice;
+  onDismiss?: () => void;
+}) {
   const toneClass =
     notice.kind === 'error'
       ? 'border-red-200/80 bg-red-50/80'
@@ -666,19 +672,27 @@ function RuntimeTransientNoticeBanner({ notice }: { notice: RuntimeTransientNoti
 
   return (
     <div className="flex justify-start">
-      <section className="w-full max-w-[44rem]">
-        <div className={`w-fit max-w-full rounded-2xl border px-3 py-2 shadow-sm ${toneClass}`}>
-          <div className="flex items-center gap-2 text-[12px] leading-5 text-zinc-900">
-            <span className="inline-flex h-2 w-2 shrink-0 rounded-full bg-current/70 text-amber-700" />
-            <span className="min-w-0 truncate font-medium">{notice.message}</span>
+      <button
+        type="button"
+        onClick={onDismiss}
+        className={`w-full max-w-[44rem] cursor-pointer rounded-2xl border px-3 py-2 text-left shadow-sm transition hover:brightness-[0.99] ${toneClass}`}
+        aria-label="Dismiss notice"
+      >
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2 text-[12px] leading-5 text-zinc-900">
+              <span className="inline-flex h-2 w-2 shrink-0 rounded-full bg-current/70 text-amber-700" />
+              <span className="min-w-0 truncate font-medium">{notice.message}</span>
+            </div>
+            {notice.details?.trim() ? (
+              <pre className="mt-1.5 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-5 text-zinc-600">
+                {notice.details.trim()}
+              </pre>
+            ) : null}
           </div>
-          {notice.details?.trim() ? (
-            <pre className="mt-1.5 overflow-auto whitespace-pre-wrap break-all text-[11px] leading-5 text-zinc-600">
-              {notice.details.trim()}
-            </pre>
-          ) : null}
+          <span className="shrink-0 text-xs leading-5 text-zinc-500">×</span>
         </div>
-      </section>
+      </button>
     </div>
   );
 }
@@ -1679,6 +1693,16 @@ function AssistantTypingBubble() {
   );
 }
 
+function AssistantStreamingBubble() {
+  return (
+    <div className="flex justify-start py-2">
+      <div className="flex items-center px-1 text-emerald-600/90">
+        <StreamingCaret />
+      </div>
+    </div>
+  );
+}
+
 function ToolDetailSection({ label, children }: { children: React.ReactNode; label: string }) {
   return (
     <section className="space-y-1.5">
@@ -2043,10 +2067,10 @@ function MessageShell({ message, children }: { children: React.ReactNode; messag
   const wrapperClass = message.role === 'user' ? 'flex justify-end' : 'flex justify-start';
   const shellClass =
     message.role === 'user'
-      ? 'w-full max-w-none rounded-2xl bg-sky-200 px-3.5 py-2.5 text-sm break-words text-zinc-950 shadow-sm ml-8 sm:ml-12 lg:ml-16'
+      ? 'w-fit max-w-[88%] min-w-0 rounded-2xl bg-sky-200 px-3.5 py-2.5 text-right text-sm break-words text-zinc-950 shadow-sm'
       : message.status === 'error'
         ? 'w-full max-w-none rounded-2xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm break-words text-zinc-900 shadow-sm mr-8 sm:mr-12 lg:mr-16'
-        : 'w-full max-w-none py-2.5 text-sm break-words text-zinc-900 mr-8 sm:mr-12 lg:mr-16';
+        : 'w-full max-w-none py-2.5 text-left text-sm break-words text-zinc-900 mr-8 sm:mr-12 lg:mr-16';
 
   return (
     <div className={wrapperClass}>
@@ -2101,17 +2125,14 @@ function hasRenderableMessageContent(message: ChatMessage): boolean {
 
 function TextBlockContent({
   block,
-  showStreamingCaret = false,
   tone
 }: {
   block: Extract<ChatMessageBlock, { type: 'text' }>;
-  showStreamingCaret?: boolean;
   tone?: 'default' | 'inverse' | 'muted';
 }) {
   return (
     <div className="space-y-0">
       <MessageMarkdown content={block.text} tone={tone} />
-      {showStreamingCaret ? <StreamingCaret inverse={tone === 'inverse'} /> : null}
     </div>
   );
 }
@@ -2488,15 +2509,10 @@ function MessageContent({
   toolCallIndex: Map<string, ToolCallMeta>;
 }) {
   if (message.blocks.length === 0 && (message.attachments?.length ?? 0) === 0) {
-    if (message.role === 'assistant' && message.status === 'streaming') {
-      return <AssistantTypingBubble />;
-    }
     return null;
   }
 
   const isReasoning = isCodexReasoningMessage(message);
-  const textBlocks = getMessageTextBlocks(message);
-  const lastTextBlockId = textBlocks.at(-1)?.id ?? null;
 
   return (
     <div className="space-y-2">
@@ -2509,7 +2525,6 @@ function MessageContent({
             <TextBlockContent
               key={block.id}
               block={block}
-              showStreamingCaret={message.status === 'streaming' && block.id === lastTextBlockId}
               tone={isReasoning ? 'muted' : message.role === 'user' ? 'inverse' : 'default'}
             />
           );
@@ -2683,6 +2698,7 @@ export function ChatPane({
   const pendingFollowScrollRef = useRef(false);
   const [isFollowingLatest, setIsFollowingLatest] = useState(true);
   const [hasPendingNewContent, setHasPendingNewContent] = useState(false);
+  const [dismissedTransientNoticeKey, setDismissedTransientNoticeKey] = useState<string | null>(null);
   const previousContentSignatureRef = useRef<string | null>(null);
   const previousLatestRenderableMessageSignatureRef = useRef<string | null>(null);
   const previousConversationScrollKeyRef = useRef<string | null>(null);
@@ -2722,27 +2738,35 @@ export function ChatPane({
     [messages, terminalSideChannel, toolCallIndex]
   );
   const latestRenderableMessage = renderableMessages.at(-1) ?? null;
-  const showPendingAssistantTyping = (runtimeStatus === 'running' || runtimeStatus === 'starting') && latestRenderableMessage?.role === 'user';
+  const isRuntimeStreaming = runtimeStatus === 'running' || runtimeStatus === 'starting';
+  const pendingAssistantIndicator = !isRuntimeStreaming
+    ? null
+    : !latestRenderableMessage || latestRenderableMessage.role === 'user'
+      ? 'thinking'
+      : 'streaming';
   const latestRenderableMessageSignature = latestRenderableMessage
     ? createMessageRenderSignature(latestRenderableMessage)
     : null;
+  const transientNoticeKey = transientNotice ? `${transientNotice.kind}:${transientNotice.message}:${transientNotice.details ?? ''}` : null;
+  const visibleTransientNotice =
+    transientNoticeKey && transientNoticeKey === dismissedTransientNoticeKey ? null : transientNotice;
   const contentSignature = useMemo(
     () =>
       [
         conversationScrollKey ?? '',
         renderableMessages.length,
         latestRenderableMessageSignature ?? '',
-        transientNotice?.message ?? '',
-        transientNotice?.details ?? '',
+        visibleTransientNotice?.message ?? '',
+        visibleTransientNotice?.details ?? '',
         runtimeRequests.map((request) => `${request.method}:${request.requestId}`).join('|'),
         mergedToolState.approvalNotice?.title ?? '',
         mergedToolState.interruptedNotice?.message ?? ''
       ].join('::'),
-    [
+      [
       conversationScrollKey,
       latestRenderableMessageSignature,
-      transientNotice?.details,
-      transientNotice?.message,
+      visibleTransientNotice?.details,
+      visibleTransientNotice?.message,
       mergedToolState.approvalNotice?.title,
       mergedToolState.interruptedNotice?.message,
       renderableMessages.length,
@@ -2770,6 +2794,12 @@ export function ChatPane({
   function hasRecentUserScrollIntent(): boolean {
     return Date.now() <= userScrollIntentUntilRef.current;
   }
+
+  useEffect(() => {
+    if (transientNoticeKey === null) {
+      setDismissedTransientNoticeKey(null);
+    }
+  }, [transientNoticeKey]);
 
   useEffect(() => {
     if (!onMobileJumpControlsChange) {
@@ -3158,6 +3188,16 @@ export function ChatPane({
               className="min-h-0 min-w-0 h-full overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
             >
               <div ref={messagesContentRef} className="space-y-2">
+                {visibleTransientNotice ? (
+                  <RuntimeTransientNoticeBanner
+                    notice={visibleTransientNotice}
+                    onDismiss={() => {
+                      if (transientNoticeKey) {
+                        setDismissedTransientNoticeKey(transientNoticeKey);
+                      }
+                    }}
+                  />
+                ) : null}
                 {runtimeRequests.map((request) => (
                   <RuntimeRequestNotice
                     key={`${request.method}:${request.requestId}`}
@@ -3208,8 +3248,8 @@ export function ChatPane({
                         </div>
                       );
                     })}
-                {showPendingAssistantTyping ? <AssistantTypingBubble /> : null}
-                {transientNotice ? <RuntimeTransientNoticeBanner notice={transientNotice} /> : null}
+                {pendingAssistantIndicator === 'thinking' ? <AssistantTypingBubble /> : null}
+                {pendingAssistantIndicator === 'streaming' ? <AssistantStreamingBubble /> : null}
                 <div ref={bottomSentinelRef} aria-hidden="true" className="h-px w-full" />
               </div>
             </div>

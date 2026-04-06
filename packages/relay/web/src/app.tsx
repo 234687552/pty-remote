@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
+import type { RuntimeTransientNotice } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import { AppShell } from '@/app-shell/AppShell.tsx';
 import { AppHeader } from '@/components/AppHeader.tsx';
@@ -171,6 +172,17 @@ export function App() {
     () => selectComposerViewModel(store, workspaceDerivedState, socketConnected),
     [socketConnected, store.error, store.snapshot, workspaceDerivedState]
   );
+  const chatTransientNotice = useMemo<RuntimeTransientNotice | null>(() => {
+    const footerErrorText = composerViewModel.footerErrorText.trim();
+    if (footerErrorText) {
+      return {
+        kind: 'error',
+        message: footerErrorText
+      };
+    }
+
+    return store.snapshot.transientNotice;
+  }, [composerViewModel.footerErrorText, store.snapshot.transientNotice]);
   const canSendApprovalInput = Boolean(
     workspaceDerivedState.activeCliId && workspaceDerivedState.activeProviderId && workspaceDerivedState.connected
   );
@@ -399,7 +411,7 @@ export function App() {
           runtimeStatus={store.snapshot.status}
           runtimeRequests={activeRuntimeRequests}
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
-          transientNotice={store.snapshot.transientNotice}
+          transientNotice={chatTransientNotice}
           visible={store.mobilePane === 'chat'}
         />
       }

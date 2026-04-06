@@ -526,8 +526,6 @@ export function Composer({
           )}
         </button>
       </div>
-
-      {footerErrorText ? <div className="mt-1.5 text-sm text-red-600 sm:text-right">{footerErrorText}</div> : null}
     </form>
   );
 }
