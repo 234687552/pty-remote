@@ -1386,6 +1386,16 @@ async function routeWebCommand(command: WebCommandEnvelope, io: SocketIOServer):
     emitCliStatus(io);
   }
 
+  if (result.ok && command.name === 'hydrate-conversation' && result.payload) {
+    const snapshotPayload = cacheHydratedSnapshotPayload(
+      record.descriptor.cliId,
+      result.payload as HydrateConversationResultPayload
+    );
+    if (snapshotPayload) {
+      emitRuntimeSnapshotToSubscribers(io, snapshotPayload);
+    }
+  }
+
   return result;
 }
 

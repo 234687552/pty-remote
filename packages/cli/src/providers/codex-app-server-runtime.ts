@@ -443,7 +443,11 @@ function mergeOwnedLocalUserMessages(
     return nextMessages;
   }
 
-  return mergeMessages(nextMessages, ownedUserMessages);
+  const nextMessagesWithoutOwnedServerUserMessages = nextMessages.filter(
+    (message) => !(message.role === 'user' && Boolean(message.meta?.turnId) && ownedTurnIds.has(message.meta?.turnId ?? ''))
+  );
+
+  return mergeMessages(nextMessagesWithoutOwnedServerUserMessages, ownedUserMessages);
 }
 
 function upsertStreamingTextMessage(
@@ -691,6 +695,10 @@ function userInputToText(input: unknown): string {
     default:
       return '';
   }
+}
+
+function getCodexUserInputText(item: Extract<CodexAppServerThreadItem, { type: 'userMessage' }>): string {
+  return item.content.map(userInputToText).filter(Boolean).join('\n').trim();
 }
 
 function summarizeFileChangeItem(item: Extract<CodexAppServerThreadItem, { type: 'fileChange' }>): string {
@@ -1907,8 +1915,6 @@ export class CodexAppServerManager {
     handle.localUserTurnIds.add(turnId);
     const nextPending: ChatMessage = {
       ...pending,
-      id: `codex:user:turn:${turnId}`,
-      blocks: createTextBlock(`codex:user:turn:${turnId}`, getUserMessageText(pending)),
       meta: {
         ...pending.meta,
         turnId
@@ -1916,7 +1922,11 @@ export class CodexAppServerManager {
     };
     handle.pendingOptimisticUserMessage = nextPending;
     handle.runtime.allMessages = mergeMessages(
-      handle.runtime.allMessages.filter((message) => message.id !== pending.id),
+      handle.runtime.allMessages.filter(
+        (message) =>
+          message.id !== pending.id &&
+          !(message.role === 'user' && message.meta?.turnId === turnId)
+      ),
       [nextPending]
     );
     this.recomputeVisibleMessages(handle);
@@ -2056,12 +2066,30 @@ export class CodexAppServerManager {
           turnId?: string;
         } | undefined;
         if (params?.item && typeof params.turnId === 'string') {
+          const item = params.item as CodexAppServerThreadItem;
+          const pendingUserMessage = handle.pendingOptimisticUserMessage;
+          const shouldSuppressOwnedUserMessage =
+            item.type === 'userMessage' &&
+            (
+              handle.localUserTurnIds.has(params.turnId) ||
+              Boolean(
+                pendingUserMessage &&
+                (
+                  pendingUserMessage.meta?.turnId === params.turnId ||
+                  handle.activeTurnId === params.turnId ||
+                  getUserMessageText(pendingUserMessage) === getCodexUserInputText(item)
+                )
+              )
+            );
+          if (shouldSuppressOwnedUserMessage) {
+            this.finalizePendingOptimisticUserMessage(handle, params.turnId);
+          }
           const upserts = materializeThreadItemMessages({
             createdAt: new Date().toISOString(),
-            rawItem: params.item,
+            rawItem: item,
             sequence: nextSyntheticSequence(handle.runtime.allMessages),
             status: notification.method === 'item/started' ? 'streaming' : 'complete',
-            suppressUserMessage: handle.localUserTurnIds.has(params.turnId),
+            suppressUserMessage: shouldSuppressOwnedUserMessage,
             turnId: params.turnId
           });
           handle.runtime.allMessages = mergeMessages(handle.runtime.allMessages, upserts);
