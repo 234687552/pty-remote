@@ -173,22 +173,8 @@ export function App() {
     [socketConnected, store.error, store.snapshot, workspaceDerivedState]
   );
   const chatTransientNotice = useMemo<RuntimeTransientNotice | null>(() => {
-    const footerErrorText = composerViewModel.footerErrorText.trim();
-    const hasVisibleAssistantErrorMessage = workspaceDerivedState.visibleMessages.some((message) =>
-      message.role === 'assistant' && message.status === 'error'
-    );
-    if (footerErrorText) {
-      if (hasVisibleAssistantErrorMessage) {
-        return store.snapshot.transientNotice;
-      }
-      return {
-        kind: 'error',
-        message: footerErrorText
-      };
-    }
-
     return store.snapshot.transientNotice;
-  }, [composerViewModel.footerErrorText, store.snapshot.transientNotice, workspaceDerivedState.visibleMessages]);
+  }, [store.snapshot.transientNotice]);
   const canSendApprovalInput = Boolean(
     workspaceDerivedState.activeCliId && workspaceDerivedState.activeProviderId && workspaceDerivedState.connected
   );
