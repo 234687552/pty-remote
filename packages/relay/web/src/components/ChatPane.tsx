@@ -2043,10 +2043,10 @@ function MessageShell({ message, children }: { children: React.ReactNode; messag
   const wrapperClass = message.role === 'user' ? 'flex justify-end' : 'flex justify-start';
   const shellClass =
     message.role === 'user'
-      ? 'w-fit max-w-[85%] rounded-2xl bg-sky-200 px-3.5 py-2.5 text-sm break-words text-zinc-950 shadow-sm'
+      ? 'w-full max-w-none rounded-2xl bg-sky-200 px-3.5 py-2.5 text-sm break-words text-zinc-950 shadow-sm ml-8 sm:ml-12 lg:ml-16'
       : message.status === 'error'
-        ? 'w-fit max-w-[85%] rounded-2xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm break-words text-zinc-900 shadow-sm'
-        : 'w-full max-w-[44rem] py-2.5 text-sm break-words text-zinc-900';
+        ? 'w-full max-w-none rounded-2xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm break-words text-zinc-900 shadow-sm mr-8 sm:mr-12 lg:mr-16'
+        : 'w-full max-w-none py-2.5 text-sm break-words text-zinc-900 mr-8 sm:mr-12 lg:mr-16';
 
   return (
     <div className={wrapperClass}>
@@ -2435,34 +2435,6 @@ function buildCodexDisplayItems(messages: ChatMessage[]): ChatPaneDisplayItem[] 
     }
 
     if (isCodexCommentaryMessage(message)) {
-      const entries: ChatMessage[] = [];
-      let cursor = index + 1;
-
-      while (cursor < messages.length) {
-        const nextMessage = messages[cursor];
-        const nextTurnId = nextMessage.meta?.turnId?.trim();
-        if (
-          nextMessage.role === 'user' ||
-          nextTurnId !== turnId ||
-          isCodexReasoningMessage(nextMessage) ||
-          isCodexCommentaryMessage(nextMessage) ||
-          isCodexFinalAnswerMessage(nextMessage)
-        ) {
-          break;
-        }
-
-        entries.push(nextMessage);
-        cursor += 1;
-      }
-
-      if (entries.length > 0) {
-        const sequenceIndex = (sequenceByTurnId.get(turnId) ?? 0) + 1;
-        sequenceByTurnId.set(turnId, sequenceIndex);
-        items.push({ type: 'activity_group', group: createActivityGroup(turnId, sequenceIndex, entries, message) });
-        index = cursor - 1;
-        continue;
-      }
-
       items.push({ type: 'message', message });
       continue;
     }
@@ -2479,7 +2451,8 @@ function buildCodexDisplayItems(messages: ChatMessage[]): ChatPaneDisplayItem[] 
           nextTurnId !== turnId ||
           isCodexReasoningMessage(nextMessage) ||
           isCodexCommentaryMessage(nextMessage) ||
-          isCodexFinalAnswerMessage(nextMessage)
+          isCodexFinalAnswerMessage(nextMessage) ||
+          !hasToolUseBlock(nextMessage)
         ) {
           break;
         }
@@ -2488,13 +2461,11 @@ function buildCodexDisplayItems(messages: ChatMessage[]): ChatPaneDisplayItem[] 
         cursor += 1;
       }
 
-      if (entries.length > 1) {
-        const sequenceIndex = (sequenceByTurnId.get(turnId) ?? 0) + 1;
-        sequenceByTurnId.set(turnId, sequenceIndex);
-        items.push({ type: 'activity_group', group: createActivityGroup(turnId, sequenceIndex, entries) });
-        index = cursor - 1;
-        continue;
-      }
+      const sequenceIndex = (sequenceByTurnId.get(turnId) ?? 0) + 1;
+      sequenceByTurnId.set(turnId, sequenceIndex);
+      items.push({ type: 'activity_group', group: createActivityGroup(turnId, sequenceIndex, entries) });
+      index = cursor - 1;
+      continue;
     }
 
     items.push({ type: 'message', message });

@@ -10,6 +10,7 @@ interface AppHeaderProps {
   onDesktopWorkspaceBrowserToggle: () => void;
   onSidebarToggle: () => void;
   sidebarCollapsed: boolean;
+  summary: string[];
 }
 
 function providerBadgeClass(providerId: ProviderId): string {
@@ -60,7 +61,8 @@ export function AppHeader({
   onDesktopTerminalToggle,
   onDesktopWorkspaceBrowserToggle,
   onSidebarToggle,
-  sidebarCollapsed
+  sidebarCollapsed,
+  summary
 }: AppHeaderProps) {
   return (
     <header className="sticky top-0 z-20 -mb-3 h-0 pointer-events-none lg:static lg:mb-0 lg:h-auto lg:pointer-events-auto">
@@ -128,6 +130,12 @@ export function AppHeader({
               >
                 {activeProviderId ? PROVIDER_LABELS[activeProviderId] : '未选择 Provider'}
               </span>
+              {summary.map((item, index) => (
+                <div key={`${item}:${index}`} className="flex min-w-0 items-center gap-3 text-sm text-zinc-500">
+                  <span className="text-zinc-300">/</span>
+                  <span className="truncate">{item}</span>
+                </div>
+              ))}
             </div>
           </div>
         </div>
