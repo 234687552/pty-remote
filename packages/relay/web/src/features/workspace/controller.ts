@@ -594,6 +594,13 @@ export function useWorkspaceController({
   ): Promise<void> {
     let requestId: number | null = null;
     let requestToken: string | null = null;
+    const previousWorkspaceSelection = {
+      activeCliId: store.workspaceState.activeCliId,
+      activeProjectId: store.workspaceState.activeProjectId,
+      activeProviderId: store.workspaceState.activeProviderId,
+      activeConversationId: store.workspaceState.activeConversationId
+    };
+    const previousSnapshot = store.snapshot;
     try {
       store.setError('');
       store.setProjectLoadingId(conversation.id);
@@ -619,6 +626,20 @@ export function useWorkspaceController({
         requestKey,
         requestToken
       };
+      store.patchWorkspace((current) => ({
+        ...current,
+        activeCliId: targetCli.cliId,
+        activeProjectId: project.id,
+        activeProviderId: providerId,
+        activeConversationId: conversation.id
+      }));
+      store.setSnapshot({
+        ...createEmptySnapshot(),
+        providerId,
+        conversationKey: conversation.conversationKey,
+        sessionId: conversation.sessionId
+      });
+      store.setMobilePane('chat');
 
       let hydratedSnapshot: RuntimeSnapshot | null = null;
       if (conversation.sessionId !== null) {
@@ -667,14 +688,6 @@ export function useWorkspaceController({
       if (conversationActivationSeqRef.current !== requestId) {
         return;
       }
-
-      store.patchWorkspace((current) => ({
-        ...current,
-        activeCliId: targetCli.cliId,
-        activeProjectId: project.id,
-        activeProviderId: providerId,
-        activeConversationId: conversation.id
-      }));
       store.setProjectConversations(project.id, providerId, (conversations) =>
         conversations.map((entry) =>
           entry.id === conversation.id && entry.ownerCliId !== targetCli.cliId
@@ -708,6 +721,14 @@ export function useWorkspaceController({
         activationState.requestToken === requestToken
       ) {
         conversationActivationRef.current = { status: 'idle' };
+        store.patchWorkspace((current) => ({
+          ...current,
+          activeCliId: previousWorkspaceSelection.activeCliId,
+          activeProjectId: previousWorkspaceSelection.activeProjectId,
+          activeProviderId: previousWorkspaceSelection.activeProviderId,
+          activeConversationId: previousWorkspaceSelection.activeConversationId
+        }));
+        store.setSnapshot(previousSnapshot);
       }
       store.setError(activateError instanceof Error ? activateError.message : '切换 conversation 失败');
     } finally {

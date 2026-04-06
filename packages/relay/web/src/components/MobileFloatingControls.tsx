@@ -526,7 +526,7 @@ export function MobileFloatingControls({
 
         <div className="absolute inset-y-0 right-0 flex min-w-0 max-w-[calc(50%-2.6rem)] items-center justify-end gap-1 overflow-hidden">
           {statusBadges
-            .filter((badge) => badge.label === 'socket' || badge.label === 'cli')
+            .filter((badge) => (badge.label === 'socket' || badge.label === 'cli') && badge.value === 'offline')
             .map((badge) => (
               <StatusTextBadge key={badge.label} className={badge.className} label={badge.label} value={badge.value} />
             ))}

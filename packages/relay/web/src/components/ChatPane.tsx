@@ -2437,6 +2437,29 @@ function createActivityGroup(
   };
 }
 
+function createTransientNoticeMessage(notice: RuntimeTransientNotice, key: string): ChatMessage {
+  const text = [notice.message.trim(), notice.details?.trim() ?? ''].filter(Boolean).join('\n');
+  return {
+    id: `transient-notice:${key}`,
+    role: 'assistant',
+    blocks: text
+      ? [
+          {
+            id: `transient-notice:${key}:text`,
+            type: 'text',
+            text
+          }
+        ]
+      : [],
+    meta: {
+      phase: 'error',
+      turnId: null
+    },
+    status: 'error',
+    createdAt: new Date(0).toISOString()
+  };
+}
+
 function buildCodexDisplayItems(messages: ChatMessage[]): ChatPaneDisplayItem[] {
   const items: ChatPaneDisplayItem[] = [];
   const sequenceByTurnId = new Map<string, number>();
@@ -2558,12 +2581,14 @@ function ActivityGroupCard({
   canSendApprovalInput,
   group,
   mergedToolState,
+  onExpandToggle,
   onApprovalInput,
   toolCallIndex
 }: {
   canSendApprovalInput?: boolean;
   group: ActivityGroup;
   mergedToolState: MergedChatToolState;
+  onExpandToggle?: () => void;
   onApprovalInput?: (input: string) => void;
   toolCallIndex: Map<string, ToolCallMeta>;
 }) {
@@ -2617,6 +2642,7 @@ function ActivityGroupCard({
         }`}
         onClick={() => {
           if (!hasPendingApproval) {
+            onExpandToggle?.();
             setExpanded((current) => !current);
           }
         }}
@@ -2703,12 +2729,14 @@ export function ChatPane({
   const previousLatestRenderableMessageSignatureRef = useRef<string | null>(null);
   const previousConversationScrollKeyRef = useRef<string | null>(null);
   const previousScrollToBottomRequestKeyRef = useRef(scrollToBottomRequestKey);
+  const transientNoticeAnchorSignatureRef = useRef<string | null>(null);
   const reconnectMessagesScrollRef = useRef<{
     conversationScrollKey: string | null;
     scrollHeight: number;
     scrollTop: number;
     wasFollowingLatest: boolean;
   } | null>(null);
+  const suppressNextResizeFollowRef = useRef(false);
   const questionJumpPressTimeoutRef = useRef<number | null>(null);
   const questionJumpLongPressTriggeredRef = useRef(false);
   const questionMessageRefs = useRef(new Map<string, HTMLDivElement>());
@@ -2717,12 +2745,8 @@ export function ChatPane({
 
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
   const displayItems = useMemo<ChatPaneDisplayItem[]>(
-    () =>
-      // Keep Codex tool activity as stable message entries instead of regrouping
-      // them into synthetic cards during streaming. Regrouping changes React keys
-      // mid-turn and makes the UI look like cards are being replaced.
-      renderableMessages.map((message) => ({ type: 'message' as const, message })),
-    [activeProviderId, renderableMessages]
+    () => renderableMessages.map((message) => ({ type: 'message' as const, message })),
+    [renderableMessages]
   );
   // Tool results can arrive as standalone user messages in Claude transcripts.
   // Keep them out of the main message list, but still index them so tool cards
@@ -2750,6 +2774,10 @@ export function ChatPane({
   const transientNoticeKey = transientNotice ? `${transientNotice.kind}:${transientNotice.message}:${transientNotice.details ?? ''}` : null;
   const visibleTransientNotice =
     transientNoticeKey && transientNoticeKey === dismissedTransientNoticeKey ? null : transientNotice;
+  const transientNoticeMessage =
+    visibleTransientNotice?.retrying && transientNoticeKey
+      ? createTransientNoticeMessage(visibleTransientNotice, transientNoticeKey)
+      : null;
   const contentSignature = useMemo(
     () =>
       [
@@ -2762,7 +2790,7 @@ export function ChatPane({
         mergedToolState.approvalNotice?.title ?? '',
         mergedToolState.interruptedNotice?.message ?? ''
       ].join('::'),
-      [
+    [
       conversationScrollKey,
       latestRenderableMessageSignature,
       visibleTransientNotice?.details,
@@ -2798,8 +2826,36 @@ export function ChatPane({
   useEffect(() => {
     if (transientNoticeKey === null) {
       setDismissedTransientNoticeKey(null);
+      transientNoticeAnchorSignatureRef.current = null;
+      return;
     }
-  }, [transientNoticeKey]);
+
+    if (transientNoticeKey !== dismissedTransientNoticeKey) {
+      transientNoticeAnchorSignatureRef.current ??= latestRenderableMessageSignature;
+    }
+  }, [dismissedTransientNoticeKey, latestRenderableMessageSignature, transientNoticeKey]);
+
+  useEffect(() => {
+    if (!visibleTransientNotice) {
+      return;
+    }
+
+    if (latestRenderableMessageSignature === transientNoticeAnchorSignatureRef.current) {
+      return;
+    }
+
+    if (latestRenderableMessageSignature === null) {
+      return;
+    }
+
+    setDismissedTransientNoticeKey(transientNoticeKey);
+    transientNoticeAnchorSignatureRef.current = null;
+  }, [latestRenderableMessageSignature, transientNoticeKey, visibleTransientNotice]);
+
+  useEffect(() => {
+    setDismissedTransientNoticeKey(null);
+    transientNoticeAnchorSignatureRef.current = null;
+  }, [conversationScrollKey]);
 
   useEffect(() => {
     if (!onMobileJumpControlsChange) {
@@ -2847,6 +2903,10 @@ export function ChatPane({
       inline: 'nearest',
       behavior: options?.behavior ?? 'auto'
     });
+  }
+
+  function suppressNextResizeFollow(): void {
+    suppressNextResizeFollowRef.current = true;
   }
 
   useEffect(() => {
@@ -2929,6 +2989,10 @@ export function ChatPane({
     }
 
     const observer = new ResizeObserver(() => {
+      if (suppressNextResizeFollowRef.current) {
+        suppressNextResizeFollowRef.current = false;
+        return;
+      }
       if (!paneVisible || !isFollowingLatest) {
         return;
       }
@@ -3188,7 +3252,7 @@ export function ChatPane({
               className="min-h-0 min-w-0 h-full overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
             >
               <div ref={messagesContentRef} className="space-y-2">
-                {visibleTransientNotice ? (
+                {visibleTransientNotice && !visibleTransientNotice.retrying ? (
                   <RuntimeTransientNoticeBanner
                     notice={visibleTransientNotice}
                     onDismiss={() => {
@@ -3224,6 +3288,7 @@ export function ChatPane({
                             canSendApprovalInput={canSendApprovalInput && connected}
                             group={item.group}
                             mergedToolState={mergedToolState}
+                            onExpandToggle={suppressNextResizeFollow}
                             onApprovalInput={onApprovalInput}
                             toolCallIndex={toolCallIndex}
                           />
@@ -3248,6 +3313,17 @@ export function ChatPane({
                         </div>
                       );
                     })}
+                {transientNoticeMessage ? (
+                  <MessageShell message={transientNoticeMessage}>
+                    <MessageContent
+                      canSendApprovalInput={canSendApprovalInput && connected}
+                      message={transientNoticeMessage}
+                      mergedToolState={mergedToolState}
+                      onApprovalInput={onApprovalInput}
+                      toolCallIndex={toolCallIndex}
+                    />
+                  </MessageShell>
+                ) : null}
                 {pendingAssistantIndicator === 'thinking' ? <AssistantTypingBubble /> : null}
                 {pendingAssistantIndicator === 'streaming' ? <AssistantStreamingBubble /> : null}
                 <div ref={bottomSentinelRef} aria-hidden="true" className="h-px w-full" />

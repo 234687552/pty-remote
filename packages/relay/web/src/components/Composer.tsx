@@ -299,7 +299,9 @@ export function Composer({
 
       <div className="hidden items-center justify-end gap-3 px-1 pb-1 md:flex">
         <div className="min-w-0 flex flex-wrap justify-end gap-1.5 text-[11px] font-medium">
-          {[conversationBadge, socketBadge, cliBadge].map((badge) => (
+          {[conversationBadge, socketBadge, cliBadge]
+            .filter((badge) => badge.label === 'status' || badge.value === 'offline')
+            .map((badge) => (
             <span
               key={badge.label}
               className={[
