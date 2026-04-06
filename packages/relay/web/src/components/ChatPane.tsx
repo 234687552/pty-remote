@@ -2834,6 +2834,10 @@ export function ChatPane({
       return;
     }
 
+    if (!visibleTransientNotice.retrying) {
+      return;
+    }
+
     if (latestRenderableMessageSignature === transientNoticeAnchorSignatureRef.current) {
       return;
     }

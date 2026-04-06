@@ -756,6 +756,34 @@ function buildTurnErrorText(turn: CodexAppServerTurn): string {
   return [errorText, detailsText].filter(Boolean).join('\n\n');
 }
 
+function createNotificationErrorMessage(params: {
+  createdAt: string;
+  sequence: number;
+  turnId: string | null;
+  message: string;
+  details?: string | null;
+}): ChatMessage | null {
+  const text = [params.message.trim(), params.details?.trim() ?? ''].filter(Boolean).join('\n\n');
+  const messageId = params.turnId ? `${params.turnId}:error` : `codex:error:notification:${params.sequence}`;
+  const blocks = createTextBlock(messageId, text);
+  if (blocks.length === 0) {
+    return null;
+  }
+
+  return {
+    id: messageId,
+    role: 'assistant',
+    blocks,
+    meta: {
+      phase: 'error',
+      turnId: params.turnId
+    },
+    status: 'error',
+    createdAt: params.createdAt,
+    sequence: params.sequence
+  };
+}
+
 function materializeThreadItemMessages(params: {
   createdAt: string;
   rawItem: CodexAppServerThreadItem | Record<string, unknown>;
@@ -991,6 +1019,77 @@ function createTurnErrorMessage(params: {
   };
 }
 
+function createSystemErrorMessage(params: {
+  createdAt: string;
+  message: string;
+  sequence: number;
+  threadId: string;
+}): ChatMessage | null {
+  const text = params.message.trim();
+  const blocks = createTextBlock(`thread:${params.threadId}:system-error`, text);
+  if (blocks.length === 0) {
+    return null;
+  }
+
+  return {
+    id: `thread:${params.threadId}:system-error`,
+    role: 'assistant',
+    blocks,
+    meta: {
+      phase: 'error',
+      turnId: null
+    },
+    status: 'error',
+    createdAt: params.createdAt,
+    sequence: params.sequence
+  };
+}
+
+function assistantErrorMessageText(message: ChatMessage): string {
+  if (message.role !== 'assistant' || message.status !== 'error') {
+    return '';
+  }
+  return message.blocks
+    .filter((block): block is Extract<ChatMessageBlock, { type: 'text' }> => block.type === 'text')
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
+}
+
+function upsertDetailedSystemErrorMessage(
+  messages: ChatMessage[],
+  params: {
+    createdAt: string;
+    message: string;
+    sequence: number;
+    threadId: string;
+  }
+): ChatMessage[] {
+  const normalizedMessage = params.message.trim();
+  if (!normalizedMessage) {
+    return messages;
+  }
+  if (messages.some((message) => assistantErrorMessageText(message) === normalizedMessage)) {
+    return messages;
+  }
+
+  const systemErrorId = `thread:${params.threadId}:system-error`;
+  const nextMessage = createSystemErrorMessage(params);
+  if (!nextMessage) {
+    return messages;
+  }
+
+  const existingIndex = messages.findIndex((message) => message.id === systemErrorId);
+  if (existingIndex < 0) {
+    return mergeMessages(messages, [nextMessage]);
+  }
+
+  const nextMessages = messages.slice();
+  nextMessages[existingIndex] = nextMessage;
+  return sortMessagesChronologically(nextMessages);
+}
+
 function materializeThreadState(
   thread: CodexAppServerThread,
   snapshotMessagesMax: number,
@@ -1037,9 +1136,27 @@ function materializeThreadState(
     }
   }
 
+  const threadStatus = thread.status?.type;
+  const resolvedSystemErrorText =
+    threadStatus === 'systemError'
+      ? lastError ?? 'Codex app-server reported a system error'
+      : null;
+
+  if (resolvedSystemErrorText && !allMessages.some((message) => message.meta?.phase === 'error')) {
+    const systemErrorMessage = createSystemErrorMessage({
+      createdAt: formatCreatedAt(thread.createdAt, sequence),
+      message: resolvedSystemErrorText,
+      sequence,
+      threadId: thread.id
+    });
+    if (systemErrorMessage) {
+      allMessages.push(systemErrorMessage);
+    }
+    sequence += 1;
+  }
+
   const hasOlderMessages = allMessages.length > snapshotMessagesMax;
   const messages = hasOlderMessages ? allMessages.slice(-snapshotMessagesMax) : allMessages;
-  const threadStatus = thread.status?.type;
   const status: RuntimeStatus =
     threadStatus === 'systemError'
       ? 'error'
@@ -1642,6 +1759,27 @@ export class CodexAppServerManager {
           handle.runtime.transientNotice = nextNotice;
           this.emitRuntimeMeta(handle);
         }
+      } else {
+        this.markHandleActive(handle);
+        handle.runtime.transientNotice = null;
+        const errorMessageText = errorParams?.error?.message?.trim() || 'Codex app-server error';
+        const errorDetailsText = errorParams?.error?.additionalDetails?.trim() || null;
+        const notificationTurnId = errorNotificationTurnId(notification.params);
+        const errorMessageBlock = createNotificationErrorMessage({
+          createdAt: new Date().toISOString(),
+          sequence: nextSyntheticSequence(handle.runtime.allMessages),
+          turnId: notificationTurnId,
+          message: errorMessageText,
+          details: errorDetailsText
+        });
+        if (errorMessageBlock) {
+          handle.runtime.allMessages = mergeMessages(handle.runtime.allMessages, [errorMessageBlock]);
+          this.recomputeVisibleMessages(handle);
+          this.emitCurrentMessagesUpsert(handle);
+        }
+        handle.runtime.status = 'error';
+        handle.runtime.lastError = errorMessageText;
+        this.emitRuntimeMeta(handle);
       }
       return;
     }
@@ -2194,7 +2332,22 @@ export class CodexAppServerManager {
       nextState.status === 'running'
         ? reconcileRunningTurnMessages(previousAllMessages, nextState.allMessages, runningTurnId)
         : nextState.allMessages;
-    const mergedAllMessages = mergeOwnedLocalUserMessages(previousAllMessages, nextAllMessages, handle.localUserTurnIds);
+    const baseMergedAllMessages = mergeOwnedLocalUserMessages(previousAllMessages, nextAllMessages, handle.localUserTurnIds);
+    const resolvedLastError =
+      nextState.status === 'error'
+        ? nextState.lastError && nextState.lastError !== 'Codex app-server reported a system error'
+          ? nextState.lastError
+          : previousLastError ?? nextState.lastError ?? 'Codex app-server reported a system error'
+        : nextState.lastError;
+    const mergedAllMessages =
+      nextState.status === 'error' && resolvedLastError
+        ? upsertDetailedSystemErrorMessage(baseMergedAllMessages, {
+            createdAt: new Date().toISOString(),
+            message: resolvedLastError,
+            sequence: nextSyntheticSequence(baseMergedAllMessages),
+            threadId: response.thread.id
+          })
+        : baseMergedAllMessages;
     const nextHasOlderMessages = mergedAllMessages.length > this.options.snapshotMessagesMax;
     const nextMessages = nextHasOlderMessages
       ? mergedAllMessages.slice(-this.options.snapshotMessagesMax)
@@ -2205,7 +2358,7 @@ export class CodexAppServerManager {
     handle.runtime.messages = nextMessages;
     handle.runtime.hasOlderMessages = nextHasOlderMessages;
     handle.runtime.status = nextState.status;
-    handle.runtime.lastError = nextState.lastError;
+    handle.runtime.lastError = resolvedLastError;
     handle.runtime.sessionId = handle.sessionId;
     handle.initialized = true;
 
@@ -2213,7 +2366,7 @@ export class CodexAppServerManager {
     const messagesChanged = !messagesEqual(previousMessages, nextMessages);
     const hasOlderChanged = previousHasOlderMessages !== nextHasOlderMessages;
     const statusChanged = previousStatus !== nextState.status;
-    const lastErrorChanged = previousLastError !== nextState.lastError;
+    const lastErrorChanged = previousLastError !== resolvedLastError;
 
     if (allMessagesChanged || messagesChanged || hasOlderChanged) {
       this.callbacks.emitMessagesUpsert({
