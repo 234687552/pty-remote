@@ -13,8 +13,8 @@ import {
   selectActiveCliId,
   selectActiveProviderId,
   selectComposerViewModel,
-  selectHeaderSummary,
   selectMobileProjectTitle,
+  selectHeaderSummary,
   selectWorkspaceDerivedState
 } from '@/features/workspace/selectors.ts';
 import { useWorkspaceStore } from '@/features/workspace/store.ts';
@@ -165,12 +165,41 @@ export function App() {
       store.workspaceState
     ]
   );
-  const headerSummary = useMemo(() => selectHeaderSummary(workspaceDerivedState), [workspaceDerivedState]);
+  const projectDescriptionLines = useMemo(() => selectHeaderSummary(workspaceDerivedState), [workspaceDerivedState]);
   const mobileProjectTitle = useMemo(() => selectMobileProjectTitle(workspaceDerivedState), [workspaceDerivedState]);
   const composerViewModel = useMemo(
     () => selectComposerViewModel(store, workspaceDerivedState, socketConnected),
     [socketConnected, store.error, store.snapshot, workspaceDerivedState]
   );
+  const rawJsonlText = useMemo(() => {
+    const metadata = {
+      app: 'pty-remote',
+      cliId: workspaceDerivedState.activeCliId,
+      conversationKey: workspaceDerivedState.activeConversation?.conversationKey ?? store.snapshot.conversationKey ?? null,
+      project: workspaceDerivedState.activeProject
+        ? {
+            cwd: workspaceDerivedState.activeProject.cwd,
+            label: workspaceDerivedState.activeProject.label
+          }
+        : null,
+      providerId: workspaceDerivedState.activeProviderId,
+      sessionId: workspaceDerivedState.activeConversation?.sessionId ?? store.snapshot.sessionId ?? null
+    };
+
+    const lines = [JSON.stringify({ type: 'workspace', ...metadata })];
+    for (const message of workspaceDerivedState.visibleMessages) {
+      lines.push(JSON.stringify(message));
+    }
+    return lines.join('\n');
+  }, [
+    store.snapshot.conversationKey,
+    store.snapshot.sessionId,
+    workspaceDerivedState.activeCliId,
+    workspaceDerivedState.activeConversation,
+    workspaceDerivedState.activeProject,
+    workspaceDerivedState.activeProviderId,
+    workspaceDerivedState.visibleMessages
+  ]);
   const canSendApprovalInput = Boolean(
     workspaceDerivedState.activeCliId && workspaceDerivedState.activeProviderId && workspaceDerivedState.connected
   );
@@ -366,7 +395,6 @@ export function App() {
           }}
           onSidebarToggle={handleDesktopSidebarToggle}
           sidebarCollapsed={store.workspaceState.sidebarCollapsed}
-          summary={headerSummary}
         />
       )}
       chat={
@@ -396,6 +424,9 @@ export function App() {
             }
           }}
           paneVisible={chatPaneVisible}
+          projectDescriptionLines={projectDescriptionLines}
+          rawJsonlText={rawJsonlText}
+          runtimeStatus={store.snapshot.status}
           runtimeRequests={activeRuntimeRequests}
           scrollToBottomRequestKey={mobilePaneScrollRequests.chat}
           transientNotice={store.snapshot.transientNotice}

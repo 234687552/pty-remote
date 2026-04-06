@@ -30,7 +30,7 @@ interface ComposerProps {
   onPromptChange: (value: string) => void;
   onRemoveAttachment: (localId: string) => void;
   onStop: () => void;
-  onSubmit: (event: React.FormEvent) => void;
+  onSubmit: (event: React.FormEvent, clientMessageId: string) => void;
   onTerminalInput: (input: string) => void;
 }
 
@@ -112,6 +112,8 @@ export function Composer({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const pendingSelectionRef = useRef<number | null>(null);
+  const pendingSubmitClientMessageIdRef = useRef<string | null>(null);
+  const lastSubmittedPromptRef = useRef('');
   const isPromptComposingRef = useRef(false);
   const [composerHeight, setComposerHeight] = useState(COMPOSER_MIN_HEIGHT_PX);
   const [promptScrollable, setPromptScrollable] = useState(false);
@@ -216,6 +218,13 @@ export function Composer({
   }, [prompt]);
 
   useEffect(() => {
+    if (prompt !== lastSubmittedPromptRef.current) {
+      pendingSubmitClientMessageIdRef.current = null;
+      lastSubmittedPromptRef.current = '';
+    }
+  }, [prompt]);
+
+  useEffect(() => {
     if (slashSuggestions.length === 0) {
       setSelectedSlashIndex(0);
       return;
@@ -262,12 +271,21 @@ export function Composer({
   }
 
   function requestComposerSubmit(): void {
+    if (!pendingSubmitClientMessageIdRef.current) {
+      pendingSubmitClientMessageIdRef.current = crypto.randomUUID();
+      lastSubmittedPromptRef.current = prompt;
+    }
     promptRef.current?.form?.requestSubmit();
   }
 
   return (
     <form
-      onSubmit={onSubmit}
+      onSubmit={(event) => {
+        const clientMessageId = pendingSubmitClientMessageIdRef.current ?? crypto.randomUUID();
+        pendingSubmitClientMessageIdRef.current = clientMessageId;
+        lastSubmittedPromptRef.current = prompt;
+        onSubmit(event, clientMessageId);
+      }}
       className="shrink-0 bg-transparent px-2 py-1 pb-[calc(env(safe-area-inset-bottom)+0.25rem)] md:mt-4 md:px-0 md:py-0"
     >
       <input
@@ -279,22 +297,25 @@ export function Composer({
         onChange={handleImageInputChange}
       />
 
-      <div className="hidden items-center justify-between gap-3 px-1 pb-1 text-[11px] font-medium md:flex">
-        <div className="min-w-0 flex flex-wrap gap-1.5">
-          {[conversationBadge, socketBadge, cliBadge].map((badge) => (
-            <span
-              key={badge.label}
-              className={[
-                'min-w-0 truncate rounded-full px-2.5 py-0.5 text-center',
-                badge.className
-              ].join(' ')}
-            >
-              {badge.label}: {badge.value}
-            </span>
-          ))}
-        </div>
-        <div className="shrink-0">
-          <TerminalQuickKeys variant="desktop" disabled={!canSendTerminalInput} onInput={onTerminalInput} />
+      <div className="hidden items-center justify-between gap-3 px-1 pb-1 md:flex">
+        <div className="shrink-0 text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-400">Composer</div>
+        <div className="flex min-w-0 items-center justify-end gap-3">
+          <div className="min-w-0 flex flex-wrap justify-end gap-1.5 text-[11px] font-medium">
+            {[conversationBadge, socketBadge, cliBadge].map((badge) => (
+              <span
+                key={badge.label}
+                className={[
+                  'min-w-0 truncate rounded-full px-2.5 py-0.5 text-center',
+                  badge.className
+                ].join(' ')}
+              >
+                {badge.label}: {badge.value}
+              </span>
+            ))}
+          </div>
+          <div className="shrink-0">
+            <TerminalQuickKeys variant="desktop" disabled={!canSendTerminalInput} onInput={onTerminalInput} />
+          </div>
         </div>
       </div>
 
@@ -492,8 +513,8 @@ export function Composer({
           </div>
         </div>
         <button
-          type={busy ? 'button' : 'submit'}
-          onClick={busy ? onStop : undefined}
+          type="button"
+          onClick={busy ? onStop : requestComposerSubmit}
           className="absolute right-4 bottom-0.5 flex h-16 w-16 scale-[0.62] items-center justify-center rounded-full bg-black text-white transition hover:bg-zinc-800 disabled:cursor-not-allowed disabled:opacity-50"
           disabled={busy ? !canStop : !canSend}
           aria-label={busy ? '结束当前运行' : '发送消息'}

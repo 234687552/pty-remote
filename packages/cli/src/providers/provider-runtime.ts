@@ -19,6 +19,17 @@ export interface ProviderRuntimeSelection {
   conversationKey: string;
 }
 
+export interface RuntimeConversationHandleIdentity {
+  threadKey: string;
+  sessionId: string | null;
+}
+
+export interface ResolvedTerminalVisibilityTarget {
+  conversationKey: string | null;
+  sessionId: string | null;
+  visible: boolean;
+}
+
 export interface ProviderRuntimeCallbacks {
   emitMessageDelta(payload: Omit<MessageDeltaPayload, 'cliId'>): void;
   emitMessagesUpsert(payload: {
@@ -49,7 +60,7 @@ export interface ProviderRuntime {
     sessionId: string | null;
   }): Promise<void>;
   cleanupProject(cwd: string): Promise<void>;
-  dispatchMessage(content: string): Promise<void>;
+  dispatchMessage(content: string, clientMessageId: string): Promise<void>;
   getRegistrationPayload(): ProviderRuntimeRegistration;
   hydrateConversation(selection: ProviderRuntimeSelection & { maxMessages?: number }): Promise<RuntimeSnapshot | null>;
   listSlashCommands(): Promise<string[]>;
@@ -66,4 +77,28 @@ export interface ProviderRuntime {
   shutdown(): Promise<void>;
   stopActiveRun(): Promise<void>;
   updateTerminalSize(cols: number, rows: number): void;
+}
+
+export function adoptSessionIdIfMissing(currentSessionId: string | null, incomingSessionId: string | null): string | null {
+  return currentSessionId ?? incomingSessionId;
+}
+
+export function preferIncomingSessionId(currentSessionId: string | null, incomingSessionId: string | null): string | null {
+  return incomingSessionId ?? currentSessionId;
+}
+
+export function resolveTerminalVisibilityTarget<THandle extends RuntimeConversationHandleIdentity>(
+  payload: Omit<TerminalVisibilityPayload, 'targetCliId' | 'targetProviderId'>,
+  resolveByConversationKey: (conversationKey: string) => THandle | null,
+  resolveBySessionId: (sessionId: string) => THandle | null
+): ResolvedTerminalVisibilityTarget {
+  const matchedHandle =
+    (payload.conversationKey ? resolveByConversationKey(payload.conversationKey) : null) ??
+    (payload.sessionId ? resolveBySessionId(payload.sessionId) : null);
+
+  return {
+    conversationKey: payload.conversationKey ?? matchedHandle?.threadKey ?? null,
+    sessionId: payload.sessionId ?? matchedHandle?.sessionId ?? null,
+    visible: payload.visible === true
+  };
 }

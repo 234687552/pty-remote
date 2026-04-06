@@ -66,7 +66,7 @@ export type CliCommandName =
   | 'cleanup-conversation';
 
 export interface CliCommandPayloadMap {
-  'send-message': { content: string };
+  'send-message': { clientMessageId: string; content: string };
   'list-slash-commands': Record<string, never>;
   'list-directory': {
     cwd: string;

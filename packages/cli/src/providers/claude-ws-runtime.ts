@@ -36,7 +36,12 @@ import {
 } from '../cli/pty.ts';
 import { HeadlessTerminalFrameState } from '../terminal/frame-state.ts';
 
-import type { ProviderRuntimeCallbacks, ProviderRuntimeSelection } from './provider-runtime.ts';
+import {
+  preferIncomingSessionId,
+  resolveTerminalVisibilityTarget,
+  type ProviderRuntimeCallbacks,
+  type ProviderRuntimeSelection
+} from './provider-runtime.ts';
 
 export interface ClaudeWsRuntimeOptions {
   defaultCwd: string;
@@ -808,9 +813,10 @@ export class ClaudeWsManager {
     } else {
       handle.cwd = normalized.cwd;
       handle.label = normalized.label;
-      if (normalized.sessionId) {
-        handle.sessionId = normalized.sessionId;
-        handle.runtime.sessionId = normalized.sessionId;
+      const nextSessionId = preferIncomingSessionId(handle.sessionId, normalized.sessionId);
+      if (nextSessionId !== handle.sessionId) {
+        handle.sessionId = nextSessionId;
+        handle.runtime.sessionId = nextSessionId;
         handle.sessionEstablished = true;
       }
     }
@@ -846,9 +852,11 @@ export class ClaudeWsManager {
     } else {
       handle.cwd = normalized.cwd;
       handle.label = normalized.label;
-      handle.sessionId = normalized.sessionId;
-      handle.runtime.sessionId = normalized.sessionId;
-      handle.sessionEstablished = normalized.sessionId !== null;
+      if (normalized.sessionId) {
+        handle.sessionId = normalized.sessionId;
+        handle.runtime.sessionId = normalized.sessionId;
+        handle.sessionEstablished = true;
+      }
     }
 
     if (handle.runtime.messages.length === 0 && handle.sessionId) {
@@ -860,7 +868,7 @@ export class ClaudeWsManager {
     return this.snapshotForHandle(handle, maxMessages);
   }
 
-  async dispatchMessage(content: string): Promise<void> {
+  async dispatchMessage(content: string, _clientMessageId: string): Promise<void> {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       throw new Error('Message cannot be empty');
@@ -1012,11 +1020,11 @@ export class ClaudeWsManager {
   }
 
   async setTerminalVisibility(payload: { conversationKey: string | null; sessionId: string | null; visible: boolean }): Promise<void> {
-    this.terminalVisibilityTarget = {
-      conversationKey: payload.conversationKey ?? null,
-      sessionId: payload.sessionId ?? null,
-      visible: payload.visible === true
-    };
+    this.terminalVisibilityTarget = resolveTerminalVisibilityTarget(
+      payload,
+      (conversationKey) => this.handles.get(conversationKey) ?? null,
+      (sessionId) => this.getHandleBySessionId(sessionId)
+    );
 
     if (!this.terminalVisibilityTarget.visible || !this.terminalVisibilityTarget.sessionId) {
       this.stopTerminalSession('terminal-hidden');
@@ -1338,6 +1346,16 @@ export class ClaudeWsManager {
       return null;
     }
     return this.handles.get(this.activeThreadKey) ?? null;
+  }
+
+  private getHandleBySessionId(sessionId: string): ClaudeWsHandle | null {
+    for (const handle of this.handles.values()) {
+      if (handle.sessionId === sessionId) {
+        return handle;
+      }
+    }
+
+    return null;
   }
 
   private async normalizeSelection(selection: ProviderRuntimeSelection): Promise<ProviderRuntimeSelection> {

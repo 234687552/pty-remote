@@ -1183,43 +1183,82 @@ function forwardTerminalVisibility(payload: TerminalVisibilityPayload): void {
   } satisfies Omit<TerminalVisibilityPayload, 'targetCliId'>);
 }
 
-function syncTerminalVisibility(previous: RuntimeSubscriptionPayload | null, next: RuntimeSubscriptionPayload): void {
-  const previousVisible =
-    previous?.terminalEnabled === true &&
-    previous.targetCliId !== null &&
-    previous.targetProviderId !== null &&
-    (previous.conversationKey !== null || previous.sessionId !== null);
-  const nextVisible =
-    next.terminalEnabled === true &&
-    next.targetCliId !== null &&
-    next.targetProviderId !== null &&
-    (next.conversationKey !== null || next.sessionId !== null);
+function isTerminalVisibilityActive(subscription: RuntimeSubscriptionPayload | null | undefined): subscription is RuntimeSubscriptionPayload {
+  return Boolean(
+    subscription?.terminalEnabled === true &&
+    subscription.targetCliId !== null &&
+    subscription.targetProviderId !== null &&
+    (subscription.conversationKey !== null || subscription.sessionId !== null)
+  );
+}
+
+function isSameRuntimeSubscriptionEndpoint(left: RuntimeSubscriptionPayload, right: RuntimeSubscriptionPayload): boolean {
+  return left.targetCliId === right.targetCliId && left.targetProviderId === right.targetProviderId;
+}
+
+function isSameRuntimeSubscriptionIdentity(left: RuntimeSubscriptionPayload, right: RuntimeSubscriptionPayload): boolean {
+  return (
+    isSameRuntimeSubscriptionEndpoint(left, right) &&
+    left.conversationKey === right.conversationKey &&
+    left.sessionId === right.sessionId
+  );
+}
+
+function isSameTerminalVisibilityTarget(left: RuntimeSubscriptionPayload, right: RuntimeSubscriptionPayload): boolean {
+  if (!isSameRuntimeSubscriptionEndpoint(left, right)) {
+    return false;
+  }
+
+  if (
+    left.conversationKey !== null &&
+    right.conversationKey !== null
+  ) {
+    return left.conversationKey === right.conversationKey;
+  }
+
+  if (
+    left.sessionId !== null &&
+    right.sessionId !== null
+  ) {
+    return left.sessionId === right.sessionId;
+  }
+
+  return false;
+}
+
+function hasOtherVisibleTerminalSubscription(socketId: string, target: RuntimeSubscriptionPayload): boolean {
+  for (const [candidateSocketId, candidate] of webRuntimeSubscriptions.entries()) {
+    if (candidateSocketId === socketId || !isTerminalVisibilityActive(candidate)) {
+      continue;
+    }
+
+    if (isSameTerminalVisibilityTarget(candidate, target)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function syncTerminalVisibility(socketId: string, previous: RuntimeSubscriptionPayload | null, next: RuntimeSubscriptionPayload): void {
+  const previousVisible = isTerminalVisibilityActive(previous);
+  const nextVisible = isTerminalVisibilityActive(next);
 
   if (previousVisible) {
-    const unchanged =
-      nextVisible &&
-      previous?.targetCliId === next.targetCliId &&
-      previous?.targetProviderId === next.targetProviderId &&
-      previous?.conversationKey === next.conversationKey &&
-      previous?.sessionId === next.sessionId;
-    if (!unchanged) {
+    const unchanged = nextVisible && isSameRuntimeSubscriptionIdentity(previous, next);
+    if (!unchanged && !hasOtherVisibleTerminalSubscription(socketId, previous)) {
       forwardTerminalVisibility({
-        targetCliId: previous?.targetCliId ?? null,
-        targetProviderId: previous?.targetProviderId ?? null,
-        conversationKey: previous?.conversationKey ?? null,
-        sessionId: previous?.sessionId ?? null,
+        targetCliId: previous.targetCliId,
+        targetProviderId: previous.targetProviderId,
+        conversationKey: previous.conversationKey,
+        sessionId: previous.sessionId,
         visible: false
       });
     }
   }
 
   if (nextVisible) {
-    const unchanged =
-      previousVisible &&
-      previous?.targetCliId === next.targetCliId &&
-      previous?.targetProviderId === next.targetProviderId &&
-      previous?.conversationKey === next.conversationKey &&
-      previous?.sessionId === next.sessionId;
+    const unchanged = previousVisible && isSameRuntimeSubscriptionIdentity(previous, next);
     if (!unchanged) {
       forwardTerminalVisibility({
         targetCliId: next.targetCliId,
@@ -1737,7 +1776,7 @@ export async function startSocketServer(): Promise<void> {
       const previous = webRuntimeSubscriptions.get(socket.id) ?? null;
       const subscription = normalizeRuntimeSubscription(payload);
       webRuntimeSubscriptions.set(socket.id, subscription);
-      syncTerminalVisibility(previous, subscription);
+      syncTerminalVisibility(socket.id, previous, subscription);
       if (replayMessagesToSocket(socket, subscription)) {
         return;
       }
@@ -1837,7 +1876,7 @@ export async function startSocketServer(): Promise<void> {
     socket.on('disconnect', () => {
       const previous = webRuntimeSubscriptions.get(socket.id) ?? null;
       if (previous) {
-        syncTerminalVisibility(previous, normalizeRuntimeSubscription());
+        syncTerminalVisibility(socket.id, previous, normalizeRuntimeSubscription());
       }
       webRuntimeSubscriptions.delete(socket.id);
       pruneRelayState(io);

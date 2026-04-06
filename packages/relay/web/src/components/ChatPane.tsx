@@ -129,6 +129,9 @@ interface ChatPaneProps {
   onApprovalInput?: (input: string) => void;
   onRespondRuntimeRequest?: (payload: { error?: string | null; requestId: string | number; result?: unknown }) => Promise<void> | void;
   paneVisible: boolean;
+  projectDescriptionLines?: string[];
+  rawJsonlText?: string;
+  runtimeStatus?: 'error' | 'idle' | 'running' | 'starting';
   runtimeRequests?: RuntimeRequestPayload[];
   scrollToBottomRequestKey: number;
   transientNotice?: RuntimeTransientNotice | null;
@@ -1586,10 +1589,95 @@ function ToolStatusIcon({ status }: { status: MessageStatus }) {
     return <span className="inline-block h-2 w-2 rounded-full bg-emerald-600" />;
   }
   return (
-    <span className="relative inline-flex h-3 w-3 items-center justify-center">
-      <span className="absolute inline-flex h-3 w-3 animate-ping rounded-full bg-emerald-600/30" />
-      <span className="relative inline-block h-2 w-2 rounded-full bg-emerald-600" />
+    <span className="relative inline-flex h-3.5 w-3.5 items-center justify-center">
+      <span className="running-orb-ring absolute inline-flex h-3.5 w-3.5 rounded-full border border-emerald-300/70" />
+      <span className="running-orb-glow absolute inline-flex h-3 w-3 rounded-full bg-emerald-500/18" />
+      <span className="running-orb-core relative inline-block h-1.5 w-1.5 rounded-full bg-emerald-600" />
     </span>
+  );
+}
+
+function TypingDots({ inverse = false }: { inverse?: boolean }) {
+  const colorClass = inverse ? 'text-sky-900/70' : 'text-zinc-500';
+
+  return (
+    <svg
+      aria-hidden="true"
+      className={colorClass}
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <circle cx="4" cy="12" r="2.4" fill="currentColor">
+        <animate
+          id="ptyRemoteTypingDot0"
+          attributeName="cy"
+          begin="0;ptyRemoteTypingDot1.end+0.25s"
+          calcMode="spline"
+          dur="0.6s"
+          keySplines=".33,.66,.66,1;.33,0,.66,.33"
+          values="12;6;12"
+        />
+      </circle>
+      <circle cx="12" cy="12" r="2.4" fill="currentColor">
+        <animate
+          attributeName="cy"
+          begin="ptyRemoteTypingDot0.begin+0.1s"
+          calcMode="spline"
+          dur="0.6s"
+          keySplines=".33,.66,.66,1;.33,0,.66,.33"
+          values="12;6;12"
+        />
+      </circle>
+      <circle cx="20" cy="12" r="2.4" fill="currentColor">
+        <animate
+          id="ptyRemoteTypingDot1"
+          attributeName="cy"
+          begin="ptyRemoteTypingDot0.begin+0.2s"
+          calcMode="spline"
+          dur="0.6s"
+          keySplines=".33,.66,.66,1;.33,0,.66,.33"
+          values="12;6;12"
+        />
+      </circle>
+    </svg>
+  );
+}
+
+function StreamingCaret({ inverse = false }: { inverse?: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={['ml-1 inline-block align-[-0.2em]', inverse ? 'text-sky-900/75' : 'text-emerald-500/85'].join(' ')}
+      xmlns="http://www.w3.org/2000/svg"
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="none"
+    >
+      <circle cx="4" cy="12" r="2.4" fill="currentColor">
+        <animate id="ptyRemoteStreamingDot0" attributeName="cy" begin="0;ptyRemoteStreamingDot1.end+0.25s" calcMode="spline" dur="0.6s" keySplines=".33,.66,.66,1;.33,0,.66,.33" values="12;6;12" />
+      </circle>
+      <circle cx="12" cy="12" r="2.4" fill="currentColor">
+        <animate attributeName="cy" begin="ptyRemoteStreamingDot0.begin+0.1s" calcMode="spline" dur="0.6s" keySplines=".33,.66,.66,1;.33,0,.66,.33" values="12;6;12" />
+      </circle>
+      <circle cx="20" cy="12" r="2.4" fill="currentColor">
+        <animate id="ptyRemoteStreamingDot1" attributeName="cy" begin="ptyRemoteStreamingDot0.begin+0.2s" calcMode="spline" dur="0.6s" keySplines=".33,.66,.66,1;.33,0,.66,.33" values="12;6;12" />
+      </circle>
+    </svg>
+  );
+}
+
+function AssistantTypingBubble() {
+  return (
+    <div className="flex justify-start py-2">
+      <div className="flex items-center gap-2 px-1 text-zinc-500">
+        <TypingDots />
+        <span className="text-[12px] font-medium tracking-[0.02em] text-zinc-500">Thinking</span>
+      </div>
+    </div>
   );
 }
 
@@ -2015,12 +2103,19 @@ function hasRenderableMessageContent(message: ChatMessage): boolean {
 
 function TextBlockContent({
   block,
+  showStreamingCaret = false,
   tone
 }: {
   block: Extract<ChatMessageBlock, { type: 'text' }>;
+  showStreamingCaret?: boolean;
   tone?: 'default' | 'inverse' | 'muted';
 }) {
-  return <MessageMarkdown content={block.text} tone={tone} />;
+  return (
+    <div className="space-y-0">
+      <MessageMarkdown content={block.text} tone={tone} />
+      {showStreamingCaret ? <StreamingCaret inverse={tone === 'inverse'} /> : null}
+    </div>
+  );
 }
 
 function resolveToolUseStatus(
@@ -2424,10 +2519,15 @@ function MessageContent({
   toolCallIndex: Map<string, ToolCallMeta>;
 }) {
   if (message.blocks.length === 0 && (message.attachments?.length ?? 0) === 0) {
+    if (message.role === 'assistant' && message.status === 'streaming') {
+      return <AssistantTypingBubble />;
+    }
     return null;
   }
 
   const isReasoning = isCodexReasoningMessage(message);
+  const textBlocks = getMessageTextBlocks(message);
+  const lastTextBlockId = textBlocks.at(-1)?.id ?? null;
 
   return (
     <div className="space-y-2">
@@ -2440,6 +2540,7 @@ function MessageContent({
             <TextBlockContent
               key={block.id}
               block={block}
+              showStreamingCaret={message.status === 'streaming' && block.id === lastTextBlockId}
               tone={isReasoning ? 'muted' : message.role === 'user' ? 'inverse' : 'default'}
             />
           );
@@ -2601,6 +2702,9 @@ export function ChatPane({
   onApprovalInput,
   onRespondRuntimeRequest,
   paneVisible,
+  projectDescriptionLines = [],
+  rawJsonlText = '',
+  runtimeStatus = 'idle',
   runtimeRequests = [],
   scrollToBottomRequestKey,
   transientNotice = null,
@@ -2651,6 +2755,15 @@ export function ChatPane({
     [messages, terminalSideChannel, toolCallIndex]
   );
   const latestRenderableMessage = renderableMessages.at(-1) ?? null;
+  const showPendingAssistantTyping = (runtimeStatus === 'running' || runtimeStatus === 'starting') && latestRenderableMessage?.role === 'user';
+  const trimmedProjectDescriptionLines = useMemo(
+    () => projectDescriptionLines.map((line) => line.trim()).filter(Boolean),
+    [projectDescriptionLines]
+  );
+  const rawJsonlLineCount = useMemo(() => {
+    const trimmed = rawJsonlText.trim();
+    return trimmed ? trimmed.split('\n').length : 0;
+  }, [rawJsonlText]);
   const latestRenderableMessageSignature = latestRenderableMessage
     ? createMessageRenderSignature(latestRenderableMessage)
     : null;
@@ -3073,121 +3186,164 @@ export function ChatPane({
             <h2 className="text-lg font-semibold">Messages</h2>
           </div>
         </div>
-        <div
-          ref={messagesRef}
-          onScroll={handleMessagesScroll}
-          onWheelCapture={handleMessagesWheel}
-          onPointerDownCapture={handleMessagesPointerDown}
-          onTouchEndCapture={handleMessagesTouchEnd}
-          onTouchMoveCapture={handleMessagesTouchMove}
-          onTouchStartCapture={handleMessagesTouchStart}
-          className="min-h-0 min-w-0 flex-1 overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
-        >
-          <div ref={messagesContentRef} className="space-y-2">
-            {runtimeRequests.map((request) => (
-              <RuntimeRequestNotice
-                key={`${request.method}:${request.requestId}`}
-                canRespond={connected}
-                onRespond={onRespondRuntimeRequest}
-                request={request}
-              />
-            ))}
-            {mergedToolState.interruptedNotice ? <TerminalInterruptedBanner interrupted={mergedToolState.interruptedNotice} /> : null}
-            {mergedToolState.approvalNotice ? (
-              <TerminalApprovalInlineNotice
-                approval={mergedToolState.approvalNotice}
-                canSendApprovalInput={canSendApprovalInput && connected}
-                onApprovalInput={onApprovalInput}
-              />
-            ) : null}
-            {displayItems.length === 0
-              ? null
-              : displayItems.map((item) => {
-                  if (item.type === 'activity_group') {
-                    return (
-                      <ActivityGroupCard
-                        key={item.group.id}
-                        canSendApprovalInput={canSendApprovalInput && connected}
-                        group={item.group}
-                        mergedToolState={mergedToolState}
-                        onApprovalInput={onApprovalInput}
-                        toolCallIndex={toolCallIndex}
-                      />
-                    );
-                  }
-
-                  const { message } = item;
-                  return (
-                    <div
-                      key={message.id}
-                      ref={message.role === 'user' ? (node) => setQuestionMessageRef(message.id, node) : undefined}
-                    >
-                      <MessageShell message={message}>
-                        <MessageContent
-                          canSendApprovalInput={canSendApprovalInput && connected}
-                          message={message}
-                          mergedToolState={mergedToolState}
-                          onApprovalInput={onApprovalInput}
-                          toolCallIndex={toolCallIndex}
-                        />
-                      </MessageShell>
-                    </div>
-                  );
-                })}
-            {transientNotice ? <RuntimeTransientNoticeBanner notice={transientNotice} /> : null}
-            <div ref={bottomSentinelRef} aria-hidden="true" className="h-px w-full" />
-          </div>
-        </div>
-
-        {!isFollowingLatest && hasPendingNewContent ? (
-          <div className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center px-4 md:bottom-16">
-            <button
-              type="button"
-              onClick={handleJumpToLatest}
-              className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-900 shadow-[0_10px_24px_rgba(14,165,233,0.18)] transition hover:border-sky-300 hover:bg-sky-100"
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="relative min-h-0 flex-1">
+            <div
+              ref={messagesRef}
+              onScroll={handleMessagesScroll}
+              onWheelCapture={handleMessagesWheel}
+              onPointerDownCapture={handleMessagesPointerDown}
+              onTouchEndCapture={handleMessagesTouchEnd}
+              onTouchMoveCapture={handleMessagesTouchMove}
+              onTouchStartCapture={handleMessagesTouchStart}
+              className="min-h-0 min-w-0 h-full overflow-auto px-3 pt-4 pb-[calc(env(safe-area-inset-bottom)+5.5rem)] sm:px-3 lg:px-4 lg:py-4"
             >
-              <span>有新内容</span>
-              <span className="text-sky-500">·</span>
-              <span>跳到最新</span>
-            </button>
-          </div>
-        ) : null}
+              <div ref={messagesContentRef} className="space-y-2">
+                {runtimeRequests.map((request) => (
+                  <RuntimeRequestNotice
+                    key={`${request.method}:${request.requestId}`}
+                    canRespond={connected}
+                    onRespond={onRespondRuntimeRequest}
+                    request={request}
+                  />
+                ))}
+                {mergedToolState.interruptedNotice ? <TerminalInterruptedBanner interrupted={mergedToolState.interruptedNotice} /> : null}
+                {mergedToolState.approvalNotice ? (
+                  <TerminalApprovalInlineNotice
+                    approval={mergedToolState.approvalNotice}
+                    canSendApprovalInput={canSendApprovalInput && connected}
+                    onApprovalInput={onApprovalInput}
+                  />
+                ) : null}
+                {displayItems.length === 0
+                  ? null
+                  : displayItems.map((item) => {
+                      if (item.type === 'activity_group') {
+                        return (
+                          <ActivityGroupCard
+                            key={item.group.id}
+                            canSendApprovalInput={canSendApprovalInput && connected}
+                            group={item.group}
+                            mergedToolState={mergedToolState}
+                            onApprovalInput={onApprovalInput}
+                            toolCallIndex={toolCallIndex}
+                          />
+                        );
+                      }
 
-        {questionMessageIds.length > 0 ? (
-          <div className="pointer-events-none absolute right-3 bottom-14 z-10 hidden lg:block md:right-4 md:bottom-16">
-            <div className="pointer-events-auto flex flex-col overflow-hidden rounded-xl border border-zinc-200/80 bg-white/65 shadow-[0_8px_20px_rgba(0,0,0,0.08)] backdrop-blur-sm">
-              <button
-                type="button"
-                onClick={(event) => handleQuestionJumpButtonKeyboardClick('up', event)}
-                onPointerDown={(event) => handleQuestionJumpButtonPressStart('up', event)}
-                onPointerUp={(event) => handleQuestionJumpButtonPressEnd('up', event)}
-                onPointerCancel={handleQuestionJumpButtonPressCancel}
-                className="touch-manipulation select-none flex h-8 w-8 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-9 md:w-9"
-                aria-label="跳到上一条提问，长按直达顶部"
-                title="跳到上一条提问，长按直达顶部"
-              >
-                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
-                  <path d="M5 12l5-5 5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-              <div className="h-px bg-zinc-200/80" />
-              <button
-                type="button"
-                onClick={(event) => handleQuestionJumpButtonKeyboardClick('down', event)}
-                onPointerDown={(event) => handleQuestionJumpButtonPressStart('down', event)}
-                onPointerUp={(event) => handleQuestionJumpButtonPressEnd('down', event)}
-                onPointerCancel={handleQuestionJumpButtonPressCancel}
-                className="touch-manipulation select-none flex h-8 w-8 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-9 md:w-9"
-                aria-label="跳到下一条提问，长按直达底部"
-                title="跳到下一条提问，长按直达底部"
-              >
-                <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
-                  <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
+                      const { message } = item;
+                      return (
+                        <div
+                          key={message.id}
+                          ref={message.role === 'user' ? (node) => setQuestionMessageRef(message.id, node) : undefined}
+                        >
+                          <MessageShell message={message}>
+                            <MessageContent
+                              canSendApprovalInput={canSendApprovalInput && connected}
+                              message={message}
+                              mergedToolState={mergedToolState}
+                              onApprovalInput={onApprovalInput}
+                              toolCallIndex={toolCallIndex}
+                            />
+                          </MessageShell>
+                        </div>
+                      );
+                    })}
+                {showPendingAssistantTyping ? <AssistantTypingBubble /> : null}
+                {transientNotice ? <RuntimeTransientNoticeBanner notice={transientNotice} /> : null}
+                <div ref={bottomSentinelRef} aria-hidden="true" className="h-px w-full" />
+              </div>
             </div>
+
+            {!isFollowingLatest && hasPendingNewContent ? (
+              <div className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center px-4 md:bottom-16">
+                <button
+                  type="button"
+                  onClick={handleJumpToLatest}
+                  className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-900 shadow-[0_10px_24px_rgba(14,165,233,0.18)] transition hover:border-sky-300 hover:bg-sky-100"
+                >
+                  <span>有新内容</span>
+                  <span className="text-sky-500">·</span>
+                  <span>跳到最新</span>
+                </button>
+              </div>
+            ) : null}
+
+            {questionMessageIds.length > 0 ? (
+              <div className="pointer-events-none absolute right-3 bottom-14 z-10 hidden lg:block md:right-4 md:bottom-16">
+                <div className="pointer-events-auto flex flex-col overflow-hidden rounded-xl border border-zinc-200/80 bg-white/65 shadow-[0_8px_20px_rgba(0,0,0,0.08)] backdrop-blur-sm">
+                  <button
+                    type="button"
+                    onClick={(event) => handleQuestionJumpButtonKeyboardClick('up', event)}
+                    onPointerDown={(event) => handleQuestionJumpButtonPressStart('up', event)}
+                    onPointerUp={(event) => handleQuestionJumpButtonPressEnd('up', event)}
+                    onPointerCancel={handleQuestionJumpButtonPressCancel}
+                    className="touch-manipulation select-none flex h-8 w-8 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-9 md:w-9"
+                    aria-label="跳到上一条提问，长按直达顶部"
+                    title="跳到上一条提问，长按直达顶部"
+                  >
+                    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+                      <path d="M5 12l5-5 5 5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                  <div className="h-px bg-zinc-200/80" />
+                  <button
+                    type="button"
+                    onClick={(event) => handleQuestionJumpButtonKeyboardClick('down', event)}
+                    onPointerDown={(event) => handleQuestionJumpButtonPressStart('down', event)}
+                    onPointerUp={(event) => handleQuestionJumpButtonPressEnd('down', event)}
+                    onPointerCancel={handleQuestionJumpButtonPressCancel}
+                    className="touch-manipulation select-none flex h-8 w-8 items-center justify-center text-zinc-600 transition hover:bg-white/80 hover:text-zinc-900 md:h-9 md:w-9"
+                    aria-label="跳到下一条提问，长按直达底部"
+                    title="跳到下一条提问，长按直达底部"
+                  >
+                    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" className="h-3.5 w-3.5">
+                      <path d="M5 8l5 5 5-5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
-        ) : null}
+
+          <section className="border-t border-zinc-200 bg-zinc-50/70">
+            <div className="flex items-center justify-between gap-3 px-4 pt-3 pb-2">
+              <div>
+                <h3 className="text-sm font-semibold text-zinc-900">Project Description / Raw JSONL</h3>
+                <p className="text-xs text-zinc-500">项目描述已合并到这个窗口，原始内容放在消息区下方。</p>
+              </div>
+              <span className="shrink-0 rounded-full bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-500 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)]">
+                {rawJsonlLineCount} lines
+              </span>
+            </div>
+
+            <div className="grid gap-3 px-4 pb-4 lg:grid-cols-[minmax(0,0.34fr)_minmax(0,0.66fr)]">
+              <div className="rounded-2xl border border-zinc-200 bg-white/90 p-3">
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-400">Project Description</div>
+                {trimmedProjectDescriptionLines.length > 0 ? (
+                  <div className="space-y-2">
+                    {trimmedProjectDescriptionLines.map((line) => (
+                      <div key={line} className="rounded-xl bg-zinc-50 px-3 py-2 text-xs leading-5 text-zinc-700">
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="rounded-xl bg-zinc-50 px-3 py-2 text-xs leading-5 text-zinc-500">当前没有项目描述。</div>
+                )}
+              </div>
+
+              <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white/90">
+                <div className="border-b border-zinc-200 px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-400">
+                  Raw JSONL
+                </div>
+                <pre className="max-h-44 overflow-auto px-3 py-3 text-[11px] leading-5 text-zinc-700 whitespace-pre-wrap break-all">
+                  {rawJsonlText.trim() || '暂无 raw jsonl 数据。'}
+                </pre>
+              </div>
+            </div>
+          </section>
+        </div>
       </div>
     </div>
   );

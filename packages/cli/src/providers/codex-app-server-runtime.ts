@@ -33,6 +33,11 @@ import type {
   CodexAppServerTurnStartResponse,
   CodexAppServerErrorNotificationParams
 } from './codex-app-server-protocol.ts';
+import {
+  adoptSessionIdIfMissing,
+  preferIncomingSessionId,
+  resolveTerminalVisibilityTarget
+} from './provider-runtime.ts';
 import { HeadlessTerminalFrameState } from '../terminal/frame-state.ts';
 
 export interface CodexAppServerRuntimeOptions {
@@ -88,8 +93,11 @@ interface CodexAppServerHandle {
   sessionId: string | null;
   runtime: AgentRuntimeState;
   activeTurnId: string | null;
+  activeClientMessageId: string | null;
   initialized: boolean;
   lastActivityAt: number;
+  localUserTurnIds: Set<string>;
+  pendingOptimisticUserMessage: ChatMessage | null;
 }
 
 interface PendingRuntimeRequest {
@@ -236,6 +244,35 @@ function createRawTextBlock(id: string, text: string): ChatMessageBlock[] {
       text
     }
   ];
+}
+
+function createUserTextMessage(
+  id: string,
+  text: string,
+  createdAt: string,
+  sequence: number,
+  turnId: string | null = null
+): ChatMessage {
+  return {
+    id,
+    role: 'user',
+    blocks: createTextBlock(id, text),
+    status: 'complete',
+    createdAt,
+    sequence,
+    meta: {
+      phase: null,
+      turnId
+    }
+  };
+}
+
+function getUserMessageText(message: ChatMessage): string {
+  return message.blocks
+    .filter((block): block is Extract<ChatMessageBlock, { type: 'text' }> => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+    .trim();
 }
 
 function createToolMessage(params: {
@@ -388,6 +425,25 @@ function reconcileRunningTurnMessages(
 
 function nextSyntheticSequence(messages: ChatMessage[]): number {
   return messages.reduce((maxSequence, message) => Math.max(maxSequence, message.sequence ?? 0), -1) + 1;
+}
+
+function mergeOwnedLocalUserMessages(
+  previousMessages: ChatMessage[],
+  nextMessages: ChatMessage[],
+  ownedTurnIds: ReadonlySet<string>
+): ChatMessage[] {
+  if (ownedTurnIds.size === 0) {
+    return nextMessages;
+  }
+
+  const ownedUserMessages = previousMessages.filter(
+    (message) => message.role === 'user' && Boolean(message.meta?.turnId) && ownedTurnIds.has(message.meta?.turnId ?? '')
+  );
+  if (ownedUserMessages.length === 0) {
+    return nextMessages;
+  }
+
+  return mergeMessages(nextMessages, ownedUserMessages);
 }
 
 function upsertStreamingTextMessage(
@@ -697,6 +753,7 @@ function materializeThreadItemMessages(params: {
   rawItem: CodexAppServerThreadItem | Record<string, unknown>;
   sequence: number;
   status?: MessageStatus;
+  suppressUserMessage?: boolean;
   turnId: string;
 }): ChatMessage[] {
   const item = params.rawItem as CodexAppServerThreadItem;
@@ -704,6 +761,9 @@ function materializeThreadItemMessages(params: {
 
   switch (item.type) {
     case 'userMessage': {
+      if (params.suppressUserMessage) {
+        return [];
+      }
       const text = item.content.map(userInputToText).filter(Boolean).join('\n');
       const blocks = createTextBlock(item.id, text);
       if (blocks.length === 0) {
@@ -925,7 +985,8 @@ function createTurnErrorMessage(params: {
 
 function materializeThreadState(
   thread: CodexAppServerThread,
-  snapshotMessagesMax: number
+  snapshotMessagesMax: number,
+  suppressUserTurnIds: ReadonlySet<string> = new Set<string>()
 ): MaterializedThreadState {
   const allMessages: ChatMessage[] = [];
   let sequence = 0;
@@ -948,6 +1009,7 @@ function materializeThreadState(
           rawItem,
           sequence,
           status: turn.status === 'inProgress' ? 'streaming' : 'complete',
+          suppressUserMessage: suppressUserTurnIds.has(turn.id),
           turnId: turn.id
         })
       );
@@ -1155,11 +1217,11 @@ export class CodexAppServerManager {
     sessionId: string | null;
     visible: boolean;
   }): Promise<void> {
-    this.terminalVisibilityTarget = {
-      conversationKey: payload.conversationKey ?? null,
-      sessionId: payload.sessionId ?? null,
-      visible: payload.visible === true
-    };
+    this.terminalVisibilityTarget = resolveTerminalVisibilityTarget(
+      payload,
+      (conversationKey) => this.handles.get(conversationKey) ?? null,
+      (sessionId) => this.getHandleBySessionId(sessionId)
+    );
 
     if (!this.terminalVisibilityTarget.visible || !this.terminalVisibilityTarget.sessionId) {
       this.stopTerminalSession('terminal-hidden');
@@ -1196,9 +1258,10 @@ export class CodexAppServerManager {
     } else {
       handle.cwd = normalized.cwd;
       handle.label = normalized.label;
-      if (handle.sessionId === null && normalized.sessionId) {
-        handle.sessionId = normalized.sessionId;
-        handle.runtime.sessionId = normalized.sessionId;
+      const nextSessionId = adoptSessionIdIfMissing(handle.sessionId, normalized.sessionId);
+      if (nextSessionId !== handle.sessionId) {
+        handle.sessionId = nextSessionId;
+        handle.runtime.sessionId = nextSessionId;
       }
     }
 
@@ -1254,8 +1317,11 @@ export class CodexAppServerManager {
     } else {
       handle.cwd = normalized.cwd;
       handle.label = normalized.label;
-      handle.sessionId = normalized.sessionId;
-      handle.runtime.sessionId = normalized.sessionId;
+      const nextSessionId = preferIncomingSessionId(handle.sessionId, normalized.sessionId);
+      if (nextSessionId !== handle.sessionId) {
+        handle.sessionId = nextSessionId;
+        handle.runtime.sessionId = nextSessionId;
+      }
     }
 
     this.markHandleActive(handle);
@@ -1268,87 +1334,116 @@ export class CodexAppServerManager {
     return this.snapshotForHandle(handle, maxMessages);
   }
 
-  async dispatchMessage(content: string): Promise<void> {
+  async dispatchMessage(content: string, clientMessageId: string): Promise<void> {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       throw new Error('Message cannot be empty');
+    }
+    const normalizedClientMessageId = clientMessageId.trim();
+    if (!normalizedClientMessageId) {
+      throw new Error('Client message id cannot be empty');
     }
 
     const handle = this.getActiveHandle();
     if (!handle) {
       throw new Error('No active thread selected');
     }
+    if (handle.activeClientMessageId === normalizedClientMessageId) {
+      return;
+    }
     if (handle.runtime.status === 'running' || handle.runtime.status === 'starting') {
       throw new Error('Codex is still handling the previous message');
     }
 
-    await this.client.ensureConnected();
+    handle.activeClientMessageId = normalizedClientMessageId;
     this.clearLastError(handle);
-    this.markHandleActive(handle);
-
-    if (!handle.sessionId) {
-      const started = await this.client.request<CodexAppServerThreadStartResponse>('thread/start', {
-        approvalPolicy: 'on-request',
-        cwd: handle.cwd,
-        persistExtendedHistory: false
-      });
-      handle.sessionId = started.thread.id;
-      handle.runtime.sessionId = started.thread.id;
-      this.emitRuntimeMeta(handle);
-    } else {
-      await this.resumeHandleThread(handle);
-    }
-
-    let startedTurn: CodexAppServerTurnStartResponse;
-    try {
-      startedTurn = await this.client.request<CodexAppServerTurnStartResponse>('turn/start', {
-        approvalPolicy: 'on-request',
-        input: [
-          {
-            type: 'text',
-            text: trimmedContent,
-            text_elements: []
-          }
-        ],
-        threadId: handle.sessionId
-      });
-    } catch (error) {
-      if (!isThreadNotFoundError(error) || !handle.sessionId) {
-        throw error;
-      }
-      this.log('warn', 'codex thread was not loaded; retrying turn/start after explicit resume', {
-        conversationKey: handle.threadKey,
-        cwd: handle.cwd,
-        sessionId: handle.sessionId
-      });
-      await this.resumeHandleThread(handle);
-      startedTurn = await this.client.request<CodexAppServerTurnStartResponse>('turn/start', {
-        approvalPolicy: 'on-request',
-        input: [
-          {
-            type: 'text',
-            text: trimmedContent,
-            text_elements: []
-          }
-        ],
-        threadId: handle.sessionId
-      });
-    }
-    handle.activeTurnId = startedTurn.turn.id;
-    handle.runtime.status = 'running';
+    handle.runtime.status = 'starting';
+    this.insertPendingOptimisticUserMessage(handle, trimmedContent);
     this.emitRuntimeMeta(handle);
-    await this.refreshHandleFromServer(handle);
-    if (this.terminalVisibilityTarget.visible && this.terminalVisibilityTarget.sessionId === handle.sessionId) {
+    let acceptedByServer = false;
+    try {
+      await this.client.ensureConnected();
+      this.markHandleActive(handle);
+
+      if (!handle.sessionId) {
+        const started = await this.client.request<CodexAppServerThreadStartResponse>('thread/start', {
+          approvalPolicy: 'on-request',
+          cwd: handle.cwd,
+          persistExtendedHistory: false
+        });
+        handle.sessionId = started.thread.id;
+        handle.runtime.sessionId = started.thread.id;
+        this.emitRuntimeMeta(handle);
+      } else {
+        await this.resumeHandleThread(handle);
+      }
+
+      let startedTurn: CodexAppServerTurnStartResponse;
       try {
-        await this.ensureTerminalSession(handle);
+        startedTurn = await this.client.request<CodexAppServerTurnStartResponse>('turn/start', {
+          approvalPolicy: 'on-request',
+          input: [
+            {
+              type: 'text',
+              text: trimmedContent,
+              text_elements: []
+            }
+          ],
+          threadId: handle.sessionId
+        });
       } catch (error) {
-        this.log('warn', 'failed to attach codex terminal after dispatch', {
+        if (!isThreadNotFoundError(error) || !handle.sessionId) {
+          throw error;
+        }
+        this.log('warn', 'codex thread was not loaded; retrying turn/start after explicit resume', {
           conversationKey: handle.threadKey,
           cwd: handle.cwd,
-          error: errorMessage(error, 'Failed to attach Codex terminal'),
           sessionId: handle.sessionId
         });
+        await this.resumeHandleThread(handle);
+        startedTurn = await this.client.request<CodexAppServerTurnStartResponse>('turn/start', {
+          approvalPolicy: 'on-request',
+          input: [
+            {
+              type: 'text',
+              text: trimmedContent,
+              text_elements: []
+            }
+          ],
+          threadId: handle.sessionId
+        });
       }
+
+      acceptedByServer = true;
+      handle.activeTurnId = startedTurn.turn.id;
+      this.finalizePendingOptimisticUserMessage(handle, startedTurn.turn.id);
+      handle.runtime.status = 'running';
+      this.emitRuntimeMeta(handle);
+      await this.refreshHandleFromServer(handle);
+      if (this.terminalVisibilityTarget.visible && this.terminalVisibilityTarget.sessionId === handle.sessionId) {
+        try {
+          await this.ensureTerminalSession(handle);
+        } catch (error) {
+          this.log('warn', 'failed to attach codex terminal after dispatch', {
+            conversationKey: handle.threadKey,
+            cwd: handle.cwd,
+            error: errorMessage(error, 'Failed to attach Codex terminal'),
+            sessionId: handle.sessionId
+          });
+        }
+      }
+    } catch (error) {
+      if (!acceptedByServer) {
+        this.rollbackPendingOptimisticUserMessage(handle);
+      }
+      if (handle.activeClientMessageId === normalizedClientMessageId) {
+        handle.activeClientMessageId = null;
+      }
+      if (handle.runtime.status === 'starting') {
+        handle.runtime.status = 'idle';
+        this.emitRuntimeMeta(handle);
+      }
+      throw error;
     }
   }
 
@@ -1374,6 +1469,9 @@ export class CodexAppServerManager {
 
     handle.sessionId = null;
     handle.activeTurnId = null;
+    handle.activeClientMessageId = null;
+    handle.localUserTurnIds.clear();
+    handle.pendingOptimisticUserMessage = null;
     handle.initialized = false;
     handle.lastActivityAt = Date.now();
     handle.runtime = this.createFreshState(handle.threadKey, null);
@@ -1715,8 +1813,11 @@ export class CodexAppServerManager {
       sessionId: selection.sessionId,
       runtime: this.createFreshState(selection.conversationKey, selection.sessionId),
       activeTurnId: null,
+      activeClientMessageId: null,
       initialized: false,
-      lastActivityAt: Date.now()
+      lastActivityAt: Date.now(),
+      localUserTurnIds: new Set<string>(),
+      pendingOptimisticUserMessage: null
     };
   }
 
@@ -1781,6 +1882,57 @@ export class CodexAppServerManager {
       recentMessageIds: handle.runtime.messages.map((message) => message.id),
       hasOlderMessages: handle.runtime.hasOlderMessages
     });
+  }
+
+  private insertPendingOptimisticUserMessage(handle: CodexAppServerHandle, text: string): void {
+    const sequence = nextSyntheticSequence(handle.runtime.allMessages);
+    const message = createUserTextMessage(
+      `codex:user:local:${handle.threadKey}:${handle.activeClientMessageId ?? sequence}`,
+      text,
+      new Date().toISOString(),
+      sequence
+    );
+    handle.pendingOptimisticUserMessage = message;
+    handle.runtime.allMessages = mergeMessages(handle.runtime.allMessages, [message]);
+    this.recomputeVisibleMessages(handle);
+    this.emitCurrentMessagesUpsert(handle);
+  }
+
+  private finalizePendingOptimisticUserMessage(handle: CodexAppServerHandle, turnId: string | null): void {
+    const pending = handle.pendingOptimisticUserMessage;
+    if (!pending || !turnId || pending.meta?.turnId === turnId) {
+      return;
+    }
+
+    handle.localUserTurnIds.add(turnId);
+    const nextPending: ChatMessage = {
+      ...pending,
+      id: `codex:user:turn:${turnId}`,
+      blocks: createTextBlock(`codex:user:turn:${turnId}`, getUserMessageText(pending)),
+      meta: {
+        ...pending.meta,
+        turnId
+      }
+    };
+    handle.pendingOptimisticUserMessage = nextPending;
+    handle.runtime.allMessages = mergeMessages(
+      handle.runtime.allMessages.filter((message) => message.id !== pending.id),
+      [nextPending]
+    );
+    this.recomputeVisibleMessages(handle);
+    this.emitCurrentMessagesUpsert(handle);
+  }
+
+  private rollbackPendingOptimisticUserMessage(handle: CodexAppServerHandle): void {
+    const pending = handle.pendingOptimisticUserMessage;
+    if (!pending) {
+      return;
+    }
+
+    handle.pendingOptimisticUserMessage = null;
+    handle.runtime.allMessages = handle.runtime.allMessages.filter((message) => message.id !== pending.id);
+    this.recomputeVisibleMessages(handle);
+    this.emitCurrentMessagesUpsert(handle);
   }
 
   private recomputeVisibleMessages(handle: CodexAppServerHandle): void {
@@ -1875,6 +2027,10 @@ export class CodexAppServerManager {
           if (handle.activeTurnId === turn.id) {
             handle.activeTurnId = null;
           }
+          if (handle.localUserTurnIds.has(turn.id)) {
+            handle.activeClientMessageId = null;
+            handle.pendingOptimisticUserMessage = null;
+          }
           if (turn.status === 'failed') {
             handle.runtime.status = 'error';
             handle.runtime.lastError = turn.error?.message?.trim() ?? 'Codex turn failed';
@@ -1905,6 +2061,7 @@ export class CodexAppServerManager {
             rawItem: params.item,
             sequence: nextSyntheticSequence(handle.runtime.allMessages),
             status: notification.method === 'item/started' ? 'streaming' : 'complete',
+            suppressUserMessage: handle.localUserTurnIds.has(params.turnId),
             turnId: params.turnId
           });
           handle.runtime.allMessages = mergeMessages(handle.runtime.allMessages, upserts);
@@ -2003,19 +2160,20 @@ export class CodexAppServerManager {
       });
       return;
     }
-    const nextState = materializeThreadState(response.thread, this.options.snapshotMessagesMax);
+    const nextState = materializeThreadState(response.thread, this.options.snapshotMessagesMax, handle.localUserTurnIds);
     const runningTurnId = nextState.activeTurnId ?? handle.activeTurnId;
     const nextAllMessages =
       nextState.status === 'running'
         ? reconcileRunningTurnMessages(previousAllMessages, nextState.allMessages, runningTurnId)
         : nextState.allMessages;
-    const nextHasOlderMessages = nextAllMessages.length > this.options.snapshotMessagesMax;
+    const mergedAllMessages = mergeOwnedLocalUserMessages(previousAllMessages, nextAllMessages, handle.localUserTurnIds);
+    const nextHasOlderMessages = mergedAllMessages.length > this.options.snapshotMessagesMax;
     const nextMessages = nextHasOlderMessages
-      ? nextAllMessages.slice(-this.options.snapshotMessagesMax)
-      : nextAllMessages;
+      ? mergedAllMessages.slice(-this.options.snapshotMessagesMax)
+      : mergedAllMessages;
 
     handle.activeTurnId = nextState.activeTurnId;
-    handle.runtime.allMessages = nextAllMessages;
+    handle.runtime.allMessages = mergedAllMessages;
     handle.runtime.messages = nextMessages;
     handle.runtime.hasOlderMessages = nextHasOlderMessages;
     handle.runtime.status = nextState.status;
@@ -2023,7 +2181,7 @@ export class CodexAppServerManager {
     handle.runtime.sessionId = handle.sessionId;
     handle.initialized = true;
 
-    const allMessagesChanged = !messagesEqual(previousAllMessages, nextAllMessages);
+    const allMessagesChanged = !messagesEqual(previousAllMessages, mergedAllMessages);
     const messagesChanged = !messagesEqual(previousMessages, nextMessages);
     const hasOlderChanged = previousHasOlderMessages !== nextHasOlderMessages;
     const statusChanged = previousStatus !== nextState.status;

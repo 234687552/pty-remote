@@ -25,6 +25,11 @@ interface MobileFloatingControlsProps {
   onTerminalInput: (input: string) => void;
 }
 
+const MOBILE_FLOATING_CONTROLS_OFFSET_STORAGE_KEY = 'pty-remote.mobile-floating-controls.offset-y';
+const MOBILE_FLOATING_CONTROLS_MIN_OFFSET_PX = -220;
+const MOBILE_FLOATING_CONTROLS_MAX_OFFSET_PX = 24;
+const MOBILE_FLOATING_CONTROLS_DRAG_THRESHOLD_PX = 6;
+
 function ExpandControlsIcon({ expanded }: { expanded: boolean }) {
   return (
     <svg
@@ -239,7 +244,16 @@ export function MobileFloatingControls({
   onTerminalInput
 }: MobileFloatingControlsProps) {
   const [openPanel, setOpenPanel] = useState<'none' | 'actions' | 'keyboard'>('none');
+  const [floatingOffsetY, setFloatingOffsetY] = useState(0);
+  const [dragging, setDragging] = useState(false);
   const controlsRef = useRef<HTMLDivElement | null>(null);
+  const dragStateRef = useRef<{
+    dragging: boolean;
+    pointerId: number;
+    startOffsetY: number;
+    startY: number;
+  } | null>(null);
+  const suppressToggleClickRef = useRef(false);
   const targetPane: WorkspacePane = mobilePane === 'chat' ? 'terminal' : 'chat';
   const isTerminalPane = mobilePane === 'terminal';
   const canJumpUp = jumpControls?.canJumpUp ?? false;
@@ -270,6 +284,24 @@ export function MobileFloatingControls({
       setOpenPanel('none');
     }
   }, [mobileSidebarOpen]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const savedOffset = Number(window.localStorage.getItem(MOBILE_FLOATING_CONTROLS_OFFSET_STORAGE_KEY) ?? '0');
+    if (Number.isFinite(savedOffset)) {
+      setFloatingOffsetY(clampFloatingOffsetY(savedOffset));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    window.localStorage.setItem(MOBILE_FLOATING_CONTROLS_OFFSET_STORAGE_KEY, String(floatingOffsetY));
+  }, [floatingOffsetY]);
 
   useEffect(() => {
     if (!isTerminalPane && openPanel === 'keyboard') {
@@ -313,8 +345,70 @@ export function MobileFloatingControls({
     setOpenPanel((current) => (current === 'keyboard' ? 'none' : 'keyboard'));
   }
 
+  function clampFloatingOffsetY(offset: number): number {
+    return Math.max(MOBILE_FLOATING_CONTROLS_MIN_OFFSET_PX, Math.min(MOBILE_FLOATING_CONTROLS_MAX_OFFSET_PX, Math.round(offset)));
+  }
+
+  function handleDragStart(event: React.PointerEvent<HTMLButtonElement>): void {
+    dragStateRef.current = {
+      dragging: false,
+      pointerId: event.pointerId,
+      startOffsetY: floatingOffsetY,
+      startY: event.clientY
+    };
+    suppressToggleClickRef.current = false;
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  function handleDragMove(event: React.PointerEvent<HTMLButtonElement>): void {
+    const current = dragStateRef.current;
+    if (!current || current.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaY = event.clientY - current.startY;
+    if (!current.dragging && Math.abs(deltaY) < MOBILE_FLOATING_CONTROLS_DRAG_THRESHOLD_PX) {
+      return;
+    }
+
+    if (!current.dragging) {
+      current.dragging = true;
+      setDragging(true);
+    }
+
+    setFloatingOffsetY(clampFloatingOffsetY(current.startOffsetY + deltaY));
+    event.preventDefault();
+  }
+
+  function finishDrag(event: React.PointerEvent<HTMLButtonElement>): void {
+    const current = dragStateRef.current;
+    if (!current || current.pointerId !== event.pointerId) {
+      return;
+    }
+
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    suppressToggleClickRef.current = current.dragging;
+    dragStateRef.current = null;
+    if (dragging) {
+      setDragging(false);
+      event.preventDefault();
+    }
+  }
+
   return (
-    <div ref={controlsRef} className="relative flex w-full items-center justify-center lg:hidden">
+    <div
+      ref={controlsRef}
+      className={[
+        'relative flex w-full items-center justify-center lg:hidden',
+        dragging ? '' : 'transition-transform duration-200 ease-out'
+      ].join(' ')}
+      style={{
+        transform: `translateY(${floatingOffsetY}px)`
+      }}
+    >
       {actionsExpanded ? (
         <div className="absolute bottom-full left-1/2 z-30 mb-0.5 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-1 overflow-x-auto px-1 py-0.5">
           <div
@@ -383,7 +477,17 @@ export function MobileFloatingControls({
         <div className="absolute top-0 left-1/2 flex -translate-x-1/2 items-center">
           <button
             type="button"
-            onClick={handleExpandedToggle}
+            onClick={() => {
+              if (suppressToggleClickRef.current) {
+                suppressToggleClickRef.current = false;
+                return;
+              }
+              handleExpandedToggle();
+            }}
+            onPointerDown={handleDragStart}
+            onPointerMove={handleDragMove}
+            onPointerUp={finishDrag}
+            onPointerCancel={finishDrag}
             className={[
               'flex h-6 w-10 items-center justify-center text-zinc-700 transition',
               actionsExpanded

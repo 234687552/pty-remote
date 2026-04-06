@@ -10,7 +10,6 @@ interface AppHeaderProps {
   onDesktopWorkspaceBrowserToggle: () => void;
   onSidebarToggle: () => void;
   sidebarCollapsed: boolean;
-  summary: string[];
 }
 
 function providerBadgeClass(providerId: ProviderId): string {
@@ -61,8 +60,7 @@ export function AppHeader({
   onDesktopTerminalToggle,
   onDesktopWorkspaceBrowserToggle,
   onSidebarToggle,
-  sidebarCollapsed,
-  summary
+  sidebarCollapsed
 }: AppHeaderProps) {
   return (
     <header className="sticky top-0 z-20 -mb-3 h-0 pointer-events-none lg:static lg:mb-0 lg:h-auto lg:pointer-events-auto">
@@ -117,9 +115,11 @@ export function AppHeader({
             </button>
           </div>
 
-          <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-sm text-zinc-600 [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+          <div className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
             <div className="flex items-center gap-3">
-              <span className="text-base font-semibold text-zinc-900">pty-remote</span>
+              <div className="flex min-w-0 items-center gap-3">
+                <div className="min-w-0 text-base font-semibold text-zinc-900">pty-remote</div>
+              </div>
               <span
                 className={[
                   'inline-flex items-center rounded-md border px-1.5 py-0.5 text-[10px] font-medium',
@@ -128,12 +128,6 @@ export function AppHeader({
               >
                 {activeProviderId ? PROVIDER_LABELS[activeProviderId] : '未选择 Provider'}
               </span>
-              {summary.map((item) => (
-                <span key={item} className="flex items-center gap-3">
-                  <span className="text-zinc-300">/</span>
-                  <span>{item}</span>
-                </span>
-              ))}
             </div>
           </div>
         </div>

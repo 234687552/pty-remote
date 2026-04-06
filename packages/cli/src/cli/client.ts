@@ -363,9 +363,9 @@ function requireTargetProviderId(envelope: CliCommandEnvelope): ProviderId {
 async function handleSocketCommand(envelope: CliCommandEnvelope): Promise<CliCommandResult> {
   try {
     if (envelope.name === 'send-message') {
-      const content = (envelope.payload as { content: string }).content;
-      await getRuntime(requireTargetProviderId(envelope)).dispatchMessage(content);
-      attachmentManager.markReferencedPathsAsSent(content);
+      const payload = envelope.payload as { clientMessageId: string; content: string };
+      await getRuntime(requireTargetProviderId(envelope)).dispatchMessage(payload.content, payload.clientMessageId);
+      attachmentManager.markReferencedPathsAsSent(payload.content);
       return { ok: true, payload: null };
     }
 

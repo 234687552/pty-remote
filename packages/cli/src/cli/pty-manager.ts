@@ -304,7 +304,7 @@ export class PtyManager {
     };
   }
 
-  async dispatchMessage(content: string): Promise<void> {
+  async dispatchMessage(content: string, _clientMessageId?: string): Promise<void> {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       throw new Error('Message cannot be empty');

@@ -38,8 +38,8 @@ export function createClaudeProviderRuntime(
     cleanupProject(cwd: string) {
       return manager.cleanupProject(cwd);
     },
-    dispatchMessage(content: string) {
-      return manager.dispatchMessage(content);
+    dispatchMessage(content: string, clientMessageId: string) {
+      return manager.dispatchMessage(content, clientMessageId);
     },
     getRegistrationPayload() {
       return manager.getRegistrationPayload();

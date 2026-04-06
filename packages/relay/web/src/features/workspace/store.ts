@@ -26,6 +26,7 @@ interface WorkspaceState {
   projectConversationsByKey: Record<string, ProjectConversationEntry[]>;
   projectsRefreshing: boolean;
   prompt: string;
+  runtimeMessagesSeq: number;
   sentAttachmentBindingsByConversationId: Record<string, SentAttachmentBinding[]>;
   snapshot: RuntimeSnapshot;
   workspaceState: PersistedWorkspaceState;
@@ -166,7 +167,13 @@ function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPa
     messagesById.set(message.id, message);
   }
 
-  const trimmed = trimRuntimeMessages(sortChronologicalMessages([...messagesById.values()]));
+  const authoritativeMessages = payload.recentMessageIds
+    .map((messageId) => messagesById.get(messageId))
+    .filter((message): message is ChatMessage => Boolean(message));
+  const nextMessages = authoritativeMessages.length > 0 || payload.recentMessageIds.length > 0
+    ? authoritativeMessages
+    : sortChronologicalMessages([...messagesById.values()]);
+  const trimmed = trimRuntimeMessages(nextMessages);
 
   return {
     ...baseSnapshot,
@@ -245,6 +252,7 @@ function createInitialWorkspaceState(): WorkspaceState {
     projectConversationsByKey,
     projectsRefreshing: false,
     prompt: '',
+    runtimeMessagesSeq: 0,
     sentAttachmentBindingsByConversationId: {},
     snapshot: createEmptySnapshot(),
     workspaceState
@@ -316,17 +324,20 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
 
       return {
         ...state,
+        runtimeMessagesSeq: 0,
         snapshot: nextSnapshot
       };
     }
     case 'runtime/reset-for-cli-change':
       return {
         ...state,
+        runtimeMessagesSeq: 0,
         snapshot: createEmptySnapshot()
       };
     case 'runtime/reset-for-draft-thread':
       return {
         ...state,
+        runtimeMessagesSeq: 0,
         snapshot: createEmptySnapshot()
       };
     case 'runtime/message-delta-received':
@@ -335,9 +346,18 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
         snapshot: applyMessageDelta(state.snapshot, action.payload)
       };
     case 'runtime/messages-upserted': {
+      const payloadSeq = Number.isFinite(action.payload.seq) ? (action.payload.seq as number) : null;
+      const isSameConversation =
+        state.snapshot.providerId === action.payload.providerId &&
+        state.snapshot.conversationKey === action.payload.conversationKey &&
+        state.snapshot.sessionId === action.payload.sessionId;
+      if (isSameConversation && payloadSeq !== null && payloadSeq <= state.runtimeMessagesSeq) {
+        return state;
+      }
       const nextSnapshot = applyMessagesUpsert(state.snapshot, action.payload);
       return {
         ...state,
+        runtimeMessagesSeq: payloadSeq ?? state.runtimeMessagesSeq,
         snapshot: nextSnapshot
       };
     }

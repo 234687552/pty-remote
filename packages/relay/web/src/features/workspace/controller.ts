@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type React from 'react';
 
 import type {
+  HydrateConversationResultPayload,
   ListManagedPtyHandlesResultPayload,
   ListProjectSessionsResultPayload,
   ManagedPtyHandleSummary,
@@ -11,7 +12,7 @@ import type {
   UploadAttachmentResultPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ChatAttachment } from '@lzdi/pty-remote-protocol/runtime-types.ts';
-import { PROVIDER_LABELS, type CliDescriptor, type ProviderId, type RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import { DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX, PROVIDER_LABELS, type CliDescriptor, type ProviderId, type RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import type { CliSocketController } from '@/hooks/useCliSocket.ts';
 import type { TerminalBridge } from '@/hooks/useTerminalBridge.ts';
@@ -57,7 +58,7 @@ export interface WorkspaceController {
   sendCommand: CliSocketController['sendCommand'];
   setSidebarCollapsed: (collapsed: boolean) => void;
   stopMessage: () => Promise<void>;
-  submitPrompt: (event: React.FormEvent) => Promise<void>;
+  submitPrompt: (event: React.FormEvent, clientMessageId: string) => Promise<void>;
 }
 
 interface UseWorkspaceControllerParams {
@@ -595,6 +596,7 @@ export function useWorkspaceController({
     let requestToken: string | null = null;
     try {
       store.setError('');
+      store.setProjectLoadingId(conversation.id);
       const ownerCliId = conversation.ownerCliId?.trim() ?? '';
       if (!ownerCliId) {
         throw new Error('会话缺少 ownerCliId，无法定位所属 CLI');
@@ -618,30 +620,22 @@ export function useWorkspaceController({
         requestToken
       };
 
-      if (conversation.sessionId === null) {
-        store.resetRuntimeForDraftThread();
+      let hydratedSnapshot: RuntimeSnapshot | null = null;
+      if (conversation.sessionId !== null) {
+        const hydrateResult = await sendCommand(
+          'hydrate-conversation',
+          {
+            cwd: project.cwd,
+            conversationKey: conversation.conversationKey,
+            sessionId: conversation.sessionId,
+            maxMessages: DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX
+          },
+          targetCli.cliId,
+          providerId
+        );
+        const hydratePayload = hydrateResult.payload as HydrateConversationResultPayload | undefined;
+        hydratedSnapshot = hydratePayload?.snapshot ?? null;
       }
-      store.patchWorkspace((current) => ({
-        ...current,
-        activeCliId: targetCli.cliId,
-        activeProjectId: project.id,
-        activeProviderId: providerId,
-        activeConversationId: conversation.id
-      }));
-      store.setProjectConversations(project.id, providerId, (conversations) =>
-        conversations.map((entry) =>
-          entry.id === conversation.id && entry.ownerCliId !== targetCli.cliId
-            ? { ...entry, ownerCliId: targetCli.cliId }
-            : entry
-        )
-      );
-
-      store.setSnapshot({
-        ...createEmptySnapshot(),
-        providerId,
-        conversationKey: conversation.conversationKey,
-        sessionId: conversation.sessionId
-      });
 
       const result = await sendCommand(
         'select-conversation',
@@ -674,6 +668,35 @@ export function useWorkspaceController({
         return;
       }
 
+      store.patchWorkspace((current) => ({
+        ...current,
+        activeCliId: targetCli.cliId,
+        activeProjectId: project.id,
+        activeProviderId: providerId,
+        activeConversationId: conversation.id
+      }));
+      store.setProjectConversations(project.id, providerId, (conversations) =>
+        conversations.map((entry) =>
+          entry.id === conversation.id && entry.ownerCliId !== targetCli.cliId
+            ? { ...entry, ownerCliId: targetCli.cliId }
+            : entry
+        )
+      );
+
+      if (conversation.sessionId === null) {
+        store.resetRuntimeForDraftThread();
+        store.setSnapshot({
+          ...createEmptySnapshot(),
+          providerId,
+          conversationKey: conversation.conversationKey,
+          sessionId: selectPayload?.sessionId ?? conversation.sessionId
+        });
+      } else if (hydratedSnapshot) {
+        store.setSnapshot(hydratedSnapshot);
+      } else {
+        throw new Error('会话快照加载失败');
+      }
+
       store.setMobilePane('chat');
     } catch (activateError) {
       const activationState = conversationActivationRef.current;
@@ -687,6 +710,8 @@ export function useWorkspaceController({
         conversationActivationRef.current = { status: 'idle' };
       }
       store.setError(activateError instanceof Error ? activateError.message : '切换 conversation 失败');
+    } finally {
+      store.setProjectLoadingId((current) => (current === conversation.id ? null : current));
     }
   }
 
@@ -1191,8 +1216,12 @@ export function useWorkspaceController({
     store.patchWorkspace((current) => ({ ...current, sidebarCollapsed: collapsed }));
   }
 
-  async function submitPrompt(event: React.FormEvent): Promise<void> {
+  async function submitPrompt(event: React.FormEvent, clientMessageId: string): Promise<void> {
     event.preventDefault();
+    if (!clientMessageId.trim()) {
+      store.setError('消息发送标识无效');
+      return;
+    }
     if (!activeCliId || !activeProject || !activeConversation || !activeProviderId) {
       store.setError('请先在侧边栏选择一个 project / provider / conversation');
       return;
@@ -1219,9 +1248,10 @@ export function useWorkspaceController({
       return;
     }
 
+    store.setPrompt('');
     try {
       store.setError('');
-      await sendCommand('send-message', { content }, activeCliId, activeProviderId);
+      await sendCommand('send-message', { clientMessageId, content }, activeCliId, activeProviderId);
       if (readyAttachments.length > 0) {
         store.setSentAttachmentBindings(activeConversation.id, (current) => [
           ...current,
@@ -1238,9 +1268,9 @@ export function useWorkspaceController({
       store.setPendingAttachments((current) =>
         current.filter((attachment) => attachment.conversationId !== activeConversation.id)
       );
-      store.setPrompt('');
       requestMobilePaneScrollToBottom?.();
     } catch (submitError) {
+      store.setPrompt(rawText);
       store.setError(submitError instanceof Error ? submitError.message : '发送失败');
     }
   }
