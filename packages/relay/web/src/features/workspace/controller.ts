@@ -443,13 +443,6 @@ export function useWorkspaceController({
   ]);
 
   useEffect(() => {
-    if (!socketConnected || !activeCliId || !activeCliConnected) {
-      store.resetRuntimeForCliChange();
-      terminal.clearTerminal();
-    }
-  }, [activeCliConnected, activeCliId, socketConnected, store, terminal]);
-
-  useEffect(() => {
     if (!socketConnected || !activeCli?.connected || !activeProject || !activeConversation || !activeProviderId) {
       return;
     }
@@ -1272,7 +1265,18 @@ export function useWorkspaceController({
     store.setPrompt('');
     try {
       store.setError('');
-      await sendCommand('send-message', { clientMessageId, content }, activeCliId, activeProviderId);
+      await sendCommand(
+        'send-message',
+        {
+          clientMessageId,
+          content,
+          cwd: activeProject.cwd,
+          conversationKey: activeConversation.conversationKey,
+          sessionId: activeConversation.sessionId
+        },
+        activeCliId,
+        activeProviderId
+      );
       if (readyAttachments.length > 0) {
         store.setSentAttachmentBindings(activeConversation.id, (current) => [
           ...current,

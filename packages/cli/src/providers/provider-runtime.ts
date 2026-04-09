@@ -60,7 +60,7 @@ export interface ProviderRuntime {
     sessionId: string | null;
   }): Promise<void>;
   cleanupProject(cwd: string): Promise<void>;
-  dispatchMessage(content: string, clientMessageId: string): Promise<void>;
+  dispatchMessage(content: string, clientMessageId: string, selection: ProviderRuntimeSelection): Promise<void>;
   getRegistrationPayload(): ProviderRuntimeRegistration;
   hydrateConversation(selection: ProviderRuntimeSelection & { maxMessages?: number }): Promise<RuntimeSnapshot | null>;
   listSlashCommands(): Promise<string[]>;

@@ -98,26 +98,6 @@ interface MergedChatToolState {
   toolCallUiStateIndex: Map<string, ToolCallUiState>;
 }
 
-interface ActivityGroup {
-  anchorMessage?: ChatMessage;
-  createdAt: string;
-  entries: ChatMessage[];
-  id: string;
-  status: MessageStatus;
-  title: string;
-  turnId: string;
-}
-
-type ChatPaneDisplayItem =
-  | {
-      type: 'activity_group';
-      group: ActivityGroup;
-    }
-  | {
-      type: 'message';
-      message: ChatMessage;
-    };
-
 interface ChatPaneProps {
   activeProviderId: ProviderId | null;
   canSendApprovalInput?: boolean;
@@ -1397,6 +1377,7 @@ const MessageMarkdown = memo(function MessageMarkdown({
     <div
       className={[
         'markdown-body max-w-full space-y-1.5 leading-[1.5]',
+        'break-words [overflow-wrap:anywhere]',
         isInverse ? 'text-zinc-950' : isMuted ? 'text-zinc-500 italic' : 'text-zinc-800'
       ].join(' ')}
     >
@@ -1751,18 +1732,6 @@ function getMessagePlainText(message: ChatMessage): string {
     .trim();
 }
 
-function hasToolUseBlock(message: ChatMessage): boolean {
-  return message.blocks.some((block) => block.type === 'tool_use');
-}
-
-function getFirstToolUseBlock(message: ChatMessage): ToolUseChatMessageBlock | null {
-  return message.blocks.find((block): block is ToolUseChatMessageBlock => block.type === 'tool_use') ?? null;
-}
-
-function normalizeActivityTitle(value: string): string {
-  return value.replace(/\s+/g, ' ').trim();
-}
-
 function terminalFrameLineToText(line: TerminalFrameLine): string {
   return line.runs.map((run) => run.text).join('');
 }
@@ -2067,7 +2036,7 @@ function MessageShell({ message, children }: { children: React.ReactNode; messag
   const wrapperClass = message.role === 'user' ? 'flex justify-end' : 'flex justify-start';
   const shellClass =
     message.role === 'user'
-      ? 'w-fit max-w-[88%] min-w-0 rounded-2xl bg-sky-200 px-3.5 py-2.5 text-right text-sm break-words text-zinc-950 shadow-sm'
+      ? 'w-auto max-w-[88%] min-w-0 rounded-2xl bg-sky-200 px-3.5 py-2.5 text-left text-sm break-words [overflow-wrap:anywhere] text-zinc-950 shadow-sm'
       : message.status === 'error'
         ? 'w-full max-w-none rounded-2xl border border-red-200 bg-red-50 px-3.5 py-2.5 text-sm break-words text-zinc-900 shadow-sm mr-8 sm:mr-12 lg:mr-16'
         : 'w-full max-w-none py-2.5 text-left text-sm break-words text-zinc-900 mr-8 sm:mr-12 lg:mr-16';
@@ -2386,57 +2355,6 @@ function isCodexReasoningMessage(message: ChatMessage): boolean {
   return message.id.startsWith('codex:assistant_reasoning:');
 }
 
-function isCodexCommentaryMessage(message: ChatMessage): boolean {
-  return message.role === 'assistant' && message.meta?.phase === 'commentary' && Boolean(getMessagePlainText(message));
-}
-
-function isCodexFinalAnswerMessage(message: ChatMessage): boolean {
-  return message.role === 'assistant' && message.meta?.phase === 'final_answer';
-}
-
-function createActivityGroupStatus(entries: ChatMessage[]): MessageStatus {
-  if (entries.some((entry) => entry.status === 'error')) {
-    return 'error';
-  }
-  if (entries.some((entry) => entry.status === 'streaming')) {
-    return 'streaming';
-  }
-  return 'complete';
-}
-
-function createActivityGroupTitle(anchorMessage: ChatMessage | undefined, entries: ChatMessage[]): string {
-  const anchorText = anchorMessage ? normalizeActivityTitle(getMessagePlainText(anchorMessage)) : '';
-  if (anchorText) {
-    return anchorText;
-  }
-
-  const firstToolUseBlock = entries.map((entry) => getFirstToolUseBlock(entry)).find(Boolean);
-  if (firstToolUseBlock) {
-    const compactTitle = getCompactToolTitle(firstToolUseBlock.toolName, firstToolUseBlock.input);
-    const compactPreview = getCompactToolPreview(firstToolUseBlock.toolName, firstToolUseBlock.input, 88);
-    return normalizeActivityTitle(`${compactTitle}: ${compactPreview}`);
-  }
-
-  return 'Activity';
-}
-
-function createActivityGroup(
-  turnId: string,
-  sequenceIndex: number,
-  entries: ChatMessage[],
-  anchorMessage?: ChatMessage
-): ActivityGroup {
-  return {
-    anchorMessage,
-    createdAt: anchorMessage?.createdAt ?? entries[0]?.createdAt ?? new Date(0).toISOString(),
-    entries,
-    id: anchorMessage ? `activity:${anchorMessage.id}` : `activity:${entries[0]?.id ?? `${turnId}:${sequenceIndex}`}`,
-    status: createActivityGroupStatus(entries),
-    title: createActivityGroupTitle(anchorMessage, entries),
-    turnId
-  };
-}
-
 function createTransientNoticeMessage(notice: RuntimeTransientNotice, key: string): ChatMessage {
   const text = [notice.message.trim(), notice.details?.trim() ?? ''].filter(Boolean).join('\n');
   return {
@@ -2458,64 +2376,6 @@ function createTransientNoticeMessage(notice: RuntimeTransientNotice, key: strin
     status: 'error',
     createdAt: new Date(0).toISOString()
   };
-}
-
-function buildCodexDisplayItems(messages: ChatMessage[]): ChatPaneDisplayItem[] {
-  const items: ChatPaneDisplayItem[] = [];
-  const sequenceByTurnId = new Map<string, number>();
-
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-
-    if (message.role === 'user' || isCodexReasoningMessage(message) || isCodexFinalAnswerMessage(message)) {
-      items.push({ type: 'message', message });
-      continue;
-    }
-
-    const turnId = message.meta?.turnId?.trim();
-    if (!turnId) {
-      items.push({ type: 'message', message });
-      continue;
-    }
-
-    if (isCodexCommentaryMessage(message)) {
-      items.push({ type: 'message', message });
-      continue;
-    }
-
-    if (hasToolUseBlock(message)) {
-      const entries: ChatMessage[] = [message];
-      let cursor = index + 1;
-
-      while (cursor < messages.length) {
-        const nextMessage = messages[cursor];
-        const nextTurnId = nextMessage.meta?.turnId?.trim();
-        if (
-          nextMessage.role === 'user' ||
-          nextTurnId !== turnId ||
-          isCodexReasoningMessage(nextMessage) ||
-          isCodexCommentaryMessage(nextMessage) ||
-          isCodexFinalAnswerMessage(nextMessage) ||
-          !hasToolUseBlock(nextMessage)
-        ) {
-          break;
-        }
-
-        entries.push(nextMessage);
-        cursor += 1;
-      }
-
-      const sequenceIndex = (sequenceByTurnId.get(turnId) ?? 0) + 1;
-      sequenceByTurnId.set(turnId, sequenceIndex);
-      items.push({ type: 'activity_group', group: createActivityGroup(turnId, sequenceIndex, entries) });
-      index = cursor - 1;
-      continue;
-    }
-
-    items.push({ type: 'message', message });
-  }
-
-  return items;
 }
 
 function MessageContent({
@@ -2577,130 +2437,6 @@ function MessageContent({
   );
 }
 
-function ActivityGroupCard({
-  canSendApprovalInput,
-  group,
-  mergedToolState,
-  onExpandToggle,
-  onApprovalInput,
-  toolCallIndex
-}: {
-  canSendApprovalInput?: boolean;
-  group: ActivityGroup;
-  mergedToolState: MergedChatToolState;
-  onExpandToggle?: () => void;
-  onApprovalInput?: (input: string) => void;
-  toolCallIndex: Map<string, ToolCallMeta>;
-}) {
-  const hasPendingApproval = useMemo(
-    () =>
-      group.entries.some((entry) =>
-        entry.blocks.some((block) => {
-          if (block.type !== 'tool_use') {
-            return false;
-          }
-
-          const toolMeta = block.toolCallId ? toolCallIndex.get(block.toolCallId) : undefined;
-          const toolUiState = block.toolCallId ? mergedToolState.toolCallUiStateIndex.get(block.toolCallId) ?? null : null;
-          const hasResult = toolUiState?.hasResult ?? Boolean(toolMeta?.resultBlock);
-          if (hasResult) {
-            return false;
-          }
-
-          if (toolUiState?.interrupted) {
-            return false;
-          }
-
-          return Boolean(toolUiState?.terminalApproval);
-        })
-      ),
-    [group.entries, mergedToolState.toolCallUiStateIndex, toolCallIndex]
-  );
-  const shouldDefaultExpand = hasPendingApproval || group.status === 'streaming';
-  const [expanded, setExpanded] = useState(shouldDefaultExpand);
-  const countLabel = `${group.entries.length}项`;
-
-  useEffect(() => {
-    if (shouldDefaultExpand) {
-      setExpanded(true);
-      return;
-    }
-
-    if (group.status === 'complete') {
-      setExpanded(false);
-    }
-  }, [group.status, shouldDefaultExpand]);
-
-  return (
-    <section className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
-      <button
-        type="button"
-        aria-expanded={expanded}
-        disabled={hasPendingApproval}
-        className={`w-full px-3.5 py-2.5 text-left transition ${
-          hasPendingApproval ? 'cursor-default bg-amber-50/50' : `hover:bg-zinc-50/80 ${expanded ? 'bg-zinc-50/70' : ''}`
-        }`}
-        onClick={() => {
-          if (!hasPendingApproval) {
-            onExpandToggle?.();
-            setExpanded((current) => !current);
-          }
-        }}
-      >
-        <div className="flex items-start gap-2.5">
-          <div className="flex h-5 w-5 shrink-0 items-center justify-center pt-0.5">
-            <ToolStatusIcon status={group.status} />
-          </div>
-          <div className="min-w-0 flex-1 whitespace-normal break-words text-sm font-medium leading-5 text-zinc-900">
-            {group.title}
-          </div>
-          <span
-            className="mt-0.5 inline-flex shrink-0 items-center rounded-full border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[10px] font-medium tabular-nums text-zinc-500"
-          >
-            {countLabel}
-          </span>
-          {hasPendingApproval ? (
-            <span
-              className="mt-0.5 inline-flex shrink-0 items-center rounded-full border border-amber-300 bg-amber-100 px-2 py-0.5 text-[10px] font-medium tabular-nums text-amber-900"
-            >
-              审批中
-            </span>
-          ) : null}
-          <span className="mt-0.5 shrink-0 text-zinc-500">
-            {hasPendingApproval ? (
-              <svg viewBox="0 0 16 16" aria-hidden="true" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.7">
-                <path d="M4 8h8" strokeLinecap="round" />
-              </svg>
-            ) : (
-              <svg viewBox="0 0 16 16" aria-hidden="true" className={`h-4 w-4 transition ${expanded ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" strokeWidth="1.7">
-                <path d="m4.5 6.5 3.5 3 3.5-3" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            )}
-          </span>
-        </div>
-      </button>
-
-      {expanded ? (
-        <div className="border-t border-zinc-200 px-3.5 py-3">
-          <div className="divide-y divide-zinc-200">
-            {group.entries.map((entry) => (
-              <div key={entry.id} className="py-3 first:pt-0 last:pb-0">
-                <MessageContent
-                  canSendApprovalInput={canSendApprovalInput}
-                  message={entry}
-                  mergedToolState={mergedToolState}
-                  onApprovalInput={onApprovalInput}
-                  toolCallIndex={toolCallIndex}
-                />
-              </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
-    </section>
-  );
-}
-
 export function ChatPane({
   activeProviderId,
   canSendApprovalInput = false,
@@ -2736,7 +2472,6 @@ export function ChatPane({
     scrollTop: number;
     wasFollowingLatest: boolean;
   } | null>(null);
-  const suppressNextResizeFollowRef = useRef(false);
   const questionJumpPressTimeoutRef = useRef<number | null>(null);
   const questionJumpLongPressTriggeredRef = useRef(false);
   const questionMessageRefs = useRef(new Map<string, HTMLDivElement>());
@@ -2744,10 +2479,7 @@ export function ChatPane({
   const userScrollIntentUntilRef = useRef(0);
 
   const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
-  const displayItems = useMemo<ChatPaneDisplayItem[]>(
-    () => renderableMessages.map((message) => ({ type: 'message' as const, message })),
-    [renderableMessages]
-  );
+  const displayItems = renderableMessages;
   // Tool results can arrive as standalone user messages in Claude transcripts.
   // Keep them out of the main message list, but still index them so tool cards
   // reflect the actual completion/error state.
@@ -2796,9 +2528,7 @@ export function ChatPane({
     ]
   );
   const questionMessageIds = useMemo(
-    () =>
-      displayItems
-        .flatMap((item) => (item.type === 'message' && item.message.role === 'user' ? [item.message.id] : [])),
+    () => displayItems.flatMap((message) => (message.role === 'user' ? [message.id] : [])),
     [displayItems]
   );
 
@@ -2903,10 +2633,6 @@ export function ChatPane({
     });
   }
 
-  function suppressNextResizeFollow(): void {
-    suppressNextResizeFollowRef.current = true;
-  }
-
   useEffect(() => {
     const messagesElement = messagesRef.current;
     if (!messagesElement) {
@@ -2987,10 +2713,6 @@ export function ChatPane({
     }
 
     const observer = new ResizeObserver(() => {
-      if (suppressNextResizeFollowRef.current) {
-        suppressNextResizeFollowRef.current = false;
-        return;
-      }
       if (!paneVisible || !isFollowingLatest) {
         return;
       }
@@ -3260,6 +2982,11 @@ export function ChatPane({
                     }}
                   />
                 ) : null}
+                {!connected && displayItems.length > 0 ? (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    当前处于离线状态，先展示断线前的内容，重连后会自动同步最新会话。
+                  </div>
+                ) : null}
                 {runtimeRequests.map((request) => (
                   <RuntimeRequestNotice
                     key={`${request.method}:${request.requestId}`}
@@ -3278,22 +3005,7 @@ export function ChatPane({
                 ) : null}
                 {displayItems.length === 0
                   ? null
-                  : displayItems.map((item) => {
-                      if (item.type === 'activity_group') {
-                        return (
-                          <ActivityGroupCard
-                            key={item.group.id}
-                            canSendApprovalInput={canSendApprovalInput && connected}
-                            group={item.group}
-                            mergedToolState={mergedToolState}
-                            onExpandToggle={suppressNextResizeFollow}
-                            onApprovalInput={onApprovalInput}
-                            toolCallIndex={toolCallIndex}
-                          />
-                        );
-                      }
-
-                      const { message } = item;
+                  : displayItems.map((message) => {
                       return (
                         <div
                           key={message.id}

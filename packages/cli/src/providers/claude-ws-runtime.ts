@@ -807,21 +807,7 @@ export class ClaudeWsManager {
   }
 
   async activateConversation(selection: ProviderRuntimeSelection): Promise<SelectConversationResultPayload> {
-    const normalized = await this.normalizeSelection(selection);
-    let handle = this.handles.get(normalized.conversationKey);
-    if (!handle) {
-      handle = this.createHandle(normalized);
-      this.handles.set(handle.threadKey, handle);
-    } else {
-      handle.cwd = normalized.cwd;
-      handle.label = normalized.label;
-      const nextSessionId = preferIncomingSessionId(handle.sessionId, normalized.sessionId);
-      if (nextSessionId !== handle.sessionId) {
-        handle.sessionId = nextSessionId;
-        handle.runtime.sessionId = nextSessionId;
-        handle.sessionEstablished = true;
-      }
-    }
+    const handle = await this.resolveHandleForSelection(selection);
 
     if (handle.sessionId) {
       await this.hydrateHandleFromJsonl(handle, this.options.snapshotMessagesMax);
@@ -847,20 +833,7 @@ export class ClaudeWsManager {
 
   async hydrateConversation(selection: ProviderRuntimeSelection & { maxMessages?: number }): Promise<RuntimeSnapshot | null> {
     const maxMessages = selection.maxMessages;
-    const normalized = await this.normalizeSelection(selection);
-    let handle = this.handles.get(normalized.conversationKey);
-    if (!handle) {
-      handle = this.createHandle(normalized);
-      this.handles.set(handle.threadKey, handle);
-    } else {
-      handle.cwd = normalized.cwd;
-      handle.label = normalized.label;
-      if (normalized.sessionId) {
-        handle.sessionId = normalized.sessionId;
-        handle.runtime.sessionId = normalized.sessionId;
-        handle.sessionEstablished = true;
-      }
-    }
+    const handle = await this.resolveHandleForSelection(selection);
 
     if (handle.sessionId) {
       await this.hydrateHandleFromJsonl(handle, maxMessages);
@@ -871,16 +844,18 @@ export class ClaudeWsManager {
     return this.snapshotForHandle(handle, maxMessages);
   }
 
-  async dispatchMessage(content: string, _clientMessageId: string): Promise<void> {
+  async dispatchMessage(content: string, _clientMessageId: string, selection: ProviderRuntimeSelection): Promise<void> {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       throw new Error('Message cannot be empty');
     }
 
-    const handle = this.getActiveHandle();
-    if (!handle) {
-      throw new Error('No active Claude conversation selected');
+    const handle = await this.resolveHandleForSelection(selection);
+    if (handle.sessionId && !handle.initialized) {
+      await this.hydrateHandleFromJsonl(handle, this.options.snapshotMessagesMax);
     }
+    this.activeThreadKey = handle.threadKey;
+    this.currentCwd = handle.cwd;
     if (handle.runtime.status === 'running' || handle.runtime.status === 'starting') {
       throw new Error('Claude is still handling the previous message');
     }
@@ -1375,6 +1350,27 @@ export class ClaudeWsManager {
     }
 
     return null;
+  }
+
+  private async resolveHandleForSelection(selection: ProviderRuntimeSelection): Promise<ClaudeWsHandle> {
+    const normalized = await this.normalizeSelection(selection);
+    let handle = this.handles.get(normalized.conversationKey);
+    if (!handle) {
+      handle = this.createHandle(normalized);
+      this.handles.set(handle.threadKey, handle);
+      return handle;
+    }
+
+    handle.cwd = normalized.cwd;
+    handle.label = normalized.label;
+    const nextSessionId = preferIncomingSessionId(handle.sessionId, normalized.sessionId);
+    if (nextSessionId !== handle.sessionId) {
+      handle.sessionId = nextSessionId;
+      handle.runtime.sessionId = nextSessionId;
+      handle.sessionEstablished = nextSessionId !== null;
+    }
+
+    return handle;
   }
 
   private async normalizeSelection(selection: ProviderRuntimeSelection): Promise<ProviderRuntimeSelection> {

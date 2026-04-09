@@ -1375,20 +1375,7 @@ export class CodexAppServerManager {
   }
 
   async activateConversation(selection: CodexAppServerSelection): Promise<SelectConversationResultPayload> {
-    const normalized = await this.normalizeSelection(selection);
-    let handle = this.handles.get(normalized.conversationKey);
-    if (!handle) {
-      handle = this.createHandle(normalized);
-      this.handles.set(handle.threadKey, handle);
-    } else {
-      handle.cwd = normalized.cwd;
-      handle.label = normalized.label;
-      const nextSessionId = adoptSessionIdIfMissing(handle.sessionId, normalized.sessionId);
-      if (nextSessionId !== handle.sessionId) {
-        handle.sessionId = nextSessionId;
-        handle.runtime.sessionId = nextSessionId;
-      }
-    }
+    const handle = await this.resolveHandleForSelection(selection);
 
     this.activeThreadKey = handle.threadKey;
     this.currentCwd = handle.cwd;
@@ -1434,20 +1421,7 @@ export class CodexAppServerManager {
 
   async hydrateConversation(selection: CodexAppServerSelection & { maxMessages?: number }): Promise<RuntimeSnapshot | null> {
     const maxMessages = selection.maxMessages;
-    const normalized = await this.normalizeSelection(selection);
-    let handle = this.handles.get(normalized.conversationKey);
-    if (!handle) {
-      handle = this.createHandle(normalized);
-      this.handles.set(handle.threadKey, handle);
-    } else {
-      handle.cwd = normalized.cwd;
-      handle.label = normalized.label;
-      const nextSessionId = preferIncomingSessionId(handle.sessionId, normalized.sessionId);
-      if (nextSessionId !== handle.sessionId) {
-        handle.sessionId = nextSessionId;
-        handle.runtime.sessionId = nextSessionId;
-      }
-    }
+    const handle = await this.resolveHandleForSelection(selection, 'prefer-incoming');
 
     this.markHandleActive(handle);
     if (handle.sessionId && !handle.initialized) {
@@ -1459,7 +1433,7 @@ export class CodexAppServerManager {
     return this.snapshotForHandle(handle, maxMessages);
   }
 
-  async dispatchMessage(content: string, clientMessageId: string): Promise<void> {
+  async dispatchMessage(content: string, clientMessageId: string, selection: CodexAppServerSelection): Promise<void> {
     const trimmedContent = content.trim();
     if (!trimmedContent) {
       throw new Error('Message cannot be empty');
@@ -1469,10 +1443,9 @@ export class CodexAppServerManager {
       throw new Error('Client message id cannot be empty');
     }
 
-    const handle = this.getActiveHandle();
-    if (!handle) {
-      throw new Error('No active thread selected');
-    }
+    const handle = await this.resolveHandleForSelection(selection);
+    this.activeThreadKey = handle.threadKey;
+    this.currentCwd = handle.cwd;
     if (handle.activeClientMessageId === normalizedClientMessageId) {
       return;
     }
@@ -1949,6 +1922,32 @@ export class CodexAppServerManager {
     }
 
     return null;
+  }
+
+  private async resolveHandleForSelection(
+    selection: CodexAppServerSelection,
+    sessionStrategy: 'adopt-if-missing' | 'prefer-incoming' = 'adopt-if-missing'
+  ): Promise<CodexAppServerHandle> {
+    const normalized = await this.normalizeSelection(selection);
+    let handle = this.handles.get(normalized.conversationKey);
+    if (!handle) {
+      handle = this.createHandle(normalized);
+      this.handles.set(handle.threadKey, handle);
+      return handle;
+    }
+
+    handle.cwd = normalized.cwd;
+    handle.label = normalized.label;
+    const nextSessionId =
+      sessionStrategy === 'prefer-incoming'
+        ? preferIncomingSessionId(handle.sessionId, normalized.sessionId)
+        : adoptSessionIdIfMissing(handle.sessionId, normalized.sessionId);
+    if (nextSessionId !== handle.sessionId) {
+      handle.sessionId = nextSessionId;
+      handle.runtime.sessionId = nextSessionId;
+    }
+
+    return handle;
   }
 
   private createHandle(selection: CodexAppServerSelection): CodexAppServerHandle {

@@ -23,8 +23,8 @@ export function createCodexProviderRuntime(
     cleanupProject(cwd: string) {
       return manager.cleanupProject(cwd);
     },
-    dispatchMessage(content: string, clientMessageId: string) {
-      return manager.dispatchMessage(content, clientMessageId);
+    dispatchMessage(content: string, clientMessageId: string, selection: ProviderRuntimeSelection) {
+      return manager.dispatchMessage(content, clientMessageId, selection);
     },
     getRegistrationPayload() {
       return manager.getRegistrationPayload();
