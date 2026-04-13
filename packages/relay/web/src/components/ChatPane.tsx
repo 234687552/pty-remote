@@ -2459,13 +2459,14 @@ export function ChatPane({
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const pendingFollowScrollRef = useRef(false);
   const [isFollowingLatest, setIsFollowingLatest] = useState(true);
-  const [hasPendingNewContent, setHasPendingNewContent] = useState(false);
   const [dismissedTransientNoticeKey, setDismissedTransientNoticeKey] = useState<string | null>(null);
+  const [acknowledgedFeedSignature, setAcknowledgedFeedSignature] = useState('');
   const previousContentSignatureRef = useRef<string | null>(null);
   const previousLatestRenderableMessageSignatureRef = useRef<string | null>(null);
   const previousConversationScrollKeyRef = useRef<string | null>(null);
   const previousScrollToBottomRequestKeyRef = useRef(scrollToBottomRequestKey);
   const transientNoticeAnchorSignatureRef = useRef<string | null>(null);
+  const feedSignatureRef = useRef('');
   const reconnectMessagesScrollRef = useRef<{
     conversationScrollKey: string | null;
     scrollHeight: number;
@@ -2497,6 +2498,10 @@ export function ChatPane({
   const latestRenderableMessageSignature = latestRenderableMessage
     ? createMessageRenderSignature(latestRenderableMessage)
     : null;
+  const feedSignature = useMemo(
+    () => renderableMessages.map((message) => createMessageRenderSignature(message)).join('::'),
+    [renderableMessages]
+  );
   const transientNoticeKey = transientNotice ? `${transientNotice.kind}:${transientNotice.message}:${transientNotice.details ?? ''}` : null;
   const visibleTransientNotice =
     transientNoticeKey && transientNoticeKey === dismissedTransientNoticeKey ? null : transientNotice;
@@ -2531,11 +2536,15 @@ export function ChatPane({
     () => displayItems.flatMap((message) => (message.role === 'user' ? [message.id] : [])),
     [displayItems]
   );
+  feedSignatureRef.current = feedSignature;
 
   function setFollowingLatestState(next: boolean): void {
     setIsFollowingLatest((current) => (current === next ? current : next));
     if (next) {
-      setHasPendingNewContent(false);
+      setAcknowledgedFeedSignature((current) => {
+        const nextSignature = feedSignatureRef.current;
+        return current === nextSignature ? current : nextSignature;
+      });
     }
   }
 
@@ -2584,6 +2593,14 @@ export function ChatPane({
     setDismissedTransientNoticeKey(null);
     transientNoticeAnchorSignatureRef.current = null;
   }, [conversationScrollKey]);
+
+  useEffect(() => {
+    if (!isFollowingLatest) {
+      return;
+    }
+
+    setAcknowledgedFeedSignature((current) => (current === feedSignature ? current : feedSignature));
+  }, [feedSignature, isFollowingLatest]);
 
   useEffect(() => {
     if (!onMobileJumpControlsChange) {
@@ -2763,10 +2780,6 @@ export function ChatPane({
     if (hasContentChanged && ((hasNewUserMessage && paneVisible) || isFollowingLatest)) {
       scrollMessagesToBottom();
       return;
-    }
-
-    if (hasContentChanged && paneVisible) {
-      setHasPendingNewContent(true);
     }
   }, [connected, contentSignature, conversationScrollKey, isFollowingLatest, latestRenderableMessage, latestRenderableMessageSignature, paneVisible, renderableMessages.length]);
 
@@ -3038,7 +3051,7 @@ export function ChatPane({
               </div>
             </div>
 
-            {!isFollowingLatest && hasPendingNewContent ? (
+            {!isFollowingLatest && feedSignature !== acknowledgedFeedSignature ? (
               <div className="pointer-events-none absolute inset-x-0 bottom-14 z-10 flex justify-center px-4 md:bottom-16">
                 <button
                   type="button"

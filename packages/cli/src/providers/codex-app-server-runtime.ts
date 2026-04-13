@@ -393,6 +393,50 @@ function shouldPreferPreviousRunningMessage(previous: ChatMessage, next: ChatMes
   return false;
 }
 
+function hasToolUseBlock(message: ChatMessage): boolean {
+  return message.blocks.some((block) => block.type === 'tool_use');
+}
+
+function shouldPreferPreviousSnapshotMessage(previous: ChatMessage, next: ChatMessage): boolean {
+  if (shouldPreferPreviousRunningMessage(previous, next)) {
+    return true;
+  }
+
+  if (!hasToolUseBlock(previous)) {
+    return false;
+  }
+
+  if (!hasToolUseBlock(next)) {
+    return true;
+  }
+
+  return false;
+}
+
+function reconcileSnapshotMessages(previousMessages: ChatMessage[], nextMessages: ChatMessage[]): ChatMessage[] {
+  if (previousMessages.length === 0) {
+    return nextMessages;
+  }
+
+  const reconciledMessages = new Map(nextMessages.map((message) => [message.id, message]));
+
+  for (const previousMessage of previousMessages) {
+    const nextMessage = reconciledMessages.get(previousMessage.id);
+    if (!nextMessage) {
+      if (hasToolUseBlock(previousMessage)) {
+        reconciledMessages.set(previousMessage.id, previousMessage);
+      }
+      continue;
+    }
+
+    if (shouldPreferPreviousSnapshotMessage(previousMessage, nextMessage)) {
+      reconciledMessages.set(previousMessage.id, previousMessage);
+    }
+  }
+
+  return sortMessagesChronologically([...reconciledMessages.values()]);
+}
+
 function reconcileRunningTurnMessages(
   previousMessages: ChatMessage[],
   nextMessages: ChatMessage[],
@@ -2327,10 +2371,11 @@ export class CodexAppServerManager {
     }
     const nextState = materializeThreadState(response.thread, this.options.snapshotMessagesMax, handle.localUserTurnIds);
     const runningTurnId = nextState.activeTurnId ?? handle.activeTurnId;
+    const snapshotReconciledMessages = reconcileSnapshotMessages(previousAllMessages, nextState.allMessages);
     const nextAllMessages =
       nextState.status === 'running'
-        ? reconcileRunningTurnMessages(previousAllMessages, nextState.allMessages, runningTurnId)
-        : nextState.allMessages;
+        ? reconcileRunningTurnMessages(previousAllMessages, snapshotReconciledMessages, runningTurnId)
+        : snapshotReconciledMessages;
     const baseMergedAllMessages = mergeOwnedLocalUserMessages(previousAllMessages, nextAllMessages, handle.localUserTurnIds);
     const resolvedLastError =
       nextState.status === 'error'

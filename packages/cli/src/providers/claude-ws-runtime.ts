@@ -19,6 +19,7 @@ import type {
   ChatMessage,
   ChatMessageBlock,
   ProviderId,
+  RuntimeTransientNotice,
   RuntimeSnapshot,
   RuntimeStatus,
   TextChatMessageBlock,
@@ -58,6 +59,7 @@ export interface ClaudeWsRuntimeOptions {
 
 const CLAUDE_WARM_HANDLE_TTL_MS = 5 * 60 * 60 * 1000;
 const CLAUDE_MAX_WARM_HANDLES = 5;
+const CLAUDE_RETRYING_NOTICE_PATTERN = /\b(retry(?:ing)?|reconnect(?:ing)?|connection\s+lost|network\s+error|temporar(?:y|ily)\s+unavailable)\b/i;
 
 interface ClaudeTextContentBlock {
   type?: string;
@@ -113,6 +115,12 @@ interface ClaudeSystemEnvelope {
   subtype?: string;
   model?: string;
   permissionMode?: string;
+  attempt?: number;
+  max_retries?: number;
+  retry_delay_ms?: number;
+  error_status?: number;
+  error?: string;
+  session_id?: string;
 }
 
 interface ClaudeStreamEventMessageStart {
@@ -231,6 +239,18 @@ function resolveStreamingTextBlockIndex(
 
 function cloneValue<T>(value: T): T {
   return structuredClone(value);
+}
+
+function sameTransientNotice(
+  left: RuntimeTransientNotice | null | undefined,
+  right: RuntimeTransientNotice | null | undefined
+): boolean {
+  return (
+    left?.kind === right?.kind &&
+    left?.message === right?.message &&
+    left?.details === right?.details &&
+    left?.retrying === right?.retrying
+  );
 }
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -791,6 +811,60 @@ export class ClaudeWsManager {
     logger(`[pty-remote][claude-ws] ${message}`);
   }
 
+  private setRetryingNotice(handle: ClaudeWsHandle, message: string, details?: string | null): void {
+    const nextNotice: RuntimeTransientNotice = {
+      kind: 'warning',
+      message: message.trim() || 'Claude is retrying...',
+      details: details?.trim() || null,
+      retrying: true
+    };
+    if (sameTransientNotice(handle.runtime.transientNotice, nextNotice)) {
+      this.log('info', 'claude retrying notice unchanged', {
+        conversationKey: handle.threadKey,
+        message: nextNotice.message,
+        sessionId: handle.sessionId
+      });
+      return;
+    }
+    handle.runtime.transientNotice = nextNotice;
+    this.log('warn', 'claude retrying notice set', {
+      conversationKey: handle.threadKey,
+      details: nextNotice.details,
+      message: nextNotice.message,
+      sessionId: handle.sessionId
+    });
+    this.emitRuntimeMeta(handle);
+  }
+
+  private clearTransientNotice(handle: ClaudeWsHandle, reason = 'unknown'): void {
+    if (!handle.runtime.transientNotice) {
+      return;
+    }
+    this.log('info', 'claude transient notice cleared', {
+      conversationKey: handle.threadKey,
+      previousNotice: handle.runtime.transientNotice,
+      reason,
+      sessionId: handle.sessionId
+    });
+    handle.runtime.transientNotice = null;
+    this.emitRuntimeMeta(handle);
+  }
+
+  private maybeCaptureRetryingNotice(handle: ClaudeWsHandle, text: string): void {
+    const trimmed = text.trim();
+    const matched = Boolean(trimmed) && CLAUDE_RETRYING_NOTICE_PATTERN.test(trimmed);
+    this.log(matched ? 'warn' : 'info', 'claude stderr inspected for retrying state', {
+      chunk: trimmed,
+      conversationKey: handle.threadKey,
+      matched,
+      sessionId: handle.sessionId
+    });
+    if (!matched) {
+      return;
+    }
+    this.setRetryingNotice(handle, trimmed);
+  }
+
   getRegistrationPayload(): {
     cwd: string;
     sessionId: string | null;
@@ -880,7 +954,7 @@ export class ClaudeWsManager {
     await this.ensureHandleConnection(handle);
     this.queueMessage(handle, {
       type: 'user',
-      session_id: '',
+      session_id: handle.sessionId,
       message: {
         role: 'user',
         content: trimmedContent
@@ -1634,13 +1708,11 @@ export class ClaudeWsManager {
 
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string) => {
-      if (this.options.verbose) {
-        this.log('info', 'claude ws stdout', {
-          chunk: chunk.trim(),
-          conversationKey: handle.threadKey,
-          sessionId: handle.sessionId
-        });
-      }
+      this.log(this.options.verbose ? 'info' : 'warn', 'claude ws stdout', {
+        chunk: chunk.trim(),
+        conversationKey: handle.threadKey,
+        sessionId: handle.sessionId
+      });
     });
 
     child.stderr?.setEncoding('utf8');
@@ -1649,6 +1721,7 @@ export class ClaudeWsManager {
       if (!trimmed) {
         return;
       }
+      this.maybeCaptureRetryingNotice(handle, trimmed);
       this.log(this.options.verbose ? 'info' : 'warn', 'claude ws stderr', {
         chunk: trimmed,
         conversationKey: handle.threadKey,
@@ -1919,10 +1992,20 @@ export class ClaudeWsManager {
       if (!line.trim()) {
         continue;
       }
+      this.log('info', 'claude ws raw message line', {
+        conversationKey: handle.threadKey,
+        line,
+        sessionId: handle.sessionId
+      });
       let message: unknown;
       try {
         message = JSON.parse(line);
       } catch {
+        this.log('warn', 'failed to parse claude ws line as json', {
+          conversationKey: handle.threadKey,
+          line,
+          sessionId: handle.sessionId
+        });
         continue;
       }
       await this.handleIncomingMessage(handle, message);
@@ -1934,7 +2017,16 @@ export class ClaudeWsManager {
       return;
     }
 
+    if (handle.runtime.transientNotice) {
+      this.clearTransientNotice(handle, 'incoming-ws-message');
+    }
+
     const envelope = message as { type?: string };
+    this.log('info', 'claude ws message received', {
+      conversationKey: handle.threadKey,
+      sessionId: handle.sessionId,
+      type: envelope.type ?? 'unknown'
+    });
     switch (envelope.type) {
       case 'assistant':
         this.handleAssistantMessage(handle, message as ClaudeAssistantEnvelope);
@@ -2126,6 +2218,34 @@ export class ClaudeWsManager {
   }
 
   private handleSystemMessage(handle: ClaudeWsHandle, message: ClaudeSystemEnvelope): void {
+    if (message.subtype === 'api_retry') {
+      const attempt = typeof message.attempt === 'number' ? message.attempt : null;
+      const maxRetries = typeof message.max_retries === 'number' ? message.max_retries : null;
+      const retryDelayMs = typeof message.retry_delay_ms === 'number' ? message.retry_delay_ms : null;
+      const errorStatus = typeof message.error_status === 'number' ? message.error_status : null;
+      const errorCode = typeof message.error === 'string' ? message.error.trim() : '';
+      const details = [
+        attempt !== null ? `attempt ${attempt}${maxRetries !== null ? `/${maxRetries}` : ''}` : null,
+        errorStatus !== null ? `status ${errorStatus}` : null,
+        errorCode || null,
+        retryDelayMs !== null ? `retry in ${Math.max(1, Math.round(retryDelayMs))}ms` : null
+      ]
+        .filter(Boolean)
+        .join(' · ');
+
+      this.log('warn', 'claude api retry system event', {
+        attempt,
+        conversationKey: handle.threadKey,
+        error: errorCode || null,
+        errorStatus,
+        maxRetries,
+        retryDelayMs,
+        sessionId: handle.sessionId
+      });
+      this.setRetryingNotice(handle, 'Claude API retrying...', details || null);
+      return;
+    }
+
     if (message.subtype === 'init' && handle.runtime.status === 'starting') {
       handle.runtime.status = 'idle';
       this.emitRuntimeMeta(handle);

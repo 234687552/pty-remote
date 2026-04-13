@@ -2,7 +2,12 @@ import { useEffect, useReducer } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 
 import type { MessageDeltaPayload, MessagesUpsertPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
-import { DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX, type ChatMessage, type RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import {
+  DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX,
+  type ChatMessage,
+  type ChatMessageBlock,
+  type RuntimeSnapshot
+} from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import { createEmptySnapshot, sortChronologicalMessages } from '@/lib/runtime.ts';
 import {
@@ -143,6 +148,79 @@ function trimRuntimeMessages(messages: ChatMessage[]): { messages: ChatMessage[]
   };
 }
 
+function blocksEqual(left: ChatMessageBlock, right: ChatMessageBlock): boolean {
+  if (left.id !== right.id || left.type !== right.type) {
+    return false;
+  }
+
+  if (left.type === 'text' && right.type === 'text') {
+    return left.text === right.text;
+  }
+
+  if (left.type === 'tool_use' && right.type === 'tool_use') {
+    return left.toolCallId === right.toolCallId && left.toolName === right.toolName && left.input === right.input;
+  }
+
+  if (left.type === 'tool_result' && right.type === 'tool_result') {
+    return left.toolCallId === right.toolCallId && left.content === right.content && left.isError === right.isError;
+  }
+
+  return false;
+}
+
+function mergeMessageBlocks(existingBlocks: ChatMessageBlock[], nextBlocks: ChatMessageBlock[]): ChatMessageBlock[] {
+  if (existingBlocks.length === 0) {
+    return nextBlocks;
+  }
+
+  if (nextBlocks.length === 0) {
+    return existingBlocks;
+  }
+
+  const mergedBlocks = existingBlocks.slice();
+  const blockIndexById = new Map(mergedBlocks.map((block, index) => [block.id, index]));
+
+  for (const block of nextBlocks) {
+    const existingIndex = blockIndexById.get(block.id);
+    if (existingIndex === undefined) {
+      blockIndexById.set(block.id, mergedBlocks.length);
+      mergedBlocks.push(block);
+      continue;
+    }
+
+    if (!blocksEqual(mergedBlocks[existingIndex]!, block)) {
+      mergedBlocks[existingIndex] = block;
+    }
+  }
+
+  return mergedBlocks;
+}
+
+function deriveMessageStatus(message: ChatMessage): ChatMessage['status'] {
+  if (message.status === 'error') {
+    return 'error';
+  }
+
+  return message.blocks.some((block) => block.type === 'tool_result' && block.isError) ? 'error' : message.status;
+}
+
+function mergeMessageUpsert(existing: ChatMessage | undefined, next: ChatMessage): ChatMessage {
+  const mergedBlocks = mergeMessageBlocks(existing?.blocks ?? [], next.blocks);
+  const mergedMessage: ChatMessage = {
+    ...next,
+    attachments: next.attachments ?? existing?.attachments,
+    blocks: mergedBlocks,
+    createdAt: existing?.createdAt ?? next.createdAt,
+    meta: next.meta ?? existing?.meta,
+    sequence: existing?.sequence ?? next.sequence
+  };
+
+  return {
+    ...mergedMessage,
+    status: deriveMessageStatus(mergedMessage)
+  };
+}
+
 function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPayload): RuntimeSnapshot {
   const isSameConversation =
     current.providerId === payload.providerId && current.conversationKey === payload.conversationKey;
@@ -164,7 +242,7 @@ function applyMessagesUpsert(current: RuntimeSnapshot, payload: MessagesUpsertPa
 
   const messagesById = new Map(baseSnapshot.messages.map((message) => [message.id, message]));
   for (const message of payload.upserts) {
-    messagesById.set(message.id, message);
+    messagesById.set(message.id, mergeMessageUpsert(messagesById.get(message.id), message));
   }
 
   const authoritativeMessages = payload.recentMessageIds
