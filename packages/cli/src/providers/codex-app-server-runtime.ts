@@ -1246,8 +1246,6 @@ export class CodexAppServerManager {
 
   private pollTimer: NodeJS.Timeout | null = null;
 
-  private readonly refreshTimers = new Map<string, NodeJS.Timeout>();
-
   private readonly gcTimer: NodeJS.Timeout;
 
   private readonly pendingRuntimeRequests = new Map<string | number, PendingRuntimeRequest>();
@@ -1644,7 +1642,6 @@ export class CodexAppServerManager {
       if (this.activeThreadKey === threadKey) {
         this.activeThreadKey = null;
       }
-      this.clearScheduledRefresh(handle);
       if (this.terminalSession?.conversationKey === threadKey) {
         this.stopTerminalSession('cleanup-project');
       }
@@ -1664,7 +1661,6 @@ export class CodexAppServerManager {
       if (this.activeThreadKey === threadKey) {
         this.activeThreadKey = null;
       }
-      this.clearScheduledRefresh(handle);
       if (this.terminalSession?.conversationKey === threadKey) {
         this.stopTerminalSession('cleanup-conversation');
       }
@@ -1678,10 +1674,6 @@ export class CodexAppServerManager {
       this.pollTimer = null;
     }
     clearInterval(this.gcTimer);
-    for (const timer of this.refreshTimers.values()) {
-      clearTimeout(timer);
-    }
-    this.refreshTimers.clear();
     this.stopTerminalSession('shutdown');
     await this.client.close();
   }
@@ -1810,10 +1802,7 @@ export class CodexAppServerManager {
       return;
     }
 
-    const shouldRefreshFromSnapshot = this.applyOptimisticNotification(handle, notification);
-    if (shouldRefreshFromSnapshot) {
-      this.scheduleRefresh(handle, 0);
-    }
+    this.applyOptimisticNotification(handle, notification);
   }
 
   private handleServerRequest(request: CodexAppServerServerRequest): void {
@@ -2133,16 +2122,6 @@ export class CodexAppServerManager {
       : handle.runtime.allMessages;
   }
 
-  private clearScheduledRefresh(handle: CodexAppServerHandle): void {
-    const timer = this.refreshTimers.get(handle.threadKey);
-    if (!timer) {
-      return;
-    }
-
-    clearTimeout(timer);
-    this.refreshTimers.delete(handle.threadKey);
-  }
-
   private hasPendingRequestForHandle(handle: CodexAppServerHandle): boolean {
     if (!handle.sessionId) {
       return false;
@@ -2181,12 +2160,11 @@ export class CodexAppServerManager {
       .sort((left, right) => left.lastActivityAt - right.lastActivityAt);
 
     for (const handle of handlesToDelete) {
-      this.clearScheduledRefresh(handle);
       this.handles.delete(handle.threadKey);
     }
   }
 
-  private applyOptimisticNotification(handle: CodexAppServerHandle, notification: CodexAppServerNotification): boolean {
+  private applyOptimisticNotification(handle: CodexAppServerHandle, notification: CodexAppServerNotification): void {
     this.markHandleActive(handle);
     handle.initialized = true;
     const deltaPayload = createMessageDeltaPayload(handle, notification);
@@ -2304,7 +2282,6 @@ export class CodexAppServerManager {
       this.emitRuntimeMeta(handle);
     }
 
-    return notification.method === 'turn/completed';
   }
 
   private clearLastError(handle: CodexAppServerHandle): void {
@@ -2342,7 +2319,6 @@ export class CodexAppServerManager {
     if (!handle.sessionId) {
       return;
     }
-    this.clearScheduledRefresh(handle);
     this.markHandleActive(handle);
 
     const previousAllMessages = handle.runtime.allMessages;
@@ -2426,29 +2402,5 @@ export class CodexAppServerManager {
     if (statusChanged || lastErrorChanged || previousSessionId !== handle.sessionId) {
       this.emitRuntimeMeta(handle);
     }
-  }
-
-  private scheduleRefresh(handle: CodexAppServerHandle, delayMs: number): void {
-    this.clearScheduledRefresh(handle);
-    if (!handle.sessionId) {
-      return;
-    }
-
-    const timer = setTimeout(() => {
-      this.refreshTimers.delete(handle.threadKey);
-      const currentHandle = this.handles.get(handle.threadKey) ?? null;
-      if (!currentHandle?.sessionId) {
-        return;
-      }
-
-      void this.refreshHandleFromServer(currentHandle)
-        .catch((error) => {
-          currentHandle.runtime.lastError = errorMessage(error, 'Failed to refresh Codex app-server thread');
-          currentHandle.runtime.status = 'error';
-          this.emitRuntimeMeta(currentHandle);
-        });
-    }, Math.max(0, delayMs));
-    timer.unref();
-    this.refreshTimers.set(handle.threadKey, timer);
   }
 }
