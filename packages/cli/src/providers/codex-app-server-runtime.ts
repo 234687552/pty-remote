@@ -12,7 +12,15 @@ import type {
   SelectConversationResultPayload
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { TerminalFramePatchPayload } from '@lzdi/pty-remote-protocol/protocol.ts';
-import type { ChatMessage, ChatMessageBlock, MessageStatus, RuntimeSnapshot, RuntimeStatus, RuntimeTransientNotice } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import {
+  compareChatMessageChronology,
+  type ChatMessage,
+  type ChatMessageBlock,
+  type MessageStatus,
+  type RuntimeSnapshot,
+  type RuntimeStatus,
+  type RuntimeTransientNotice
+} from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 import { CodexAppServerClient } from './codex-app-server-client.ts';
 import {
@@ -98,6 +106,8 @@ interface CodexAppServerHandle {
   lastActivityAt: number;
   localUserTurnIds: Set<string>;
   pendingOptimisticUserMessage: ChatMessage | null;
+  refreshInFlight: Promise<void> | null;
+  refreshQueued: boolean;
 }
 
 interface PendingRuntimeRequest {
@@ -322,14 +332,25 @@ function createToolMessage(params: {
 }
 
 function sortMessagesChronologically(messages: ChatMessage[]): ChatMessage[] {
-  return messages
-    .slice()
-    .sort(
-      (left, right) =>
-        (left.sequence ?? 0) - (right.sequence ?? 0) ||
-        left.createdAt.localeCompare(right.createdAt) ||
-        left.id.localeCompare(right.id)
-    );
+  return messages.slice().sort(compareChatMessageChronology);
+}
+
+function getMessageTurnId(message: Pick<ChatMessage, 'meta'>): string | null {
+  const turnId = message.meta?.turnId?.trim();
+  return turnId ? turnId : null;
+}
+
+function mergeMessageUpdate(existing: ChatMessage | undefined, next: ChatMessage): ChatMessage {
+  if (!existing) {
+    return next;
+  }
+
+  return {
+    ...next,
+    createdAt: existing.createdAt ?? next.createdAt,
+    meta: next.meta ?? existing.meta,
+    sequence: existing.sequence ?? next.sequence
+  };
 }
 
 function mergeMessages(baseMessages: ChatMessage[], upserts: ChatMessage[]): ChatMessage[] {
@@ -341,7 +362,7 @@ function mergeMessages(baseMessages: ChatMessage[], upserts: ChatMessage[]): Cha
   for (const upsert of upserts) {
     const existingIndex = nextMessages.findIndex((message) => message.id === upsert.id);
     if (existingIndex >= 0) {
-      nextMessages[existingIndex] = upsert;
+      nextMessages[existingIndex] = mergeMessageUpdate(nextMessages[existingIndex], upsert);
       continue;
     }
     nextMessages.push(upsert);
@@ -434,7 +455,28 @@ function reconcileSnapshotMessages(previousMessages: ChatMessage[], nextMessages
     }
   }
 
-  return sortMessagesChronologically([...reconciledMessages.values()]);
+  const previousMessageIds = new Set(previousMessages.map((message) => message.id));
+  const observedTurnIds = new Set(
+    previousMessages.map((message) => getMessageTurnId(message)).filter((turnId): turnId is string => Boolean(turnId))
+  );
+  let nextSequence = nextSyntheticSequence([...previousMessages, ...reconciledMessages.values()]);
+  const appendedSequenceByTurn = new Map<string, number>();
+  const adjustedMessages = sortMessagesChronologically([...reconciledMessages.values()]).map((message) => {
+    const turnId = getMessageTurnId(message);
+    if (!turnId || previousMessageIds.has(message.id) || !observedTurnIds.has(turnId)) {
+      return message;
+    }
+
+    const assignedSequence = appendedSequenceByTurn.get(turnId) ?? nextSequence;
+    appendedSequenceByTurn.set(turnId, assignedSequence + 1);
+    nextSequence = Math.max(nextSequence, assignedSequence + 1);
+    return {
+      ...message,
+      sequence: assignedSequence
+    };
+  });
+
+  return sortMessagesChronologically(adjustedMessages);
 }
 
 function reconcileRunningTurnMessages(
@@ -1559,7 +1601,6 @@ export class CodexAppServerManager {
       this.finalizePendingOptimisticUserMessage(handle, startedTurn.turn.id);
       handle.runtime.status = 'running';
       this.emitRuntimeMeta(handle);
-      await this.refreshHandleFromServer(handle);
       if (this.terminalVisibilityTarget.visible && this.terminalVisibilityTarget.sessionId === handle.sessionId) {
         try {
           await this.ensureTerminalSession(handle);
@@ -1803,6 +1844,14 @@ export class CodexAppServerManager {
     }
 
     this.applyOptimisticNotification(handle, notification);
+
+    if (
+      notification.method === 'turn/completed' ||
+      notification.method === 'item/started' ||
+      notification.method === 'item/completed'
+    ) {
+      this.queueHandleRefreshFromServer(handle, notification.method);
+    }
   }
 
   private handleServerRequest(request: CodexAppServerServerRequest): void {
@@ -1995,7 +2044,9 @@ export class CodexAppServerManager {
       initialized: false,
       lastActivityAt: Date.now(),
       localUserTurnIds: new Set<string>(),
-      pendingOptimisticUserMessage: null
+      pendingOptimisticUserMessage: null,
+      refreshInFlight: null,
+      refreshQueued: false
     };
   }
 
@@ -2293,6 +2344,37 @@ export class CodexAppServerManager {
       handle.runtime.status = 'idle';
     }
     this.emitRuntimeMeta(handle);
+  }
+
+  private queueHandleRefreshFromServer(handle: CodexAppServerHandle, source: string): void {
+    if (!handle.sessionId) {
+      return;
+    }
+
+    if (handle.refreshInFlight) {
+      handle.refreshQueued = true;
+      return;
+    }
+
+    const run = this.refreshHandleFromServer(handle)
+      .catch((error) => {
+        this.log('warn', 'failed to refresh codex thread from authoritative snapshot', {
+          conversationKey: handle.threadKey,
+          cwd: handle.cwd,
+          error: errorMessage(error, `Failed to refresh Codex thread after ${source}`),
+          sessionId: handle.sessionId,
+          source
+        });
+      })
+      .finally(() => {
+        handle.refreshInFlight = null;
+        if (handle.refreshQueued) {
+          handle.refreshQueued = false;
+          this.queueHandleRefreshFromServer(handle, `${source}:queued`);
+        }
+      });
+
+    handle.refreshInFlight = run;
   }
 
   private async normalizeSelection(selection: CodexAppServerSelection): Promise<CodexAppServerSelection> {

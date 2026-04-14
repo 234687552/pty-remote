@@ -2352,7 +2352,45 @@ function ToolUseBlockContent({
 }
 
 function isCodexReasoningMessage(message: ChatMessage): boolean {
-  return message.id.startsWith('codex:assistant_reasoning:');
+  return message.meta?.phase === 'reasoning' || message.id.startsWith('codex:assistant_reasoning:');
+}
+
+function getMessageTextContent(message: ChatMessage): string {
+  return message.blocks
+    .filter((block): block is Extract<ChatMessageBlock, { type: 'text' }> => block.type === 'text')
+    .map((block) => block.text)
+    .join('\n')
+    .trim();
+}
+
+function normalizeMessageTextForDedup(text: string): string {
+  return text.replace(/\s+/gu, ' ').trim();
+}
+
+function shouldSuppressDuplicateReasoningMessage(message: ChatMessage, allMessages: ChatMessage[]): boolean {
+  if (!isCodexReasoningMessage(message)) {
+    return false;
+  }
+
+  const turnId = message.meta?.turnId ?? null;
+  if (!turnId) {
+    return false;
+  }
+
+  const normalizedText = normalizeMessageTextForDedup(getMessageTextContent(message));
+  if (!normalizedText) {
+    return false;
+  }
+
+  return allMessages.some((candidate) => {
+    if (candidate.id === message.id) {
+      return false;
+    }
+    if (candidate.role !== 'assistant' || candidate.meta?.turnId !== turnId || isCodexReasoningMessage(candidate)) {
+      return false;
+    }
+    return normalizeMessageTextForDedup(getMessageTextContent(candidate)) === normalizedText;
+  });
 }
 
 function createTransientNoticeMessage(notice: RuntimeTransientNotice, key: string): ChatMessage {
@@ -2479,7 +2517,13 @@ export function ChatPane({
   const touchScrollStartYRef = useRef<number | null>(null);
   const userScrollIntentUntilRef = useRef(0);
 
-  const renderableMessages = useMemo(() => messages.filter((message) => hasRenderableMessageContent(message)), [messages]);
+  const renderableMessages = useMemo(
+    () =>
+      messages.filter(
+        (message) => hasRenderableMessageContent(message) && !shouldSuppressDuplicateReasoningMessage(message, messages)
+      ),
+    [messages]
+  );
   const displayItems = renderableMessages;
   // Tool results can arrive as standalone user messages in Claude transcripts.
   // Keep them out of the main message list, but still index them so tool cards

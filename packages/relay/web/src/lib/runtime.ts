@@ -1,4 +1,9 @@
-import type { ChatMessage, RuntimeSnapshot, RuntimeStatus } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import {
+  compareChatMessageChronology,
+  type ChatMessage,
+  type RuntimeSnapshot,
+  type RuntimeStatus
+} from '@lzdi/pty-remote-protocol/runtime-types.ts';
 
 export const MOBILE_TERMINAL_BREAKPOINT = 768;
 
@@ -48,29 +53,8 @@ export function getUtf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).length;
 }
 
-function getChronologyTimestamp(message: ChatMessage): number {
-  const parsed = new Date(message.createdAt).getTime();
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function getChronologySequence(message: ChatMessage): number {
-  return Number.isFinite(message.sequence) ? (message.sequence as number) : Number.MAX_SAFE_INTEGER;
-}
-
 export function compareMessageChronology(left: ChatMessage, right: ChatMessage): number {
-  const leftTimestamp = getChronologyTimestamp(left);
-  const rightTimestamp = getChronologyTimestamp(right);
-  if (leftTimestamp !== rightTimestamp) {
-    return leftTimestamp - rightTimestamp;
-  }
-
-  const leftSequence = getChronologySequence(left);
-  const rightSequence = getChronologySequence(right);
-  if (leftSequence !== rightSequence) {
-    return leftSequence - rightSequence;
-  }
-
-  return left.id.localeCompare(right.id);
+  return compareChatMessageChronology(left, right);
 }
 
 export function sortChronologicalMessages(messages: ChatMessage[]): ChatMessage[] {

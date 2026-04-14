@@ -71,6 +71,70 @@ export interface ChatMessage {
   sequence?: number;
 }
 
+function getChatMessageSequenceValue(message: Pick<ChatMessage, 'sequence'>): number | null {
+  return Number.isFinite(message.sequence) ? (message.sequence as number) : null;
+}
+
+function getChatMessageTimestampValue(message: Pick<ChatMessage, 'createdAt'>): number | null {
+  const parsed = new Date(message.createdAt).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getChatMessageTurnId(message: Pick<ChatMessage, 'meta'>): string | null {
+  const turnId = message.meta?.turnId?.trim();
+  return turnId ? turnId : null;
+}
+
+function compareChatMessageTurnCausality(left: ChatMessage, right: ChatMessage): number {
+  const leftTurnId = getChatMessageTurnId(left);
+  const rightTurnId = getChatMessageTurnId(right);
+  if (!leftTurnId || leftTurnId !== rightTurnId || left.role === right.role) {
+    return 0;
+  }
+
+  // A turn's user prompt is the cause of every assistant/tool item in that turn.
+  return left.role === 'user' ? -1 : 1;
+}
+
+export function compareChatMessageChronology(left: ChatMessage, right: ChatMessage): number {
+  const turnCausalityOrder = compareChatMessageTurnCausality(left, right);
+  if (turnCausalityOrder !== 0) {
+    return turnCausalityOrder;
+  }
+
+  const leftSequence = getChatMessageSequenceValue(left);
+  const rightSequence = getChatMessageSequenceValue(right);
+  if (leftSequence !== null && rightSequence !== null && leftSequence !== rightSequence) {
+    return leftSequence - rightSequence;
+  }
+
+  const leftTimestamp = getChatMessageTimestampValue(left);
+  const rightTimestamp = getChatMessageTimestampValue(right);
+  if (leftTimestamp !== null && rightTimestamp !== null && leftTimestamp !== rightTimestamp) {
+    return leftTimestamp - rightTimestamp;
+  }
+
+  if (leftSequence !== null && rightSequence === null) {
+    return -1;
+  }
+  if (leftSequence === null && rightSequence !== null) {
+    return 1;
+  }
+
+  if (leftTimestamp !== null && rightTimestamp === null) {
+    return -1;
+  }
+  if (leftTimestamp === null && rightTimestamp !== null) {
+    return 1;
+  }
+
+  return left.id.localeCompare(right.id);
+}
+
+export function sortChatMessagesChronologically(messages: ChatMessage[]): ChatMessage[] {
+  return messages.slice().sort(compareChatMessageChronology);
+}
+
 export interface RuntimeSnapshot {
   providerId: ProviderId | null;
   conversationKey: string | null;

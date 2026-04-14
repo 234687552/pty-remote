@@ -39,7 +39,7 @@ import type {
   RuntimeSnapshot,
   RuntimeStatus
 } from '@lzdi/pty-remote-protocol/runtime-types.ts';
-import { DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX } from '@lzdi/pty-remote-protocol/runtime-types.ts';
+import { compareChatMessageChronology, DEFAULT_RUNTIME_MESSAGES_WINDOW_MAX } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import {
   applyTerminalFramePatch,
   cloneTerminalFrameSnapshot,
@@ -304,21 +304,7 @@ function getCachedSnapshotPayload(cacheKey: string): RuntimeSnapshotPayload | nu
 }
 
 function compareMessageChronology(left: ChatMessage, right: ChatMessage): number {
-  const leftTimestamp = new Date(left.createdAt).getTime();
-  const rightTimestamp = new Date(right.createdAt).getTime();
-  const normalizedLeftTimestamp = Number.isFinite(leftTimestamp) ? leftTimestamp : 0;
-  const normalizedRightTimestamp = Number.isFinite(rightTimestamp) ? rightTimestamp : 0;
-  if (normalizedLeftTimestamp !== normalizedRightTimestamp) {
-    return normalizedLeftTimestamp - normalizedRightTimestamp;
-  }
-
-  const leftSequence = Number.isFinite(left.sequence) ? (left.sequence as number) : Number.MAX_SAFE_INTEGER;
-  const rightSequence = Number.isFinite(right.sequence) ? (right.sequence as number) : Number.MAX_SAFE_INTEGER;
-  if (leftSequence !== rightSequence) {
-    return leftSequence - rightSequence;
-  }
-
-  return left.id.localeCompare(right.id);
+  return compareChatMessageChronology(left, right);
 }
 
 function trimRuntimeMessages(messages: ChatMessage[]): { messages: ChatMessage[]; hasOlderMessages: boolean } {
@@ -396,9 +382,9 @@ function mergeMessageUpsert(existing: ChatMessage | undefined, next: ChatMessage
     ...next,
     attachments: next.attachments ?? existing?.attachments,
     blocks: mergedBlocks,
-    createdAt: existing?.createdAt ?? next.createdAt,
+    createdAt: next.createdAt || existing?.createdAt || next.createdAt,
     meta: next.meta ?? existing?.meta,
-    sequence: existing?.sequence ?? next.sequence
+    sequence: Number.isFinite(next.sequence) ? next.sequence : existing?.sequence
   };
 
   return {
