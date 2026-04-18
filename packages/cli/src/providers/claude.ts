@@ -1,31 +1,18 @@
 import type { ProjectSessionSummary } from '@lzdi/pty-remote-protocol/protocol.ts';
 
 import { listClaudeRecentSessions } from './claude-history.ts';
-import { ClaudeWsManager } from './claude-ws-runtime.ts';
+import { ClaudeWsManager, type ClaudeWsRuntimeOptions } from './claude-ws-runtime.ts';
 import { listProviderSlashCommands } from './slash-commands.ts';
-import type { PtyManagerOptions } from '../cli/pty-manager.ts';
 
 import type { ProviderRuntime, ProviderRuntimeCallbacks, ProviderRuntimeSelection } from './provider-runtime.ts';
 
+export type ClaudeProviderRuntimeOptions = ClaudeWsRuntimeOptions;
+
 export function createClaudeProviderRuntime(
-  options: PtyManagerOptions,
+  options: ClaudeProviderRuntimeOptions,
   callbacks: ProviderRuntimeCallbacks
 ): ProviderRuntime {
-  const manager = new ClaudeWsManager(
-    {
-      defaultCwd: options.defaultCwd,
-      permissionMode: options.permissionMode,
-      snapshotMessagesMax: options.snapshotMessagesMax,
-      claudeReadyTimeoutMs: options.claudeReadyTimeoutMs,
-      gcIntervalMs: options.gcIntervalMs,
-      terminalCols: options.terminalCols,
-      terminalRows: options.terminalRows,
-      terminalFrameScrollback: options.terminalFrameScrollback,
-      model: process.env.CLAUDE_MODEL?.trim() || null,
-      verbose: process.env.CLAUDE_WS_VERBOSE === '1'
-    },
-    callbacks
-  );
+  const manager = new ClaudeWsManager(options, callbacks);
 
   return {
     providerId: 'claude',

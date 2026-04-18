@@ -89,7 +89,7 @@ async function main() {
   await run('git', ['pull', '--ff-only', 'origin', 'main']);
   await run('node', ['scripts/prepare-release.mjs', version]);
   await run('npm', ['install', '--package-lock-only']);
-  await run('git', ['add', 'package-lock.json', 'packages/cli/package.json', 'packages/relay/package.json', 'packages/shared/package.json']);
+  await run('git', ['add', 'package-lock.json', 'packages/cli/package.json', 'packages/relay/package.json', 'packages/protocol/package.json']);
   await run('git', ['commit', '-m', `Release ${releaseTag}`]);
   await run('git', ['tag', '-a', releaseTag, '-m', `Release ${releaseTag}`]);
   await run('git', ['push', '--atomic', 'origin', 'HEAD:main', `refs/tags/${releaseTag}`]);

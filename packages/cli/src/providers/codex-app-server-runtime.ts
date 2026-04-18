@@ -693,7 +693,6 @@ function applyNotificationDelta(messages: ChatMessage[], notification: CodexAppS
         phase: 'plan',
         turnId
       });
-    case 'item/reasoning/summaryTextDelta':
     case 'item/reasoning/textDelta':
       return upsertStreamingTextMessage(messages, {
         delta,
@@ -734,7 +733,6 @@ function createMessageDeltaPayload(
   switch (notification.method) {
     case 'item/agentMessage/delta':
     case 'item/plan/delta':
-    case 'item/reasoning/summaryTextDelta':
     case 'item/reasoning/textDelta':
     case 'item/fileChange/outputDelta':
       return {

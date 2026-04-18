@@ -14,11 +14,11 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["packages/relay/web/src/*"],
-      "@lzdi/pty-remote-protocol/*": ["packages/shared/src/*"]
+      "@lzdi/pty-remote-protocol/*": ["packages/protocol/src/*"]
     }
   },
   "include": [
-    "packages/shared/src/**/*.ts",
+    "packages/protocol/src/**/*.ts",
     "packages/relay/src/**/*.ts",
     "packages/relay/web/**/*.ts",
     "packages/relay/web/**/*.tsx",

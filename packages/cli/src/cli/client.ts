@@ -33,13 +33,12 @@ import type {
 } from '@lzdi/pty-remote-protocol/protocol.ts';
 import type { ProviderId, RuntimeSnapshot } from '@lzdi/pty-remote-protocol/runtime-types.ts';
 import { AttachmentManager } from '../attachments/manager.ts';
-import { createClaudeProviderRuntime } from '../providers/claude.ts';
+import { createClaudeProviderRuntime, type ClaudeProviderRuntimeOptions } from '../providers/claude.ts';
 import { createCodexProviderRuntime, type CodexProviderRuntimeOptions } from '../providers/codex.ts';
 import type { ProviderRuntime } from '../providers/provider-runtime.ts';
 import { normalizeProcessShellEnv } from '../providers/shell-exec.ts';
 import { getGitDiffFile, listDirectory, listGitStatusFiles, readProjectFile, resolveProjectRoot } from './file-browser.ts';
 import { loadCliConfig } from './cli-config.ts';
-import type { PtyManagerOptions } from './pty-manager.ts';
 
 const DEFAULT_ROOT_DIR = path.resolve(process.cwd());
 const CONFIG_DIR = path.join(os.homedir(), '.pty-remote');
@@ -85,22 +84,15 @@ const CLI_ID = resolveCliId();
 const CLI_LABEL = resolveCliLabel();
 const RUNTIME_BACKEND_NAME = resolveRuntimeBackendName();
 const TERMINAL_FRAME_SCROLLBACK = getConfigInt('TERMINAL_FRAME_SCROLLBACK', 500, 50);
-const RECENT_OUTPUT_MAX_CHARS = getConfigInt('RECENT_OUTPUT_MAX_CHARS', 12_000, 1);
 const CLAUDE_READY_TIMEOUT_MS = getConfigInt('CLAUDE_READY_TIMEOUT_MS', 20_000, 0);
 const CODEX_APP_SERVER_READY_TIMEOUT_MS = getConfigInt('CODEX_APP_SERVER_READY_TIMEOUT_MS', 15_000, 0);
 const CODEX_APP_SERVER_POLL_IDLE_MS = getConfigInt('CODEX_APP_SERVER_POLL_IDLE_MS', 2_500, 100);
 const CODEX_APP_SERVER_POLL_RUNNING_MS = getConfigInt('CODEX_APP_SERVER_POLL_RUNNING_MS', 700, 100);
 const CODEX_APP_SERVER_PORT = getConfigInt('CODEX_APP_SERVER_PORT', 0, 0);
-const PROMPT_SUBMIT_DELAY_MS = getConfigInt('PROMPT_SUBMIT_DELAY_MS', 120, 0);
-const JSONL_REFRESH_DEBOUNCE_MS = getConfigInt('JSONL_REFRESH_DEBOUNCE_MS', 120, 0);
 const SNAPSHOT_MESSAGES_MAX = getConfigInt('SNAPSHOT_MESSAGES_MAX', 40, 1);
 const TERMINAL_COLS = getConfigInt('TERMINAL_COLS', 120, 1);
 const TERMINAL_ROWS = getConfigInt('TERMINAL_ROWS', 32, 1);
-const DETACHED_PTY_TTL_MS = getConfigInt('DETACHED_PTY_TTL_MS', 12 * 60 * 60 * 1000, 0);
-const DETACHED_DRAFT_TTL_MS = getConfigInt('DETACHED_DRAFT_TTL_MS', 5 * 60 * 1000, 0);
-const DETACHED_JSONL_MISSING_TTL_MS = getConfigInt('DETACHED_JSONL_MISSING_TTL_MS', 2 * 60 * 1000, 0);
 const GC_INTERVAL_MS = getConfigInt('GC_INTERVAL_MS', 5 * 60 * 1000, 0);
-const MAX_DETACHED_PTYS = getConfigInt('PTY_REMOTE_MAX_DETACHED_PTYS', 5, 1);
 const CLAUDE_PERMISSION_MODE = sanitizePermissionMode(getConfigValue('CLAUDE_PERMISSION_MODE'));
 
 let socketClient: Socket | null = null;
@@ -108,22 +100,17 @@ let shuttingDown = false;
 let shutdownPromise: Promise<void> | null = null;
 const attachmentManager = new AttachmentManager();
 
-const runtimeOptions: PtyManagerOptions = {
+const claudeRuntimeOptions: ClaudeProviderRuntimeOptions = {
   permissionMode: CLAUDE_PERMISSION_MODE,
   defaultCwd: DEFAULT_ROOT_DIR,
   terminalCols: TERMINAL_COLS,
   terminalRows: TERMINAL_ROWS,
   terminalFrameScrollback: TERMINAL_FRAME_SCROLLBACK,
-  recentOutputMaxChars: RECENT_OUTPUT_MAX_CHARS,
   claudeReadyTimeoutMs: CLAUDE_READY_TIMEOUT_MS,
-  promptSubmitDelayMs: PROMPT_SUBMIT_DELAY_MS,
-  jsonlRefreshDebounceMs: JSONL_REFRESH_DEBOUNCE_MS,
   snapshotMessagesMax: SNAPSHOT_MESSAGES_MAX,
   gcIntervalMs: GC_INTERVAL_MS,
-  detachedDraftTtlMs: DETACHED_DRAFT_TTL_MS,
-  detachedJsonlMissingTtlMs: DETACHED_JSONL_MISSING_TTL_MS,
-  detachedPtyTtlMs: DETACHED_PTY_TTL_MS,
-  maxDetachedPtys: MAX_DETACHED_PTYS
+  model: process.env.CLAUDE_MODEL?.trim() || null,
+  verbose: process.env.CLAUDE_WS_VERBOSE === '1'
 };
 
 const codexRuntimeOptions: CodexProviderRuntimeOptions = {
@@ -231,7 +218,7 @@ function createRuntime(providerId: ProviderId): ProviderRuntime {
     return createCodexProviderRuntime(codexRuntimeOptions, callbacks);
   }
 
-  return createClaudeProviderRuntime(runtimeOptions, callbacks);
+  return createClaudeProviderRuntime(claudeRuntimeOptions, callbacks);
 }
 
 const runtimes = Object.fromEntries(

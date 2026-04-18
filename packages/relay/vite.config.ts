@@ -13,7 +13,7 @@ export default defineConfig(() => {
     resolve: {
       alias: {
         '@': path.resolve(__dirname, 'web/src'),
-        '@lzdi/pty-remote-protocol': path.resolve(__dirname, '../shared/src')
+        '@lzdi/pty-remote-protocol': path.resolve(__dirname, '../protocol/src')
       }
     },
     build: {
